@@ -699,7 +699,8 @@ function pickTacticalBotMove(state: any, botSeat: 1 | 2) {
   let best = validMoves[0];
   let bestScore = -Infinity;
   for (const m of validMoves) {
-    const targetWin = botSeat === 1 ? 8 : 72;`r`n    if (m.to === targetWin) {
+    const targetWin = botSeat === 1 ? 8 : 72;
+    if (m.to === targetWin) {
       return { from: m.from, to: m.to };
     }
     let score = m.isAttack ? 145 : 0;
@@ -1492,7 +1493,6 @@ async function startServer() {
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message });
     }
-  });
   });
 
   app.post('/api/match/consensus-dispute', (req: Request, res: Response) => {

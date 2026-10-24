@@ -28,4 +28,154 @@ interface Board9x9Props {
   showLegend?: boolean;
 }
 
-export const Board9x9: React.FC<Board9x9Props> = ({\n  state,\n  selectedCell = null,\n  validMoves = [],\n  onCellClick,\n  interactive = false,\n  size = 'normal',\n  showCoordinates = size !== 'mini',\n  showLegend = size !== 'mini',\n}) => {\n  const isMini = size === 'mini';\n  const blockedSet = new Set(state?.rules?.blockedCells || []);\n  const moveMap = new Map<number, ValidMove>();\n  for (const m of validMoves) {\n    moveMap.set(m.to, m);\n  }\n\n  const maxBoardClass =\n    size === 'large'\n      ? 'max-w-[540px]'\n      : size === 'normal'\n      ? 'max-w-[460px]'\n      : 'max-w-[230px]';\n\n  return (\n    <div className={`w-full ${maxBoardClass} mx-auto select-none space-y-3`}>\n      <div>\n        {showCoordinates && (\n          <div className=\"grid grid-cols-9 pl-6 pr-1 mb-1 text-[11px] font-mono text-[var(--text-muted)] text-center\">\n            {COLS.map((col) => (\n              <span key={col}>{col}</span>\n            ))}\n          </div>\n        )}\n\n        <div className=\"flex items-stretch\">\n          {showCoordinates && (\n            <div className=\"flex flex-col justify-around pr-2 text-[11px] font-mono text-[var(--text-muted)] tabular-nums\">\n              {Array.from({ length: 9 }, (_, r) => (\n                <span key={r}>{9 - r}</span>\n              ))}\n            </div>\n          )}\n\n          <div\n            role=\"grid\"\n            aria-label=\"Bàn cờ chiến thuật 9x9 OTTv2\"\n            className=\"flex-1 aspect-square grid grid-cols-9 grid-rows-9 rounded-2xl overflow-hidden border-2 border-[#382954] bg-[#161024] shadow-xl\"\n          >\n            {Array.from({ length: 81 }, (_, idx) => {\n              const r = Math.floor(idx / 9);\n              const c = idx % 9;\n              const isLight = (r + c) % 2 === 0;\n              const isBlocked = blockedSet.has(idx);\n              const isA1 = idx === SPECIAL_A1_INDEX;\n              const isI9 = idx === SPECIAL_I9_INDEX;\n              const piece = state ? state.board[idx] : 0;\n              const player: 1 | 2 | null = piece ? (piece <= 3 ? 1 : 2) : null;\n              const pType = piece ? PIECE_TYPE_NAMES[piece] : null;\n              const isSelected = selectedCell === idx;\n              const moveCandidate = moveMap.get(idx);\n              const isLastFrom = state?.lastMove?.from === idx;\n              const isLastTo = state?.lastMove?.to === idx;\n\n              const cellBgClass = isBlocked\n                ? 'bg-[var(--cell-blocked)]'\n                : isA1\n                ? 'bg-[var(--shrine-a1)]'\n                : isI9\n                ? 'bg-[var(--shrine-i9)]'\n                : isLight\n                ? 'bg-[var(--cell-light)]'\n                : 'bg-[var(--cell-dark)]';\n\n              const vietName = piece ? PIECE_VIET_NAMES[piece] : '';\n              const counterHint = pType ? PIECE_COUNTER_HINTS[pType] : '';\n              const coord = `${COLS[c]}${9 - r}`;\n\n              return (\n                <button\n                  key={idx}\n                  type=\"button\"\n                  disabled={isBlocked || (!interactive && !onCellClick)}\n                  onClick={() => onCellClick?.(idx)}\n                  title={\n                    isBlocked\n                      ? `Ô ${coord} · Bia đá vật cản (Không thể đi vào)`\n                      : isA1\n                      ? `Ô a1 · Căn cứ Phe 1 (Phe 2 chiếm ô này sẽ thắng ngay!)`\n                      : isI9\n                      ? `Ô i9 · Căn cứ Phe 2 (Phe 1 chiếm ô này sẽ thắng ngay!)`\n                      : piece && player\n                      ? `${coord} · Phe ${player} (${player === 1 ? 'Cam' : 'Tím'}) · ${vietName} — ${counterHint}`\n                      : coord\n                  }\n                  className={`relative flex items-center justify-center ${cellBgClass} border-[0.5px] border-white/[0.05] transition-transform duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] ${\n                    interactive && !isBlocked\n                      ? 'cursor-pointer hover:brightness-120'\n                      : 'cursor-default'\n                  } ${isSelected ? 'ring-2 ring-inset ring-amber-300 bg-amber-500/20 z-10' : ''} ${\n                    isLastFrom || isLastTo\n                      ? 'after:absolute after:inset-0 after:bg-amber-400/14 after:pointer-events-none'\n                      : ''\n                  }`}\n                >\n                  {/* Blocked Sprint Obstacle Cell */}\n                  {isBlocked && <HalloweenObstacleGlyph isMini={isMini} />}\n\n                  {/* Special Win Shrines (a1 & i9) when unoccupied */}\n                  {!piece && !isBlocked && (isA1 || isI9) && (\n                    <HalloweenShrineGlyph kind={isA1 ? 'a1' : 'i9'} isMini={isMini} />\n                  )}\n\n                  {/* Valid Move Dot (Empty Target) */}\n                  {moveCandidate && !moveCandidate.isAttack && !piece && (\n                    <span className=\"w-3 h-3 rounded-full bg-emerald-400/90 shadow-sm pointer-events-none\" />\n                  )}\n\n                  {/* Attackable Target Ring */}\n                  {moveCandidate?.isAttack && piece > 0 && (\n                    <span className=\"absolute inset-1 rounded-full ring-2 ring-red-400 bg-red-500/25 pointer-events-none\" />\n                  )}\n\n                  {/* 2D Chibi Mascot Silhouette Piece (Bí Ngô, Bé Ma, Dơi) */}\n                  {piece > 0 && pType && player && (\n                    <div\n                      className={`relative z-10 flex items-center justify-center transition-transform duration-150 ${\n                        isMini ? 'w-[86%] h-[86%]' : 'w-[84%] h-[84%]' \n                      } ${isSelected ? 'scale-110' : ''} ${\n                        isLastTo && state?.lastMove?.isAttack ? 'animate-capture' : ''\n                      }`}\n                    >\n                      <HalloweenMascotPiece\n                        type={pType}\n                        team={player}\n                        className=\"w-full h-full drop-shadow-[0_2px_3px_rgba(0,0,0,0.55)]\"\n                      />\n                    </div>\n                  )}\n                </button>\n              );\n            })}\n          </div>\n        </div>\n      </div>\n\n      {/* Clear Visual Annotation / Legend below board */}\n      {showLegend && <MascotRulesLegend compact={size === 'normal'} />}\n    </div>\n  );\n};\n
+export const Board9x9: React.FC<Board9x9Props> = ({
+  state,
+  selectedCell = null,
+  validMoves = [],
+  onCellClick,
+  interactive = false,
+  size = 'normal',
+  showCoordinates = size !== 'mini',
+  showLegend = size !== 'mini',
+}) => {
+  const isMini = size === 'mini';
+  const blockedSet = new Set(state?.rules?.blockedCells || []);
+  const moveMap = new Map<number, ValidMove>();
+  for (const m of validMoves) {
+    moveMap.set(m.to, m);
+  }
+
+  const maxBoardClass =
+    size === 'large'
+      ? 'max-w-[540px]'
+      : size === 'normal'
+      ? 'max-w-[460px]'
+      : 'max-w-[230px]';
+
+  return (
+    <div className={`w-full ${maxBoardClass} mx-auto select-none space-y-3`}>
+      <div>
+        {showCoordinates && (
+          <div className="grid grid-cols-9 pl-6 pr-1 mb-1 text-[11px] font-mono text-[var(--text-muted)] text-center">
+            {COLS.map((col) => (
+              <span key={col}>{col}</span>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-stretch">
+          {showCoordinates && (
+            <div className="flex flex-col justify-around pr-2 text-[11px] font-mono text-[var(--text-muted)] tabular-nums">
+              {Array.from({ length: 9 }, (_, r) => (
+                <span key={r}>{9 - r}</span>
+              ))}
+            </div>
+          )}
+
+          <div
+            role="grid"
+            aria-label="Bàn cờ chiến thuật 9x9 OTTv2"
+            className="flex-1 aspect-square grid grid-cols-9 grid-rows-9 rounded-2xl overflow-hidden border-2 border-[#382954] bg-[#161024] shadow-xl"
+          >
+            {Array.from({ length: 81 }, (_, idx) => {
+              const r = Math.floor(idx / 9);
+              const c = idx % 9;
+              const isLight = (r + c) % 2 === 0;
+              const isBlocked = blockedSet.has(idx);
+              const isA1 = idx === SPECIAL_A1_INDEX;
+              const isI9 = idx === SPECIAL_I9_INDEX;
+              const piece = state ? state.board[idx] : 0;
+              const player: 1 | 2 | null = piece ? (piece <= 3 ? 1 : 2) : null;
+              const pType = piece ? PIECE_TYPE_NAMES[piece] : null;
+              const isSelected = selectedCell === idx;
+              const moveCandidate = moveMap.get(idx);
+              const isLastFrom = state?.lastMove?.from === idx;
+              const isLastTo = state?.lastMove?.to === idx;
+
+              const cellBgClass = isBlocked
+                ? 'bg-[var(--cell-blocked)]'
+                : isA1
+                ? 'bg-[var(--shrine-a1)]'
+                : isI9
+                ? 'bg-[var(--shrine-i9)]'
+                : isLight
+                ? 'bg-[var(--cell-light)]'
+                : 'bg-[var(--cell-dark)]';
+
+              const vietName = piece ? PIECE_VIET_NAMES[piece] : '';
+              const counterHint = pType ? PIECE_COUNTER_HINTS[pType] : '';
+              const coord = `${COLS[c]}${9 - r}`;
+
+              return (
+                <button
+                  key={idx}
+                  type="button"
+                  disabled={isBlocked || (!interactive && !onCellClick)}
+                  onClick={() => onCellClick?.(idx)}
+                  title={
+                    isBlocked
+                      ? `Ô ${coord} · Bia đá vật cản (Không thể đi vào)`
+                      : isA1
+                      ? `Ô a1 · Căn cứ Phe 1 (Phe 2 chiếm ô này sẽ thắng ngay!)`
+                      : isI9
+                      ? `Ô i9 · Căn cứ Phe 2 (Phe 1 chiếm ô này sẽ thắng ngay!)`
+                      : piece && player
+                      ? `${coord} · Phe ${player} (${player === 1 ? 'Cam' : 'Tím'}) · ${vietName} — ${counterHint}`
+                      : coord
+                  }
+                  className={`relative flex items-center justify-center ${cellBgClass} border-[0.5px] border-white/[0.05] transition-transform duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] ${
+                    interactive && !isBlocked
+                      ? 'cursor-pointer hover:brightness-120'
+                      : 'cursor-default'
+                  } ${isSelected ? 'ring-2 ring-inset ring-amber-300 bg-amber-500/20 z-10' : ''} ${
+                    isLastFrom || isLastTo
+                      ? 'after:absolute after:inset-0 after:bg-amber-400/14 after:pointer-events-none'
+                      : ''
+                  }`}
+                >
+                  {/* Blocked Sprint Obstacle Cell */}
+                  {isBlocked && <HalloweenObstacleGlyph isMini={isMini} />}
+
+                  {/* Special Win Shrines (a1 & i9) when unoccupied */}
+                  {!piece && !isBlocked && (isA1 || isI9) && (
+                    <HalloweenShrineGlyph kind={isA1 ? 'a1' : 'i9'} isMini={isMini} />
+                  )}
+
+                  {/* Valid Move Dot (Empty Target) */}
+                  {moveCandidate && !moveCandidate.isAttack && !piece && (
+                    <span className="w-3 h-3 rounded-full bg-emerald-400/90 shadow-sm pointer-events-none" />
+                  )}
+
+                  {/* Attackable Target Ring */}
+                  {moveCandidate?.isAttack && piece > 0 && (
+                    <span className="absolute inset-1 rounded-full ring-2 ring-red-400 bg-red-500/25 pointer-events-none" />
+                  )}
+
+                  {/* 2D Chibi Mascot Silhouette Piece (Bí Ngô, Bé Ma, Dơi) */}
+                  {piece > 0 && pType && player && (
+                    <div
+                      className={`relative z-10 flex items-center justify-center transition-transform duration-150 ${
+                        isMini ? 'w-[86%] h-[86%]' : 'w-[84%] h-[84%]'
+                      } ${isSelected ? 'scale-110' : ''} ${
+                        isLastTo && state?.lastMove?.isAttack ? 'animate-capture' : ''
+                      }`}
+                    >
+                      <HalloweenMascotPiece
+                        type={pType}
+                        team={player}
+                        className="w-full h-full drop-shadow-[0_2px_3px_rgba(0,0,0,0.55)]"
+                      />
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Clear Visual Annotation / Legend below board */}
+      {showLegend && <MascotRulesLegend compact={size === 'normal'} />}
+    </div>
+  );
+};
