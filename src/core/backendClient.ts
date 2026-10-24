@@ -306,6 +306,9 @@ export class BackendClient {
         if (packet.type === 'authenticated') {
           clearTimeout(timeout);
           if (packet.user) this.updateStoredUser(packet.user);
+          if (this.activeMatchId && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'rtc-connected', matchId: this.activeMatchId }));
+          }
           this.emit('ws-status', 'connected');
           resolve();
           return;
@@ -325,6 +328,9 @@ export class BackendClient {
   }
 
   private handleWsPacket(packet: any) {
+    if (packet.type === 'match-forfeited' || packet.type === 'match-aborted') {
+      this.activeMatchId = null;
+    }
     if (packet.type === 'match-found') {
       this.activeMatchId = packet.match?.id || null;
       this.setupWebRtcChannel(packet).catch(() => {
