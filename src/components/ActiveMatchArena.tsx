@@ -533,6 +533,30 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (packet.type === 'FINAL_PROOF' && packet.seat !== session.mySeat) {
         peerFinalProofRef.current = { proof: packet.proof, signature: packet.signature };
         await trySubmitBackendResult();
+        return;
+      }
+
+      if (packet.type === 'peer-disconnected' && packet.matchId === session.matchId) {
+        notify('Đối thủ đã rời trận. Nếu không quay lại trong 10 giây, bạn sẽ được xử thắng.', 'info');
+        return;
+      }
+
+      if (packet.type === 'match-forfeited' && packet.matchId === session.matchId) {
+        const winner = packet.winnerPlayer === 1 || packet.winnerPlayer === 2
+          ? packet.winnerPlayer
+          : null;
+        if (!winner) return;
+        const forfeitedState = { ...stateRef.current, winner, turn: winner };
+        stateRef.current = forfeitedState;
+        setGameState(forfeitedState);
+        setResultSummary({
+          eloAfter: packet.eloAfter,
+          eloUpdated: Boolean(packet.eloUpdated),
+          verified: true,
+        });
+        if (winner === session.mySeat) soundFx.playVictory();
+        else soundFx.playDefeat();
+        notify(packet.message || 'Trận đấu đã kết thúc do đối thủ rời phòng quá lâu.', winner === session.mySeat ? 'success' : 'error');
       }
     };
 
@@ -541,6 +565,14 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         ? backendClient.on('peer-data', handlePeerPacket)
         : session.subscribePeerData
         ? session.subscribePeerData(handlePeerPacket)
+        : () => {};
+    const unsubDisconnect =
+      session.source === 'backend'
+        ? backendClient.on('peer-disconnected', handlePeerPacket)
+        : () => {};
+    const unsubForfeited =
+      session.source === 'backend'
+        ? backendClient.on('match-forfeited', handlePeerPacket)
         : () => {};
 
     const unsubAborted =
@@ -595,6 +627,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       active = false;
       if (helloInterval) clearInterval(helloInterval);
       unsub();
+      unsubDisconnect();
+      unsubForfeited();
       unsubAborted();
       unsubPeerOffline();
       unsubForfeitWin();
