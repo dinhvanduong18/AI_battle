@@ -31,7 +31,7 @@ const MAX_BODY = 2 * 1024 * 1024;
 let tournamentLifecycleTimer = null;
 let disconnectForfeitTimer = null;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const DISCONNECT_FORFEIT_MS = 10000;
+const DISCONNECT_FORFEIT_MS = 0;
 const TOURNAMENT_QUEUE_TIERS = [...TOURNAMENT_RANKS, 'Practice'];
 const DEFAULT_SPRINT_RULES = ['standard', 'center_blockers', 'clipped_corners', 'corridor'];
 const SPRINT_RULE_LAYOUTS = {
@@ -837,14 +837,14 @@ async function processDisconnectedMatches() {
     for (const playerId of players) {
       const playerNumber = playerId === result.player1Id ? 1 : 2;
       const isWinner = playerId === result.winnerId;
-      await deliverToUser(playerId, 'match-forfeited', {
+      await deliverToUser(playerId, isWinner ? 'match-forfeited-win' : 'match-forfeited-loss', {
         matchId: result.matchId,
         winnerId: result.winnerId,
         winnerPlayer: result.winnerId === result.player1Id ? 1 : 2,
         disconnectedId: result.disconnectedId,
         message: isWinner
-          ? 'Bạn thắng do đối thủ đã ngắt kết nối quá lâu.'
-          : 'Bạn thua do đã ngắt kết nối quá lâu.',
+          ? 'Bạn thắng do đối thủ đã rời trận.'
+          : 'Bạn thua do đã rời trận.',
         eloUpdated: result.eloUpdated,
         eloAfter: playerNumber === 1 ? result.player1EloAfter : result.player2EloAfter
       });
@@ -1664,6 +1664,7 @@ wss.on('connection', ws => {
         );
         if (marked.rowCount) {
           await deliverToUser(peerId, 'peer-disconnected', { matchId: match.id, disconnectedPlayerId: ws.user.id });
+          await processDisconnectedMatches();
         }
       } catch (error) {
         console.error(`Could not record disconnect for match ${match.id}:`, error.message);

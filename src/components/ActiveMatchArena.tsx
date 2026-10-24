@@ -396,6 +396,21 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     const handlePeerPacket = async (packet: any) => {
       if (!active || !packet) return;
 
+      if (packet.type === 'PLAYER_DISCONNECTED' && session.mySeat !== null) {
+        const winner = session.mySeat;
+        const finalState = { ...stateRef.current, winner };
+        stateRef.current = finalState;
+        setGameState(finalState);
+        if (winner === session.mySeat) {
+          notify('Đối thủ đã rời trận. Bạn thắng ván này!', 'success');
+          soundFx.playVictory();
+        } else {
+          notify('Bạn đã mất kết nối với đối thủ và bị xử thua.', 'error');
+          soundFx.playDefeat();
+        }
+        return;
+      }
+
       if (packet.type === 'SPECTATE_SYNC' && packet.serializedState) {
         const synced = OTTGameEngine.deserialize(packet.serializedState);
         stateRef.current = synced;

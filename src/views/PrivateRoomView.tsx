@@ -79,7 +79,12 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
         if (!raw || typeof raw !== 'object') return;
 
         if (raw.type === 'JOIN_REQUEST') {
-          if (raw.role === 'spectator' || player2Conn) {
+          if (raw.role === 'player' && player2Conn) {
+            conn.send({ type: 'ROOM_REJECT', reason: 'Phòng đã đủ 2 người chơi. Bạn có thể vào xem trực tiếp.' });
+            return;
+          }
+
+          if (raw.role === 'spectator') {
             spectators.add(conn);
             conn.send({
               type: 'ROOM_WELCOME',
@@ -96,6 +101,13 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
           }
 
           player2Conn = conn;
+          conn.on('close', () => {
+            const packet = { type: 'PLAYER_DISCONNECTED', seat: 2 };
+            for (const spec of spectators) {
+              if (spec.open) spec.send(packet);
+            }
+            for (const fn of listeners) fn(packet);
+          });
           const guestName = String(raw.displayName || 'Đối thủ P2P');
           conn.send({
             type: 'ROOM_WELCOME',
@@ -185,6 +197,13 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
 
       conn.on('data', (raw: any) => {
         if (!raw || typeof raw !== 'object') return;
+        if (raw.type === 'ROOM_REJECT') {
+          clearTimeout(timeout);
+          setJoiningRole(null);
+          peer.destroy();
+          notify(raw.reason || 'Không thể tham gia phòng này.', 'error');
+          return;
+        }
         if (raw.type === 'ROOM_WELCOME') {
           clearTimeout(timeout);
           setJoiningRole(null);
@@ -217,6 +236,11 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
         setJoiningRole(null);
         peer.destroy();
         notify('Kết nối P2P thất bại.', 'error');
+      });
+
+      conn.on('close', () => {
+        if (role !== 'player') return;
+        for (const fn of listeners) fn({ type: 'PLAYER_DISCONNECTED', seat: 1 });
       });
     });
 
