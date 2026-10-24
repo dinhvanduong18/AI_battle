@@ -1396,7 +1396,7 @@ const httpServer = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/matches') {
       const auth = authFromHeader(req);
-      const result = await pool.query(`SELECT m.id,m.seed,m.status,m.winner_id,m.final_state_hash,m.replay_sha256,m.created_at,m.completed_at,
+      const result = await pool.query(`SELECT m.id,m.seed,m.status,m.match_type,m.winner_id,m.final_state_hash,m.replay_sha256,m.created_at,m.completed_at,
         (m.replay_json IS NOT NULL OR (m.replay_key IS NOT NULL AND $2::boolean)) AS replay_available,
         u1.display_name AS player1,u2.display_name AS player2
         FROM matches m JOIN users u1 ON u1.id=m.player1_id JOIN users u2 ON u2.id=m.player2_id
