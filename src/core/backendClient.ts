@@ -329,7 +329,12 @@ export class BackendClient {
   }
 
   private handleWsPacket(packet: any) {
-    if (packet.type === 'match-forfeited' || packet.type === 'match-aborted') {
+    if (
+      packet.type === 'match-forfeited' ||
+      packet.type === 'match-forfeited-win' ||
+      packet.type === 'match-forfeited-loss' ||
+      packet.type === 'match-aborted'
+    ) {
       this.activeMatchId = null;
     }
     if (packet.type === 'match-found') {
@@ -459,7 +464,7 @@ export class BackendClient {
 
   abortBotSetup(matchId: string, message: string) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.sendWs({ type: 'bot-forfeit', matchId, message });
+      this.sendWs({ type: 'bot-setup-failed', matchId, message });
     }
   }
 

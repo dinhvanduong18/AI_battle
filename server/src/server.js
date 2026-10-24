@@ -27,6 +27,7 @@ const instanceId = randomUUID();
 const replayStorage = createReplayStorage(config);
 const liveSockets = new Map();
 const searchTimers = new Map();
+const botForfeitMatchIds = new Set();
 const MAX_BODY = 2 * 1024 * 1024;
 let tournamentLifecycleTimer = null;
 let disconnectForfeitTimer = null;
@@ -811,6 +812,43 @@ async function resolveDisconnectedMatch(matchId) {
   }
 }
 
+async function processMatchForfeit(matchId, reason = 'disconnect') {
+  const result = await resolveDisconnectedMatch(matchId);
+  if (!result) return;
+  const players = [result.player1Id, result.player2Id];
+  if (result.abandoned) {
+    for (const playerId of players) {
+      await deliverToUser(playerId, 'match-aborted', {
+        matchId: result.matchId,
+        message: result.bothPlayersDisconnected
+          ? 'Trận đã bị hủy vì cả hai người chơi đều rời trận. Không tính thắng thua hoặc Elo.'
+          : 'Trận đã bị hủy vì Sprint hoặc giai đoạn giải đấu đã kết thúc trước khi đối thủ ngắt kết nối đủ lâu.'
+      });
+    }
+    return;
+  }
+  for (const playerId of players) {
+    const playerNumber = playerId === result.player1Id ? 1 : 2;
+    const isWinner = playerId === result.winnerId;
+    const message = reason === 'bot'
+      ? isWinner
+        ? 'Bạn thắng kỹ thuật vì Bot đối thủ không đi trong vòng 5 giây.'
+        : 'Bot của bạn không đi trong vòng 5 giây. Bạn bị xử thua kỹ thuật.'
+      : isWinner
+        ? 'Bạn thắng do đối thủ đã rời trận.'
+        : 'Bạn thua do đã rời trận.';
+    await deliverToUser(playerId, isWinner ? 'match-forfeited-win' : 'match-forfeited-loss', {
+      matchId: result.matchId,
+      winnerId: result.winnerId,
+      winnerPlayer: result.winnerId === result.player1Id ? 1 : 2,
+      disconnectedId: reason === 'bot' ? null : result.disconnectedId,
+      message,
+      eloUpdated: result.eloUpdated,
+      eloAfter: playerNumber === 1 ? result.player1EloAfter : result.player2EloAfter
+    });
+  }
+}
+
 async function processDisconnectedMatches() {
   const due = await pool.query(
     `SELECT id FROM matches
@@ -820,35 +858,7 @@ async function processDisconnectedMatches() {
     [DISCONNECT_FORFEIT_MS]
   );
   for (const { id } of due.rows) {
-    const result = await resolveDisconnectedMatch(id);
-    if (!result) continue;
-    const players = [result.player1Id, result.player2Id];
-    if (result.abandoned) {
-      for (const playerId of players) {
-        await deliverToUser(playerId, 'match-aborted', {
-          matchId: result.matchId,
-          message: result.bothPlayersDisconnected
-            ? 'Trận đã bị hủy vì cả hai người chơi đều rời trận. Không tính thắng thua hoặc Elo.'
-            : 'Trận đã bị hủy vì Sprint hoặc giai đoạn giải đấu đã kết thúc trước khi đối thủ ngắt kết nối đủ lâu.'
-        });
-      }
-      continue;
-    }
-    for (const playerId of players) {
-      const playerNumber = playerId === result.player1Id ? 1 : 2;
-      const isWinner = playerId === result.winnerId;
-      await deliverToUser(playerId, isWinner ? 'match-forfeited-win' : 'match-forfeited-loss', {
-        matchId: result.matchId,
-        winnerId: result.winnerId,
-        winnerPlayer: result.winnerId === result.player1Id ? 1 : 2,
-        disconnectedId: result.disconnectedId,
-        message: isWinner
-          ? 'Bạn thắng do đối thủ đã rời trận.'
-          : 'Bạn thua do đã rời trận.',
-        eloUpdated: result.eloUpdated,
-        eloAfter: playerNumber === 1 ? result.player1EloAfter : result.player2EloAfter
-      });
-    }
+    await processMatchForfeit(id, botForfeitMatchIds.has(id) ? 'bot' : 'disconnect');
   }
 }
 
@@ -1570,6 +1580,31 @@ wss.on('connection', ws => {
           ws.tournamentSearch = null;
         }
         send(ws, 'search-cancelled');
+      } else if (packet.type === 'bot-forfeit') {
+        const matchId = String(packet.matchId || '');
+        const found = await pool.query(
+          'SELECT id,player1_id,player2_id,match_type,status FROM matches WHERE id=$1',
+          [matchId]
+        );
+        const match = found.rows[0];
+        if (!match || !canonicalMatchIds(match).includes(userId)) {
+          throw Object.assign(new Error('Active match not found for this player'), { status: 404 });
+        }
+        if (match.match_type !== 'bot') {
+          throw Object.assign(new Error('Bot forfeits are only valid in Bot vs Bot matches'), { status: 409 });
+        }
+        if (match.status !== 'active') return;
+        botForfeitMatchIds.add(match.id);
+        try {
+          await pool.query(
+            `UPDATE matches SET disconnected_player_id=$2,disconnected_at=clock_timestamp()
+             WHERE id=$1 AND status='active'`,
+            [match.id, userId]
+          );
+          await processMatchForfeit(match.id, 'bot');
+        } finally {
+          botForfeitMatchIds.delete(match.id);
+        }
       } else if (packet.type === 'bot-setup-failed') {
         const found = await pool.query('SELECT id,player1_id,player2_id,status FROM matches WHERE id=$1', [packet.matchId]);
         const match = found.rows[0];

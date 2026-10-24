@@ -38,6 +38,8 @@ import { Board9x9 } from './Board9x9';
 import { MascotCountsInline } from './HalloweenPieces';
 import { useToast } from './ToastProvider';
 
+const BOT_TURN_TIMEOUT_MS = 5000;
+
 export interface ActiveMatchSession {
   source: 'backend' | 'p2p';
   matchId: string;
@@ -441,6 +443,23 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         return;
       }
 
+      if (packet.type === 'BOT_FORFEIT' && packet.seat !== session.mySeat) {
+        const winner = session.mySeat;
+        if (winner === null) return;
+        const forfeitedState = { ...stateRef.current, winner, turn: winner };
+        stateRef.current = forfeitedState;
+        setGameState(forfeitedState);
+        notify(packet.message || 'Đối thủ không đi trong thời hạn cho phép. Bạn thắng kỹ thuật!', 'success');
+        soundFx.playVictory();
+        return;
+      }
+
+      if (packet.type === 'BOT_SETUP_FAILED') {
+        notify(packet.message || 'Trận bị hủy vì Bot của đối thủ không khởi động được.', 'error');
+        onExit();
+        return;
+      }
+
       if (packet.type === 'CONSENSUS_COMMIT' && packet.attestation) {
         setPeerOffline(false);
         pendingPeerCommitRef.current = {
@@ -673,6 +692,16 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         soundFx.playDefeat();
         if (session.source === 'backend') {
           backendClient.botForfeit(session.matchId, err.message);
+        } else if (session.mySeat !== null) {
+          const winner: 1 | 2 = session.mySeat === 1 ? 2 : 1;
+          const forfeitedState = { ...stateRef.current, winner, turn: winner };
+          stateRef.current = forfeitedState;
+          setGameState(forfeitedState);
+          sendMessageToPeer({
+            type: 'BOT_FORFEIT',
+            seat: session.mySeat,
+            message: 'Đối thủ không đi trong thời hạn cho phép. Bạn thắng kỹ thuật!',
+          });
         }
       } finally {
         steppingBotRef.current = false;
@@ -711,7 +740,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         throw new Error('Không tìm thấy mã nguồn Python cho lựa chọn này.');
       }
 
-      const runner = new BotRunner('MatchBot', 1500);
+      const runner = new BotRunner('MatchBot', BOT_TURN_TIMEOUT_MS);
       await runner.loadBot(code, selectedBotSource);
       botRunnerRef.current = runner;
       setMyBotReady(true);
@@ -719,6 +748,15 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       notify('Đã nạp Bot Python thành công! Đang đồng bộ khai cuộc…', 'success');
     } catch (err: any) {
       notify(err.message || 'Không thể khởi tạo Bot Python.', 'error');
+      if (session.source === 'backend') {
+        backendClient.abortBotSetup(session.matchId, err.message || 'Không thể khởi tạo Bot Python.');
+      } else {
+        sendMessageToPeer({
+          type: 'BOT_SETUP_FAILED',
+          message: 'Trận bị hủy vì Bot của một người chơi không khởi động được.',
+        });
+        onExit();
+      }
     } finally {
       setLoadingPyodide(false);
     }
@@ -1058,7 +1096,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                   ? `Đang tới lượt: ${gameState.turn === 1 ? session.player1Name : session.player2Name}`
                   : isMyTurn
                   ? session.mode === 'bot'
-                    ? 'Bot của bạn đang tính toán nước đi…'
+                    ? 'Bot của bạn đang tính toán nước đi… (tối đa 5 giây)'
                     : 'Lượt của bạn — Hãy chọn quân cờ để di chuyển'
                   : 'Đang chờ nước đi của đối thủ…'}
               </span>
