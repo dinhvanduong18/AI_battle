@@ -125,14 +125,17 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-      onClick={onClose}
+      role="presentation"
     >
       <div
         className="w-full max-w-lg rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="auth-settings-modal-title"
       >
         <div className="flex items-center justify-between pb-4 border-b border-[var(--border-subtle)]">
-          <h2 className="text-lg font-bold text-[var(--text-primary)]">
+          <h2 id="auth-settings-modal-title" className="text-lg font-bold text-[var(--text-primary)]">
             {user ? 'Hồ sơ Kỳ thủ OTTv2' : 'Đăng nhập Đấu Trường OTTv2'}
           </h2>
           <button
