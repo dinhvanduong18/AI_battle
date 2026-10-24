@@ -9,6 +9,9 @@ services:
     name: ottv2-redis
     plan: free
     maxmemoryPolicy: noeviction
+    ipAllowList:
+      - source: 0.0.0.0/32
+        description: Block all external access; backend uses the private network
 
   - type: web
     name: ottv2-backend
