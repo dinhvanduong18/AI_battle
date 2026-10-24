@@ -283,8 +283,8 @@ const WatchQuadrantCard: React.FC<{
       {/* Quadrant Footer: Status + Connect P2P Room Code */}
       <div className="pt-2.5 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="font-mono text-[var(--text-secondary)] tabular-nums">
-          {state.winner
-            ? `Kết thúc: ${state.winner === 1 ? p1Name : p2Name} thắng!`
+          {state.winner !== null
+            ? state.winner === 0 ? 'Hòa sau giới hạn 500 nước.' : `Kết thúc: ${state.winner === 1 ? p1Name : p2Name} thắng!`
             : `Nước cuối: ${lastMoveDesc}`}
         </div>
 

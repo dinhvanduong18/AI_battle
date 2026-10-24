@@ -204,11 +204,6 @@ export class BackendClient {
     return res.user as BackendUser;
   }
 
-  async toggleDevAdmin() {
-    const res = await this.request('/api/dev/toggle-admin', 'POST', {}, true);
-    if (res.user) this.updateStoredUser(res.user);
-    return res.user as BackendUser;
-  }
 
   async getLeaderboard(): Promise<Array<{ id: string; displayName: string; elo: number; isSystemBot?: boolean }>> {
     const res = await this.request('/api/leaderboard');

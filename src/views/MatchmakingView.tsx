@@ -109,9 +109,6 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
     setElapsedSec(0);
   };
 
-  // Expanding Elo window visualization matching server/src/matchmaking.js
-  const eloWindow = Math.min(400, 100 + Math.floor(elapsedSec / 10) * 50);
-
   const filteredMatches = matches.filter((m) => {
     if (filterType !== 'all' && m.match_type !== filterType) return false;
     if (searchQuery.trim()) {
@@ -133,8 +130,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                 Đang tìm đối thủ {searchingMode === 'bot' ? 'Bot vs Bot (Xếp hạng Elo)' : '1v1 Người vs Người'}…
               </h3>
               <p className="text-xs text-[var(--text-secondary)] mt-0.5 tabular-nums">
-                Thời gian chờ: {elapsedSec}s · Biên độ ghép Elo hiện tại: ±{eloWindow} quanh mức{' '}
-                {user?.elo || 1200}
+                Thời gian chờ: {elapsedSec}s
               </p>
             </div>
           </div>
@@ -349,6 +345,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                 {filteredMatches.map((m) => {
                   const won = m.winner_id === user.id;
                   const completed = m.status === 'completed';
+                  const isDraw = completed && m.winner_id === null;
                   const timeStr = new Date(m.created_at).toLocaleString('vi-VN', {
                     day: '2-digit',
                     month: '2-digit',
@@ -369,8 +366,8 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                         {!completed ? (
                           <span className="text-[var(--text-muted)]">{m.status}</span>
                         ) : (
-                          <span className={won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
-                            {won ? 'Thắng' : 'Thua'}
+                          <span className={isDraw ? 'text-[var(--text-secondary)]' : won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
+                            {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
                             {m.elo_delta ? ` (${m.elo_delta > 0 ? '+' : ''}${m.elo_delta} Elo)` : ''}
                           </span>
                         )}

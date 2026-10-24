@@ -120,7 +120,7 @@ function HalloweenHeroVisual() {
                     item?.blocked
                       ? 'Bia đá vật cản'
                       : item?.shrine
-                      ? `Ô đích ${item.shrine} — Chiếm ô này thắng ngay`
+                      ? `Ô đích ${item.shrine} — Phe ${item.shrine === 'a1' ? 2 : 1} thắng khi tới đây`
                       : item?.type
                       ? `Nhấn để xem chú thích quân ${
                           item.type === 'rock'
@@ -194,7 +194,7 @@ function HalloweenHeroVisual() {
 
       <div className="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
         <span>Di chuyển 1 ô (8 hướng)</span>
-        <span>Chiếm ô góc a1 / i9 hoặc diệt 1 hệ quân để thắng</span>
+        <span>Vào ô đích đối phương (Phe 1 tới i9, Phe 2 tới a1) hoặc diệt một hệ quân địch</span>
       </div>
     </div>
   );
@@ -441,6 +441,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                     {recentMatches.slice(0, 6).map((m) => {
                       const won = m.winner_id === user.id;
                       const isCompleted = m.status === 'completed';
+                      const isDraw = isCompleted && m.winner_id === null;
                       return (
                         <tr key={m.id} className="hover:bg-[var(--bg-hover)]/40 transition-colors">
                           <td className="py-3 pr-3 font-medium text-[var(--text-primary)]">
@@ -453,8 +454,8 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                             {!isCompleted ? (
                               <span className="text-[var(--text-muted)]">{m.status}</span>
                             ) : (
-                              <span className={won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
-                                {won ? 'Thắng' : 'Thua'}
+                              <span className={isDraw ? 'text-[var(--text-secondary)]' : won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
+                                {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
                                 {m.elo_delta ? ` (${m.elo_delta > 0 ? '+' : ''}${m.elo_delta})` : ''}
                               </span>
                             )}

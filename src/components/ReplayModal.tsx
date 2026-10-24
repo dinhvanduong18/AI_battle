@@ -295,9 +295,9 @@ export const ReplayModal: React.FC<ReplayModalProps> = ({
                 <h3 className="text-sm font-semibold text-[var(--text-primary)]">
                   Biên bản nước đi
                 </h3>
-                {currentState?.winner && (
+                {currentState?.winner !== null && currentState?.winner !== undefined && (
                   <span className="text-xs font-semibold text-emerald-400">
-                    {currentState.winner === 1 ? player1Name : player2Name} thắng
+                    {currentState.winner === 0 ? 'Trận đấu hòa' : `${currentState.winner === 1 ? player1Name : player2Name} thắng`}
                   </span>
                 )}
               </div>

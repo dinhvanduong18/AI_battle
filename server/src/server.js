@@ -668,7 +668,7 @@ async function submitResult(userId, body) {
     if (!match.player1_key || !match.player2_key) throw Object.assign(new Error('Both session public keys must be registered over the authenticated WebSocket'), { status: 409 });
     const proofShapeValid = proof => proof.matchId === match.id && proof.roomId === match.id &&
       Number.isInteger(proof.stepCount) && proof.stepCount >= 1 && /^[0-9a-f]{64}$/i.test(proof.stateHash || '') &&
-      Number.isInteger(proof.winner) && [1, 2].includes(proof.winner);
+      Number.isInteger(proof.winner) && [1, 2, 3].includes(proof.winner);
     if (!proofShapeValid(p1.proof) || !proofShapeValid(p2.proof) ||
         p1.proof.winner !== p2.proof.winner || p1.proof.stepCount !== p2.proof.stepCount || p1.proof.stateHash !== p2.proof.stateHash) {
       throw Object.assign(new Error('Players submitted conflicting final proofs'), { status: 409 });
@@ -1060,8 +1060,15 @@ const httpServer = createServer(async (req, res) => {
       const sprintRevealOpen = tournament.status === 'qualifying' &&
         Number(tournament.current_week) > 1 &&
         Date.now() >= sprintStartedAt && Date.now() < sprintStartedAt + 24 * 60 * 60 * 1000;
-      const [participants, ownEntry, matches, sprintStandings, finalStandings] = await Promise.all([
+      const [participants, participantNames, ownEntry, matches, sprintStandings, finalStandings] = await Promise.all([
         pool.query('SELECT count(*)::int AS count FROM tournament_entries WHERE tournament_id=$1', [tournamentId]),
+        pool.query(
+          `SELECT u.display_name AS "displayName"
+           FROM tournament_entries e JOIN users u ON u.id=e.player_id
+           WHERE e.tournament_id=$1 AND e.player_id IS NOT NULL
+           ORDER BY e.registered_at ASC`,
+          [tournamentId]
+        ),
         auth
           ? pool.query(
             `SELECT COALESCE(entry.player_id,entry.team_id) AS "playerId",entry.tier,entry.rank_stars AS "stars",
@@ -1102,7 +1109,7 @@ const httpServer = createServer(async (req, res) => {
         ),
         sprintRevealOpen
           ? pool.query(
-            `SELECT u.display_name AS "displayName",s.tier,s.rank_stars AS stars,
+            `SELECT s.player_id AS "playerId",u.display_name AS "displayName",s.tier,s.rank_stars AS stars,
                     s.season_points AS "seasonPoints",s.matches_played AS "matchesPlayed",
                     s.wins,s.draws,s.losses
              FROM tournament_sprint_standings s JOIN users u ON u.id=s.player_id
@@ -1113,17 +1120,19 @@ const httpServer = createServer(async (req, res) => {
             [tournamentId, Number(tournament.current_week) - 1]
           )
           : Promise.resolve({ rows: [] }),
-        pool.query(
-          `SELECT e.player_id AS "playerId",u.display_name AS "displayName",e.tier,e.rank_stars AS stars,
-                  e.season_points AS "seasonPoints",e.matches_played AS "matchesPlayed",
-                  e.wins,e.draws,e.losses
-           FROM tournament_entries e JOIN users u ON u.id=e.player_id
-           WHERE e.tournament_id=$1 AND e.player_id IS NOT NULL
-           ORDER BY CASE e.tier WHEN 'Challenger' THEN 5 WHEN 'Master' THEN 4 WHEN 'Gold' THEN 3 WHEN 'Silver' THEN 2 ELSE 1 END DESC,
-                    CASE WHEN e.tier='Challenger' THEN e.season_points ELSE e.rank_stars END DESC,
-                    e.wins DESC,e.registered_at ASC`,
-          [tournamentId]
-        )
+        tournament.status === 'completed'
+          ? pool.query(
+            `SELECT e.player_id AS "playerId",u.display_name AS "displayName",e.tier,e.rank_stars AS stars,
+                    e.season_points AS "seasonPoints",e.matches_played AS "matchesPlayed",
+                    e.wins,e.draws,e.losses
+             FROM tournament_entries e JOIN users u ON u.id=e.player_id
+             WHERE e.tournament_id=$1 AND e.player_id IS NOT NULL
+             ORDER BY CASE e.tier WHEN 'Challenger' THEN 5 WHEN 'Master' THEN 4 WHEN 'Gold' THEN 3 WHEN 'Silver' THEN 2 ELSE 1 END DESC,
+                      CASE WHEN e.tier='Challenger' THEN e.season_points ELSE e.rank_stars END DESC,
+                      e.wins DESC,e.registered_at ASC`,
+            [tournamentId]
+          )
+          : Promise.resolve({ rows: [] })
       ]);
       const privateEntry = ownEntry.rows[0] || null;
       if (privateEntry) delete privateEntry.privateRank;
@@ -1131,10 +1140,15 @@ const httpServer = createServer(async (req, res) => {
       return json(res, 200, {
         tournament,
         participantCount: participants.rows[0].count,
+        participants: participantNames.rows.map(row => row.displayName),
         ranks: tournamentRanks(),
         myEntry: privateEntry,
         matches: matches.rows,
-        standings: formatTournamentStandings(finalStandings.rows),
+        standings: tournament.status === 'completed'
+          ? formatTournamentStandings(finalStandings.rows)
+          : sprintRevealOpen
+            ? formatTournamentStandings(sprintStandings.rows)
+            : null,
         sprintStandings: sprintRevealOpen ? {
           sprint: Number(tournament.current_week) - 1,
           temporary: true,

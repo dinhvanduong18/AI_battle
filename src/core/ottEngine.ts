@@ -380,7 +380,7 @@ export class OTTGameEngine {
       captured: captured || null,
     };
 
-    let winner = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
+    let winner: GameState['winner'] = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
     const nextTurnCandidate: 1 | 2 = state.turn === 1 ? 2 : 1;
 
     // Draw check 1: Max steps reached

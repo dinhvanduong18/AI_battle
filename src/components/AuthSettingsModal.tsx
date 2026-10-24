@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { KeyRound, LogOut, ShieldCheck, User, X } from 'lucide-react';
+import { KeyRound, LogOut, User, X } from 'lucide-react';
 import { backendClient, type BackendUser } from '../core/backendClient';
 import { useToast } from './ToastProvider';
 
@@ -104,23 +104,6 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     }
   };
 
-  const handleToggleDevAdmin = async () => {
-    setLoading(true);
-    try {
-      const updated = await backendClient.toggleDevAdmin();
-      onUserUpdated(updated);
-      notify(
-        updated.isAdmin
-          ? 'Đã bật quyền Ban Tổ Chức (Admin) để tạo và mở giải đấu.'
-          : 'Đã chuyển về quyền Kỳ thủ thông thường.',
-        'success'
-      );
-    } catch (err: any) {
-      notify(err.message || 'Máy chủ hiện tại không hỗ trợ đổi quyền nhanh.', 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   return (
     <div
@@ -348,15 +331,6 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                  <button
-                    type="button"
-                    onClick={handleToggleDevAdmin}
-                    disabled={loading}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
-                  >
-                    <ShieldCheck className="w-4 h-4 text-[var(--accent-primary)]" />
-                    {user.isAdmin ? 'Tắt quyền BTC (Dev)' : 'Bật quyền BTC tạo giải (Dev)'}
-                  </button>
                   <button
                     type="submit"
                     disabled={loading}

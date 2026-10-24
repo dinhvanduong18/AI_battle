@@ -236,6 +236,8 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     const t: TournamentItem | undefined = detail?.tournament;
     const myEntry = detail?.myEntry;
     const standings: any[] = detail?.standings || [];
+    const participantNames: string[] = detail?.participants || [];
+    const showPublicStandings = Array.isArray(detail?.standings);
     const myMatches: any[] = detail?.matches || [];
     const ranks: any[] = detail?.ranks || [];
 
@@ -419,16 +421,34 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                 <div className="flex items-center justify-between">
                   <h3 className="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
                     <Award className="w-4 h-4 text-[var(--accent-primary)]" />
-                    Bảng tổng sắp Giải đấu
+                    {showPublicStandings
+                      ? detail?.sprintStandings?.temporary
+                        ? `Bảng Sprint ${detail?.sprintStandings?.sprint}`
+                        : 'Bảng xếp hạng chung cuộc'
+                      : 'Danh sách kỳ thủ đã đăng ký'}
                   </h3>
                   <span className="text-xs text-[var(--text-muted)] tabular-nums">
-                    {standings.length} kỳ thủ
+                    {showPublicStandings ? standings.length : participantNames.length} kỳ thủ
                   </span>
                 </div>
 
-                {standings.length === 0 ? (
+                {!showPublicStandings ? (
+                  participantNames.length > 0 ? (
+                    <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                      {participantNames.map((name, index) => (
+                        <li key={index} className="px-3 py-2 rounded-lg bg-[var(--bg-canvas)] text-[var(--text-primary)]">
+                          {name}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="py-8 text-center text-xs text-[var(--text-muted)]">
+                      Chưa có kỳ thủ nào đăng ký giải đấu này.
+                    </p>
+                  )
+                ) : standings.length === 0 ? (
                   <p className="py-8 text-center text-xs text-[var(--text-muted)]">
-                    Chưa có kỳ thủ nào đăng ký giải đấu này.
+                    Chưa có bảng xếp hạng được công bố.
                   </p>
                 ) : (
                   <div className="overflow-x-auto">
@@ -497,6 +517,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   <div className="divide-y divide-[var(--border-subtle)] text-xs tabular-nums">
                     {myMatches.map((m) => {
                       const won = m.winner_id === user.id;
+                      const isDraw = m.status === 'completed' && m.winner_id === null;
                       return (
                         <div key={m.id} className="py-3 flex items-center justify-between gap-2">
                           <div>
@@ -506,8 +527,8 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                             <div className="text-[11px] text-[var(--text-secondary)] mt-0.5">
                               {m.tournament_phase === 'ranked' ? 'Đua Hạng' : 'Chạy Đà'} ·{' '}
                               {m.status === 'completed' ? (
-                                <span className={won ? 'text-emerald-400' : 'text-red-400'}>
-                                  {won ? 'Thắng (+1 Sao)' : 'Thua'}
+                                <span className={isDraw ? 'text-[var(--text-secondary)]' : won ? 'text-emerald-400' : 'text-red-400'}>
+                                  {isDraw ? 'Hòa' : won ? 'Thắng (+1 Sao)' : 'Thua'}
                                 </span>
                               ) : (
                                 m.status

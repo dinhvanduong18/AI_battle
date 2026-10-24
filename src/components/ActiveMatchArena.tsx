@@ -541,7 +541,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         ? backendClient.on('peer-offline', (pkt) => {
             if (pkt.matchId === session.matchId) {
               setPeerOffline(true);
-              notify('Đối thủ đã mất kết nối hoặc rời trận!', 'warning');
+              notify('Đối thủ đã mất kết nối hoặc rời trận!', 'info');
             }
           })
         : () => {};
