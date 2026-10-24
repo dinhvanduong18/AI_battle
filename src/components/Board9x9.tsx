@@ -116,9 +116,9 @@ export const Board9x9: React.FC<Board9x9Props> = ({
                     isBlocked
                       ? `Ô ${coord} · Bia đá vật cản (Không thể đi vào)`
                       : isA1
-                      ? `Ô đích a1 · Đưa bất kỳ quân nào vào đây sẽ thắng ngay!`
+                      ? `Ô a1 · Căn cứ Phe 1 (Phe 2 chiếm ô này sẽ thắng ngay!)`
                       : isI9
-                      ? `Ô đích i9 · Đưa bất kỳ quân nào vào đây sẽ thắng ngay!`
+                      ? `Ô i9 · Căn cứ Phe 2 (Phe 1 chiếm ô này sẽ thắng ngay!)`
                       : piece && player
                       ? `${coord} · Phe ${player} (${player === 1 ? 'Cam' : 'Tím'}) · ${vietName} — ${counterHint}`
                       : coord
