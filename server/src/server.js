@@ -10,7 +10,13 @@ import { calculateElo } from './elo.js';
 import { enqueueOrMatch, cancelQueue, enqueueTournamentOrMatch, cancelTournamentQueue } from './matchmaker.js';
 import { hashCanonical, verifyConsensusDispute, verifyReplay, verifySessionProof } from './replay.js';
 import { createReplayStorage } from './storage.js';
-import { applyTournamentResult, rankTier, TOURNAMENT_RANKS, tournamentRanks } from './tournament-ranks.js';
+import {
+  applyTournamentResult,
+  formatTournamentStandings,
+  rankTier,
+  TOURNAMENT_RANKS,
+  tournamentRanks
+} from './tournament-ranks.js';
 import { areBothMatchPlayersOffline } from './match-disconnect.js';
 
 const pool = new Pool({ connectionString: config.databaseUrl });
@@ -1107,19 +1113,17 @@ const httpServer = createServer(async (req, res) => {
             [tournamentId, Number(tournament.current_week) - 1]
           )
           : Promise.resolve({ rows: [] }),
-        tournament.status === 'completed'
-          ? pool.query(
-            `SELECT u.display_name AS "displayName",e.tier,e.rank_stars AS stars,
-                    e.season_points AS "seasonPoints",e.matches_played AS "matchesPlayed",
-                    e.wins,e.draws,e.losses
-             FROM tournament_entries e JOIN users u ON u.id=e.player_id
-             WHERE e.tournament_id=$1 AND e.player_id IS NOT NULL
-             ORDER BY CASE e.tier WHEN 'Challenger' THEN 5 WHEN 'Master' THEN 4 WHEN 'Gold' THEN 3 WHEN 'Silver' THEN 2 ELSE 1 END DESC,
-                      CASE WHEN e.tier='Challenger' THEN e.season_points ELSE e.rank_stars END DESC,
-                      e.wins DESC,e.registered_at ASC`,
-            [tournamentId]
-          )
-          : Promise.resolve({ rows: [] })
+        pool.query(
+          `SELECT e.player_id AS "playerId",u.display_name AS "displayName",e.tier,e.rank_stars AS stars,
+                  e.season_points AS "seasonPoints",e.matches_played AS "matchesPlayed",
+                  e.wins,e.draws,e.losses
+           FROM tournament_entries e JOIN users u ON u.id=e.player_id
+           WHERE e.tournament_id=$1 AND e.player_id IS NOT NULL
+           ORDER BY CASE e.tier WHEN 'Challenger' THEN 5 WHEN 'Master' THEN 4 WHEN 'Gold' THEN 3 WHEN 'Silver' THEN 2 ELSE 1 END DESC,
+                    CASE WHEN e.tier='Challenger' THEN e.season_points ELSE e.rank_stars END DESC,
+                    e.wins DESC,e.registered_at ASC`,
+          [tournamentId]
+        )
       ]);
       const privateEntry = ownEntry.rows[0] || null;
       if (privateEntry) delete privateEntry.privateRank;
@@ -1130,6 +1134,7 @@ const httpServer = createServer(async (req, res) => {
         ranks: tournamentRanks(),
         myEntry: privateEntry,
         matches: matches.rows,
+        standings: formatTournamentStandings(finalStandings.rows),
         sprintStandings: sprintRevealOpen ? {
           sprint: Number(tournament.current_week) - 1,
           temporary: true,

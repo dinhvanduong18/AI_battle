@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyTournamentResult, rankTier, tournamentRanks } from '../src/tournament-ranks.js';
+import {
+  applyTournamentResult,
+  formatTournamentStandings,
+  rankTier,
+  tournamentRanks,
+} from '../src/tournament-ranks.js';
 
 test('initial account Elo placement stops at Gold', () => {
   assert.equal(rankTier(1349), 'Bronze');
@@ -33,4 +38,31 @@ test('Challenger points and stars track wins and losses independently', () => {
 
 test('rank metadata exposes the promotion threshold for the UI', () => {
   assert.deepEqual(tournamentRanks().map(rank => rank.starsToPromote), [10, 20, 30, 40, 40]);
+});
+
+test('tournament standings use the field names expected by the UI', () => {
+  assert.deepEqual(
+    formatTournamentStandings([{
+      playerId: 'player-1',
+      displayName: 'Test player',
+      tier: 'Bronze',
+      stars: 0,
+      seasonPoints: 0,
+      matchesPlayed: 0,
+      wins: 0,
+      draws: 0,
+      losses: 0,
+    }]),
+    [{
+      player_id: 'player-1',
+      display_name: 'Test player',
+      tier: 'Bronze',
+      rank_stars: 0,
+      season_points: 0,
+      matches_played: 0,
+      wins: 0,
+      draws: 0,
+      losses: 0,
+    }]
+  );
 });

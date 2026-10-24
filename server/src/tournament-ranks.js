@@ -64,3 +64,17 @@ export function tournamentRanks() {
     tier, label: RANK_LABELS[tier], index, starsToPromote: RANK_PROMOTION_STARS[tier]
   }));
 }
+
+export function formatTournamentStandings(rows) {
+  return rows.map(row => ({
+    player_id: row.playerId,
+    display_name: row.displayName,
+    tier: row.tier,
+    rank_stars: row.stars,
+    season_points: row.seasonPoints,
+    matches_played: row.matchesPlayed,
+    wins: row.wins,
+    draws: row.draws,
+    losses: row.losses
+  }));
+}
