@@ -159,6 +159,17 @@ function AppWorkspace() {
     const offMatchFound = backendClient.on('match-found', (pkt) => {
       const m = pkt.match;
       if (!m) return;
+      const currentUser = backendClient.user;
+      const isPlayer1 =
+        pkt.role === 'player1' || (currentUser?.id && m.player1_id === currentUser.id);
+      const isPlayer2 =
+        pkt.role === 'player2' || (currentUser?.id && m.player2_id === currentUser.id);
+      const mySeat: ActiveMatchSession['mySeat'] =
+        pkt.seat === 1 || pkt.seat === 2 ? pkt.seat : isPlayer1 ? 1 : isPlayer2 ? 2 : null;
+      const player1 = m.player1 || (mySeat === 1 ? currentUser : pkt.opponent);
+      const player2 = m.player2 || (mySeat === 2 ? currentUser : pkt.opponent);
+      const mode: ActiveMatchSession['mode'] =
+        m.match_type === 'human' || pkt.mode === 'human' || m.mode === 'human' ? 'human' : 'bot';
       const isSparring =
         pendingSparringMatchId === m.id ||
         pkt.opponent?.id === '00000000-0000-4000-8000-000000000001';
@@ -168,12 +179,12 @@ function AppWorkspace() {
         matchId: m.id,
         seed: m.seed,
         pieceCount: m.pieceCount || 9,
-        mode: m.mode || 'bot',
-        mySeat: pkt.seat,
-        player1Name: m.player1?.displayName || 'Player 1',
-        player2Name: m.player2?.displayName || 'Player 2',
-        player1Elo: m.player1?.elo,
-        player2Elo: m.player2?.elo,
+        mode,
+        mySeat,
+        player1Name: player1?.displayName || 'Player 1',
+        player2Name: player2?.displayName || 'Player 2',
+        player1Elo: player1?.elo,
+        player2Elo: player2?.elo,
         rules: m.rules || null,
         tournamentId: m.tournamentId || null,
         tournamentPhase: m.tournamentPhase || null,
