@@ -1040,7 +1040,7 @@ const httpServer = createServer(async (req, res) => {
       const result = await pool.query(
         `SELECT t.id,t.name,t.format,t.description,t.status,t.registration_closes_at,t.ends_at,
                 t.max_teams,t.current_week,t.rules_json,t.created_at,
-                count(e.tournament_id)::int AS team_count
+                count(e.tournament_id)::int AS participant_count
          FROM tournaments t LEFT JOIN tournament_entries e ON e.tournament_id=t.id
          WHERE t.status IN ('registration','qualifying','completed')
          GROUP BY t.id ORDER BY CASE t.status WHEN 'registration' THEN 0 WHEN 'qualifying' THEN 1 ELSE 2 END,t.created_at DESC`
