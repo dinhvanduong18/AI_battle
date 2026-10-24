@@ -1,4 +1,4 @@
-import http from 'node:http';
+﻿import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -100,7 +100,7 @@ function applyTournamentResult(tier: RankTier, stars: number, seasonPoints: numb
       if (tier === 'Challenger') nextPoints = Math.max(0, seasonPoints - 1);
     } else if (rankIndex > 0) {
       nextTier = TOURNAMENT_RANKS[rankIndex - 1];
-      nextStars = Math.floor(RANK_PROMOTION_STARS[nextTier] / 2);
+      nextStars = RANK_PROMOTION_STARS[nextTier] - 1;
       if (tier === 'Challenger') nextPoints = 0;
     }
   }
@@ -257,9 +257,9 @@ function verifyReplay(replay: any, expectedSeed: number, expectedMatchId: string
       throw new Error(`Mã băm trạng thái lượt ${i + 1} không khớp.`);
     }
   }
-  if (!state.winner) throw new Error('Replay chưa đi đến trạng thái phân định thắng thua.');
+  if (state.winner === null || state.winner === undefined) throw new Error('Replay chưa đi đến trạng thái phân định thắng thua.');
   return {
-    winner: state.winner as 1 | 2,
+    winner: state.winner as 1 | 2 | 0,
     stepCount: state.stepCount as number,
     finalHash: sha256Canonical(statePayload(state)),
   };
@@ -699,7 +699,7 @@ function pickTacticalBotMove(state: any, botSeat: 1 | 2) {
   let best = validMoves[0];
   let bestScore = -Infinity;
   for (const m of validMoves) {
-    if (m.to === 8 || m.to === 72) {
+    const targetWin = botSeat === 1 ? 8 : 72;`r`n    if (m.to === targetWin) {
       return { from: m.from, to: m.to };
     }
     let score = m.isAttack ? 145 : 0;
@@ -1193,7 +1193,7 @@ async function startServer() {
         losses: 0,
         points: 0,
         tournament_elo: user.elo,
-        tier: rankTierFromElo(user.elo),
+        tier: t.status === 'qualifying' ? 'Bronze' : rankTierFromElo(user.elo),
         rank_stars: 0,
         season_points: 0,
         registered_at: new Date().toISOString(),
@@ -1273,7 +1273,7 @@ async function startServer() {
 
       const u1 = db.users.find((u) => u.id === match.player1_id)!;
       const u2 = db.users.find((u) => u.id === match.player2_id)!;
-      const score1 = replayResult.winner === 1 ? 1 : 0;
+      const score1 = replayResult.winner === 1 ? 1 : replayResult.winner === 2 ? 0 : 0.5;
       const eloUpdated = match.match_type === 'bot';
       const u1Before = u1.elo;
       const u2Before = u2.elo;
@@ -1300,7 +1300,8 @@ async function startServer() {
           if (!entry) continue;
           entry.matches_played += 1;
           if (sc === 1) entry.wins += 1;
-          else entry.losses += 1;
+          else if (sc === 0) entry.losses += 1;
+          else entry.draws += 1;
           if (match.tournament_phase === 'ranked') {
             const prog = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, sc);
             entry.tier = prog.tier;
@@ -1321,7 +1322,7 @@ async function startServer() {
 
       const replayChecksum = sha256Canonical(body.replay);
       match.status = 'completed';
-      match.winner_id = replayResult.winner === 1 ? u1.id : u2.id;
+      match.winner_id = replayResult.winner === 1 ? u1.id : replayResult.winner === 2 ? u2.id : null;
       match.final_state_hash = replayResult.finalHash;
       match.replay_sha256 = replayChecksum;
       match.replay_json = body.replay;
@@ -1359,11 +1360,139 @@ async function startServer() {
     }
   });
 
-  app.post('/api/match/claim-disconnect', (req: Request, res: Response) => {
-    res.status(202).json({
-      status: 'needs-review',
-      message: 'Bằng chứng ngắt kết nối đã được ghi nhận để đối chiếu.',
-    });
+    app.post('/api/match/claim-disconnect', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      const matchId = String(req.body?.matchId || '');
+      const match = db.matches.find((m) => m.id === matchId);
+      if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
+        res.status(404).json({ error: 'KhÃ´ng tÃ¬m tháº¥y tráº­n Ä‘áº¥u cá»§a báº¡n.' });
+        return;
+      }
+      if (match.status === 'completed') {
+        const mr = db.matchResults.find((r) => r.match_id === match.id);
+        res.json({
+          alreadySubmitted: true,
+          matchId: match.id,
+          winnerId: match.winner_id,
+          finalStateHash: match.final_state_hash,
+          elo: mr
+            ? {
+                player1: { before: mr.player1_elo_before, after: mr.player1_elo_after },
+                player2: { before: mr.player2_elo_before, after: mr.player2_elo_after },
+              }
+            : null,
+          eloUpdated: match.match_type === 'bot',
+        });
+        return;
+      }
+      if (match.status !== 'active') {
+        res.status(409).json({ error: 'Tráº­n Ä‘áº¥u khÃ´ng cÃ²n á»Ÿ tráº¡ng thÃ¡i Ä‘ang diá»…n ra.' });
+        return;
+      }
+
+      const opponentId = match.player1_id === user.id ? match.player2_id : match.player1_id;
+      const oppSocket = liveSockets.get(opponentId);
+
+      match.status = 'completed';
+      match.winner_id = user.id;
+      match.completed_at = new Date().toISOString();
+      sparringSessions.delete(match.id);
+
+      const u1 = db.users.find((u) => u.id === match.player1_id)!;
+      const u2 = db.users.find((u) => u.id === match.player2_id)!;
+      const score1 = user.id === match.player1_id ? 1 : 0;
+      const eloUpdated = match.match_type === 'bot';
+      const u1Before = u1.elo;
+      const u2Before = u2.elo;
+      const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
+      const u2After = eloUpdated ? calculateElo(u2Before, u1Before, 1 - score1) : u2Before;
+
+      if (eloUpdated) {
+        u1.elo = u1After;
+        u2.elo = u2After;
+      }
+
+      let tournamentUpdate: any = null;
+      if (match.tournament_id) {
+        const e1 = db.tournamentEntries.find(
+          (e) => e.tournament_id === match.tournament_id && e.player_id === u1.id
+        );
+        const e2 = db.tournamentEntries.find(
+          (e) => e.tournament_id === match.tournament_id && e.player_id === u2.id
+        );
+        for (const [entry, sc] of [
+          [e1, score1],
+          [e2, 1 - score1],
+        ] as const) {
+          if (!entry) continue;
+          entry.matches_played += 1;
+          if (sc === 1) entry.wins += 1;
+          else if (sc === 0) entry.losses += 1;
+          else entry.draws += 1;
+          if (match.tournament_phase === 'ranked') {
+            const prog = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, sc);
+            entry.tier = prog.tier;
+            entry.rank_stars = prog.stars;
+            entry.season_points = prog.seasonPoints;
+            entry.points = entry.wins;
+          }
+          if (entry.player_id === user.id) {
+            tournamentUpdate = {
+              tier: entry.tier,
+              stars: entry.rank_stars,
+              seasonPoints: entry.season_points,
+              phase: match.tournament_phase,
+            };
+          }
+        }
+      }
+
+      db.matchResults.push({
+        match_id: match.id,
+        player1_elo_before: u1Before,
+        player2_elo_before: u2Before,
+        player1_elo_after: u1After,
+        player2_elo_after: u2After,
+        result_player1: score1,
+        created_at: match.completed_at,
+      });
+
+      saveDb();
+
+      if (oppSocket && oppSocket.readyState === WebSocket.OPEN) {
+        sendWs(oppSocket, 'match-forfeited-loss', {
+          matchId: match.id,
+          winnerId: user.id,
+          message: 'Äá»‘i thá»§ Ä‘Ã£ yÃªu cáº§u xá»­ tháº¯ng ká»¹ thuáº­t do báº¡n ngáº¯t káº¿t ná»‘i hoáº·c rá»i tráº­n.',
+        });
+      }
+
+      const claimantSocket = liveSockets.get(user.id);
+      if (claimantSocket) {
+        sendWs(claimantSocket, 'match-forfeited-win', {
+          matchId: match.id,
+          winnerId: user.id,
+          message: 'Xá»­ tháº¯ng ká»¹ thuáº­t thÃ nh cÃ´ng! Äá»‘i thá»§ Ä‘Ã£ rá»i bÃ n hoáº·c máº¥t káº¿t ná»‘i.',
+        });
+      }
+
+      res.json({
+        ok: true,
+        matchId: match.id,
+        winnerId: user.id,
+        message: 'Xá»­ tháº¯ng ká»¹ thuáº­t thÃ nh cÃ´ng! Äá»‘i thá»§ Ä‘Ã£ rá»i bÃ n hoáº·c máº¥t káº¿t ná»‘i.',
+        elo: {
+          player1: { before: u1Before, after: u1After },
+          player2: { before: u2Before, after: u2After },
+        },
+        eloUpdated,
+        tournamentUpdate,
+      });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
   });
 
   app.post('/api/match/consensus-dispute', (req: Request, res: Response) => {
@@ -1810,18 +1939,66 @@ async function startServer() {
             from: user.id,
             payload: packet.payload,
           });
-        } else if (packet.type === 'bot-setup-failed') {
+                } else if (packet.type === 'bot-forfeit' || packet.type === 'bot-setup-failed') {
           const match = db.matches.find((m) => m.id === packet.matchId && m.status === 'active');
           if (match) {
-            match.status = 'abandoned';
+            const forfeitingUserId = user.id;
+            const winningUserId = match.player1_id === forfeitingUserId ? match.player2_id : match.player1_id;
+            match.status = 'completed';
+            match.winner_id = winningUserId;
+            match.completed_at = new Date().toISOString();
             sparringSessions.delete(match.id);
+
+            const u1 = db.users.find((u) => u.id === match.player1_id)!;
+            const u2 = db.users.find((u) => u.id === match.player2_id)!;
+            const score1 = winningUserId === match.player1_id ? 1 : 0;
+            const eloUpdated = match.match_type === 'bot';
+            const u1Before = u1.elo;
+            const u2Before = u2.elo;
+            const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
+            const u2After = eloUpdated ? calculateElo(u2Before, u1Before, 1 - score1) : u2Before;
+
+            if (eloUpdated) {
+              u1.elo = u1After;
+              u2.elo = u2After;
+            }
+
+            if (match.tournament_id) {
+              const e1 = db.tournamentEntries.find((e) => e.tournament_id === match.tournament_id && e.player_id === u1.id);
+              const e2 = db.tournamentEntries.find((e) => e.tournament_id === match.tournament_id && e.player_id === u2.id);
+              for (const [entry, sc] of [[e1, score1], [e2, 1 - score1]] as const) {
+                if (!entry) continue;
+                entry.matches_played += 1;
+                if (sc === 1) entry.wins += 1;
+                else entry.losses += 1;
+                if (match.tournament_phase === 'ranked') {
+                  const prog = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, sc);
+                  entry.tier = prog.tier;
+                  entry.rank_stars = prog.stars;
+                  entry.season_points = prog.seasonPoints;
+                  entry.points = entry.wins;
+                }
+              }
+            }
+
+            db.matchResults.push({
+              match_id: match.id,
+              player1_elo_before: u1Before,
+              player2_elo_before: u2Before,
+              player1_elo_after: u1After,
+              player2_elo_after: u2After,
+              result_player1: score1,
+              created_at: match.completed_at,
+            });
+
             saveDb();
-            const peerId = match.player1_id === user.id ? match.player2_id : match.player1_id;
-            const msg = 'Trận đã hủy vì một Bot gặp lỗi khởi tạo. Hãy kiểm tra mã Python rồi thử lại.';
-            sendWs(liveSockets.get(peerId), 'match-aborted', { matchId: match.id, message: msg });
-            sendWs(ws, 'match-aborted', { matchId: match.id, message: msg });
+
+            const peerSocket = liveSockets.get(winningUserId);
+            const forfeitMsg = 'Äá»‘i thá»§ gáº·p lá»—i Python / TLE. Báº¡n giÃ nh chiáº¿n tháº¯ng ká»¹ thuáº­t!';
+            sendWs(peerSocket, 'match-forfeited-win', { matchId: match.id, winnerId: winningUserId, message: forfeitMsg });
+            sendWs(ws, 'match-forfeited-loss', { matchId: match.id, winnerId: winningUserId, message: 'Bot cá»§a báº¡n gáº·p lá»—i / TLE vÃ  bá»‹ xá»­ thua ká»¹ thuáº­t.' });
           }
-        } else if (packet.type === 'ping') {
+} else if (packet.type === 'ping') {
           sendWs(ws, 'pong', { at: Date.now() });
         }
       } catch (err: any) {

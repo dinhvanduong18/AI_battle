@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bot,
@@ -8,8 +8,10 @@ import {
   Loader2,
   Play,
   RotateCcw,
+  ShieldAlert,
   ShieldCheck,
   Swords,
+  WifiOff,
 } from 'lucide-react';
 import {
   OTTGameEngine,
@@ -112,6 +114,10 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const [peerBotReady, setPeerBotReady] = useState(!isBotMatch);
   const [loadingPyodide, setLoadingPyodide] = useState(false);
 
+  // Disconnect & Forfeit handling
+  const [peerOffline, setPeerOffline] = useState(false);
+  const [claimingWin, setClaimingWin] = useState(false);
+
   // Consensus Cryptographic State
   const identityRef = useRef<ConsensusIdentity | null>(null);
   const peerPubKeyRef = useRef<CryptoKey | null>(null);
@@ -191,7 +197,14 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
   const signAndBroadcastFinalProof = useCallback(
     async (finalState: GameState) => {
-      if (!identityRef.current || session.mySeat === null || !finalState.winner) return;
+      if (
+        !identityRef.current ||
+        session.mySeat === null ||
+        finalState.winner === null ||
+        finalState.winner === undefined
+      ) {
+        return;
+      }
       const stateHash = await hashState(finalState);
       const proof = {
         matchId: session.matchId,
@@ -220,7 +233,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (
         !identityRef.current ||
         session.mySeat === null ||
-        current.winner ||
+        current.winner !== null ||
         current.turn !== session.mySeat
       ) {
         return;
@@ -313,14 +326,39 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         attestation: { payload: ackPayload, signature: ackSig },
       });
 
-      if (nextState.winner) {
+      if (nextState.winner !== null) {
         if (nextState.winner === session.mySeat) soundFx.playVictory();
+        else if (nextState.winner === 0) soundFx.playMove();
         else soundFx.playDefeat();
         await signAndBroadcastFinalProof(nextState);
       }
     },
     [sendMessageToPeer, session.matchId, session.mySeat, signAndBroadcastFinalProof]
   );
+
+  // Claim Technical Win if opponent disconnects / abandons match
+  const handleClaimDisconnect = async () => {
+    if (session.source !== 'backend' || session.mySeat === null) return;
+    try {
+      setClaimingWin(true);
+      const res = await backendClient.claimDisconnect(session.matchId);
+      const myEloObj = session.mySeat === 1 ? res.elo?.player1 : res.elo?.player2;
+      setResultSummary({
+        eloBefore: myEloObj?.before,
+        eloAfter: myEloObj?.after,
+        eloUpdated: res.eloUpdated,
+        tournamentUpdate: res.tournamentUpdate || null,
+        verified: true,
+      });
+      setGameState((prev) => ({ ...prev, winner: session.mySeat }));
+      notify(res.message || 'Xử thắng kỹ thuật thành công!', 'success');
+      soundFx.playVictory();
+    } catch (err: any) {
+      notify(err.message || 'Không thể gửi yêu cầu xử thắng.', 'error');
+    } finally {
+      setClaimingWin(false);
+    }
+  };
 
   // Setup Consensus Identity & Peer Message Listener
   useEffect(() => {
@@ -369,6 +407,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         if (!peerPubKeyRef.current) {
           peerPubKeyRef.current = await importPublicKey(packet.publicKey);
           setConsensusReady(true);
+          setPeerOffline(false);
           if (identityRef.current && session.mySeat !== null) {
             sendMessageToPeer({
               type: 'CONSENSUS_HELLO',
@@ -383,10 +422,12 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
       if (packet.type === 'BOT_READY') {
         setPeerBotReady(true);
+        setPeerOffline(false);
         return;
       }
 
       if (packet.type === 'CONSENSUS_COMMIT' && packet.attestation) {
+        setPeerOffline(false);
         pendingPeerCommitRef.current = {
           stepCount: packet.attestation.payload?.stepCount,
           hash: packet.attestation.payload?.hash,
@@ -396,6 +437,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       }
 
       if (packet.type === 'CONSENSUS_REVEAL' && packet.attestation) {
+        setPeerOffline(false);
         const payload = packet.attestation.payload;
         if (!payload || payload.player === session.mySeat) return;
         const curr = stateRef.current;
@@ -464,8 +506,9 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           });
         }
 
-        if (nextState.winner) {
+        if (nextState.winner !== null) {
           if (nextState.winner === session.mySeat) soundFx.playVictory();
+          else if (nextState.winner === 0) soundFx.playMove();
           else soundFx.playDefeat();
           await signAndBroadcastFinalProof(nextState);
         }
@@ -493,11 +536,54 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           })
         : () => {};
 
+    const unsubPeerOffline =
+      session.source === 'backend'
+        ? backendClient.on('peer-offline', (pkt) => {
+            if (pkt.matchId === session.matchId) {
+              setPeerOffline(true);
+              notify('Đối thủ đã mất kết nối hoặc rời trận!', 'warning');
+            }
+          })
+        : () => {};
+
+    const unsubForfeitWin =
+      session.source === 'backend'
+        ? backendClient.on('match-forfeited-win', (pkt) => {
+            if (pkt.matchId === session.matchId) {
+              notify(pkt.message || 'Đối thủ bị xử thua kỹ thuật. Bạn giành chiến thắng!', 'success');
+              soundFx.playVictory();
+              setGameState((prev) => ({ ...prev, winner: session.mySeat }));
+              setResultSummary((prev) => ({
+                ...prev,
+                verified: true,
+              }));
+            }
+          })
+        : () => {};
+
+    const unsubForfeitLoss =
+      session.source === 'backend'
+        ? backendClient.on('match-forfeited-loss', (pkt) => {
+            if (pkt.matchId === session.matchId) {
+              notify(pkt.message || 'Bạn bị xử thua kỹ thuật!', 'error');
+              soundFx.playDefeat();
+              setGameState((prev) => ({ ...prev, winner: session.mySeat === 1 ? 2 : 1 }));
+              setResultSummary((prev) => ({
+                ...prev,
+                verified: true,
+              }));
+            }
+          })
+        : () => {};
+
     return () => {
       active = false;
       if (helloInterval) clearInterval(helloInterval);
       unsub();
       unsubAborted();
+      unsubPeerOffline();
+      unsubForfeitWin();
+      unsubForfeitLoss();
       botRunnerRef.current?.destroy();
     };
   }, [
@@ -518,7 +604,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       !peerBotReady ||
       !consensusReady ||
       !botRunnerRef.current?.ready ||
-      gameState.winner ||
+      gameState.winner !== null ||
       gameState.turn !== session.mySeat ||
       steppingBotRef.current
     ) {
@@ -529,14 +615,15 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     const timer = setTimeout(async () => {
       try {
         const curr = stateRef.current;
-        if (curr.winner || curr.turn !== session.mySeat || !botRunnerRef.current) return;
+        if (curr.winner !== null || curr.turn !== session.mySeat || !botRunnerRef.current) return;
         const botState = OTTGameEngine.createBotGameState(curr, session.mySeat);
         const moveRes = await botRunnerRef.current.getMove(session.mySeat, botState);
         await proposeMyMove({ from: moveRes.from, to: moveRes.to }, moveRes.elapsedMs);
       } catch (err: any) {
-        notify(`Bot của bạn gặp lỗi: ${err.message}`, 'error');
+        notify(`Bot của bạn gặp lỗi / TLE: ${err.message}. Xử thua kỹ thuật!`, 'error');
+        soundFx.playDefeat();
         if (session.source === 'backend') {
-          backendClient.abortBotSetup(session.matchId, err.message);
+          backendClient.botForfeit(session.matchId, err.message);
         }
       } finally {
         steppingBotRef.current = false;
@@ -593,7 +680,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       session.mySeat === null ||
       session.mode === 'bot' ||
       !consensusReady ||
-      gameState.winner ||
+      gameState.winner !== null ||
       gameState.turn !== session.mySeat
     ) {
       return;
@@ -620,7 +707,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   };
 
   const counts = OTTGameEngine.countPieces(gameState.board);
-  const isMyTurn = session.mySeat !== null && gameState.turn === session.mySeat && !gameState.winner;
+  const isMyTurn = session.mySeat !== null && gameState.turn === session.mySeat && gameState.winner === null;
 
   const exportCurrentReplay = () => {
     const replayPayload = {
@@ -704,6 +791,24 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         </div>
       </div>
 
+      {/* Peer Disconnected Alert Banner */}
+      {peerOffline && gameState.winner === null && session.source === 'backend' && session.mySeat !== null && (
+        <div className="p-4 rounded-2xl border border-amber-500/40 bg-amber-950/25 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 text-xs text-amber-200">
+            <WifiOff className="w-4 h-4 text-amber-400" />
+            <span>Đối thủ đã mất kết nối hoặc đóng trình duyệt. Bạn có thể yêu cầu Xử Thắng Kỹ Thuật ngay lập tức.</span>
+          </div>
+          <button
+            type="button"
+            disabled={claimingWin}
+            onClick={handleClaimDisconnect}
+            className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-amber-600 hover:bg-amber-500 disabled:opacity-50 transition-colors cursor-pointer"
+          >
+            {claimingWin ? 'Đang gửi yêu cầu…' : 'Yêu cầu Xử Thắng (Rage Quit)'}
+          </button>
+        </div>
+      )}
+
       {/* Bot Ready Selection Banner (for Bot vs Bot before start) */}
       {isBotMatch && (!myBotReady || !peerBotReady) && (
         <div className="p-5 rounded-2xl border border-[var(--border-accent)] bg-[var(--bg-panel)] flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
@@ -772,7 +877,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             {/* Player 1 */}
             <div
               className={`sm:col-span-5 p-3 rounded-xl border transition-colors ${
-                gameState.turn === 1 && !gameState.winner
+                gameState.turn === 1 && gameState.winner === null
                   ? 'border-[var(--p1-border)] bg-[var(--p1-bg)]'
                   : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)]'
               }`}
@@ -803,7 +908,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             {/* Player 2 */}
             <div
               className={`sm:col-span-5 p-3 rounded-xl border transition-colors ${
-                gameState.turn === 2 && !gameState.winner
+                gameState.turn === 2 && gameState.winner === null
                   ? 'border-[var(--p2-border)] bg-[var(--p2-bg)]'
                   : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)]'
               }`}
@@ -824,12 +929,24 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             </div>
           </div>
 
-          {/* Turn Banner / Victory Banner */}
-          {gameState.winner ? (
-            <div className="p-5 rounded-2xl border border-emerald-500/40 bg-emerald-950/25 flex flex-wrap items-center justify-between gap-4">
+          {/* Turn Banner / Victory / Draw Banner */}
+          {gameState.winner !== null ? (
+            <div
+              className={`p-5 rounded-2xl border flex flex-wrap items-center justify-between gap-4 ${
+                gameState.winner === 0
+                  ? 'border-amber-500/40 bg-amber-950/25'
+                  : 'border-emerald-500/40 bg-emerald-950/25'
+              }`}
+            >
               <div>
-                <h3 className="text-lg font-bold text-emerald-300">
-                  {session.mySeat === null
+                <h3
+                  className={`text-lg font-bold ${
+                    gameState.winner === 0 ? 'text-amber-300' : 'text-emerald-300'
+                  }`}
+                >
+                  {gameState.winner === 0
+                    ? 'Ván cờ Hòa! (Hết nước đi hoặc đạt mốc 180 lượt)'
+                    : session.mySeat === null
                     ? `${gameState.winner === 1 ? session.player1Name : session.player2Name} giành chiến thắng!`
                     : gameState.winner === session.mySeat
                     ? 'Chiến thắng thuyết phục!'
@@ -896,6 +1013,16 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                     : 'Lượt của bạn — Hãy chọn quân cờ để di chuyển'
                   : 'Đang chờ nước đi của đối thủ…'}
               </span>
+              {session.source === 'backend' && session.mySeat !== null && !peerOffline && (
+                <button
+                  type="button"
+                  onClick={handleClaimDisconnect}
+                  title="Nếu đối thủ cố tình đóng trình duyệt hoặc bỏ chạy, bấm để hệ thống kiểm tra và xử thắng ngay"
+                  className="text-[11px] text-[var(--text-secondary)] hover:text-amber-400 underline ml-2 cursor-pointer"
+                >
+                  Đối thủ bỏ chạy?
+                </button>
+              )}
               <span className="text-[var(--text-secondary)] hidden sm:inline">
                 Bí Ngô (Đấm) ăn Dơi (Kéo) · Dơi ăn Bé Ma (Lá) · Bé Ma ăn Bí Ngô
               </span>
@@ -958,12 +1085,12 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
           <div className="p-4 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-2 text-xs text-[var(--text-secondary)]">
             <h4 className="font-bold text-[var(--text-primary)]">Quy tắc thắng nhanh OTTv2</h4>
-            <p>1. Đưa bất kỳ quân cờ nào tiến vào một trong hai ô đích góc bàn cờ (a1 hoặc i9).</p>
+            <p>1. Phe 1 đưa quân vào căn cứ Phe 2 (i9), hoặc Phe 2 đưa quân vào căn cứ Phe 1 (a1) để thắng ngay.</p>
             <p>
               2. Hoặc tiêu diệt toàn bộ 1 trong 3 hệ linh vật (Bí Ngô - Đấm, Bé Ma - Lá hoặc Dơi - Kéo) của đối phương.
             </p>
             <p>
-              3. Quân chỉ di chuyển 1 ô theo 8 hướng lân cận: Bí Ngô ăn Dơi · Dơi ăn Bé Ma · Bé Ma ăn Bí Ngô.
+              3. Hòa cờ khi đối thủ không còn nước đi hợp lệ hoặc ván đấu chạm mốc 180 lượt.
             </p>
           </div>
         </div>

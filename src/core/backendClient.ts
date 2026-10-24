@@ -1,4 +1,4 @@
-export interface BackendUser {
+﻿export interface BackendUser {
   id: string;
   email: string;
   displayName: string;
@@ -278,6 +278,12 @@ export class BackendClient {
     return res;
   }
 
+  async claimDisconnect(matchId: string) {
+    const res = await this.request('/api/match/claim-disconnect', 'POST', { matchId }, true);
+    await this.refreshMe().catch(() => {});
+    return res;
+  }
+
   // ── WebSocket + Dual-Transport P2P Connection ─────────────────
   async connectWs(): Promise<void> {
     if (!this.token) throw new Error('Vui lòng đăng nhập trước khi kết nối máy chủ thi đấu.');
@@ -452,7 +458,13 @@ export class BackendClient {
 
   abortBotSetup(matchId: string, message: string) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.sendWs({ type: 'bot-setup-failed', matchId, message });
+      this.sendWs({ type: 'bot-forfeit', matchId, message });
+    }
+  }
+
+  botForfeit(matchId: string, message: string) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.sendWs({ type: 'bot-forfeit', matchId, message });
     }
   }
 

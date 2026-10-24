@@ -6,9 +6,10 @@
 export const COLS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] as const;
 export const ROWS = 9;
 export const TOTAL_CELLS = 81;
+export const MAX_MATCH_STEPS = 180; // Trận đấu tự động Hòa nếu chạm 180 lượt
 
-export const SPECIAL_A1_INDEX = 72; // row 8, col 0 (P2 target / bottom-left shrine)
-export const SPECIAL_I9_INDEX = 8;  // row 0, col 8 (P1 target / top-right shrine)
+export const SPECIAL_A1_INDEX = 72; // row 8, col 0 (Căn cứ P1, mục tiêu chiến thắng của P2)
+export const SPECIAL_I9_INDEX = 8;  // row 0, col 8 (Căn cứ P2, mục tiêu chiến thắng của P1)
 
 export const PIECE = {
   EMPTY: 0,
@@ -112,7 +113,7 @@ export interface GameState {
   board: Int8Array;
   turn: 1 | 2;
   stepCount: number;
-  winner: 1 | 2 | null;
+  winner: 1 | 2 | 0 | null; // 1: P1 thắng, 2: P2 thắng, 0: Hòa cờ (Draw), null: đang diễn ra
   lastMove: LastMoveInfo | null;
   rules: BoardRules | null;
 }
@@ -160,7 +161,8 @@ export function computeFastHash(state: GameState): string {
   hash = Math.imul(hash, 0x01000193);
   hash ^= state.stepCount & 0xffff;
   hash = Math.imul(hash, 0x01000193);
-  hash ^= (state.winner || 0) & 0xff;
+  const winVal = state.winner === null || state.winner === undefined ? 255 : state.winner & 0xff;
+  hash ^= winVal;
   hash = Math.imul(hash, 0x01000193);
   if (state.rules) {
     const rules = state.rules;
@@ -175,7 +177,9 @@ export function computeFastHash(state: GameState): string {
 
 export class OTTGameEngine {
   static createGame(seed = 1234567, pieceCountPerSide = 9, rules: Partial<BoardRules> | null = null): GameState {
-    const count = Math.max(3, Math.min(36, Math.floor(pieceCountPerSide || 9)));
+    let requestedCount = Math.floor(pieceCountPerSide || 9);
+    requestedCount = Math.max(6, Math.min(24, Math.round(requestedCount / 3) * 3));
+
     const board = new Int8Array(TOTAL_CELLS);
     const rng = mulberry32(seed);
 
@@ -204,18 +208,24 @@ export class OTTGameEngine {
     const p1Indices: number[] = [];
     for (let r = 0; r < 9; r++) {
       for (let c = 0; c < 9; c++) {
-        if (r > c && !blocked.has(r * 9 + c) && !blocked.has(c * 9 + r)) {
-          p1Indices.push(r * 9 + c);
+        const idx1 = r * 9 + c;
+        const idx2 = c * 9 + r;
+        if (r > c && idx1 !== SPECIAL_A1_INDEX && idx2 !== SPECIAL_I9_INDEX && !blocked.has(idx1) && !blocked.has(idx2)) {
+          p1Indices.push(idx1);
         }
       }
     }
 
-    const actualCount = Math.min(count, p1Indices.length);
+    let actualCount = Math.min(requestedCount, p1Indices.length);
+    actualCount = Math.max(3, Math.floor(actualCount / 3) * 3);
     if (actualCount < 3) throw new Error('Bộ luật tuần chặn quá nhiều ô khởi đầu.');
 
     const piecePool: number[] = [];
-    for (let i = 0; i < actualCount; i++) {
-      piecePool.push((i % 3) + 1);
+    const countPerType = actualCount / 3;
+    for (let t = 1; t <= 3; t++) {
+      for (let j = 0; j < countPerType; j++) {
+        piecePool.push(t);
+      }
     }
 
     const shuffledIndices = seededShuffle(p1Indices, rng).slice(0, actualCount);
@@ -258,7 +268,7 @@ export class OTTGameEngine {
   }
 
   static getValidMoves(state: GameState, fromIndex: number): ValidMove[] {
-    if (state.winner) return [];
+    if (state.winner !== null) return [];
     if (fromIndex < 0 || fromIndex >= TOTAL_CELLS) return [];
     const blocked = new Set(state.rules?.blockedCells || []);
     if (blocked.has(fromIndex)) return [];
@@ -278,8 +288,7 @@ export class OTTGameEngine {
       if (nr < 0 || nr >= 9 || nc < 0 || nc >= 9) continue;
       const toIndex = nr * 9 + nc;
       if (blocked.has(toIndex)) continue;
-      // Player 1 tries to reach i9 (index 8), cannot enter own base shrine a1 (72)?
-      // Wait: check original OTTGameEngine.js rules on special cells!
+
       const target = state.board[toIndex];
       if (target === PIECE.EMPTY) {
         valid.push({ from: fromIndex, to: toIndex, isAttack: false });
@@ -294,7 +303,7 @@ export class OTTGameEngine {
   }
 
   static getAllValidMoves(state: GameState): ValidMove[] {
-    if (state.winner) return [];
+    if (state.winner !== null) return [];
     const allMoves: ValidMove[] = [];
     for (let i = 0; i < TOTAL_CELLS; i++) {
       const piece = state.board[i];
@@ -309,8 +318,13 @@ export class OTTGameEngine {
   }
 
   static checkWinCondition(board: Int8Array, lastMove: LastMoveInfo | null, movingPlayer: 1 | 2): 1 | 2 | null {
-    if (lastMove && (lastMove.to === SPECIAL_A1_INDEX || lastMove.to === SPECIAL_I9_INDEX)) {
-      return movingPlayer;
+    if (lastMove) {
+      if (movingPlayer === 1 && lastMove.to === SPECIAL_I9_INDEX) {
+        return 1;
+      }
+      if (movingPlayer === 2 && lastMove.to === SPECIAL_A1_INDEX) {
+        return 2;
+      }
     }
     const opponent = movingPlayer === 1 ? 2 : 1;
     let oppRock = 0;
@@ -334,7 +348,7 @@ export class OTTGameEngine {
   }
 
   static applyMove(state: GameState, move: { from: number; to: number }): GameState {
-    if (state.winner) throw new Error('Ván đấu đã kết thúc.');
+    if (state.winner !== null) throw new Error('Ván đấu đã kết thúc.');
     if (!move || !Number.isInteger(move.from) || !Number.isInteger(move.to)) {
       throw new Error('Nước đi không hợp lệ.');
     }
@@ -365,8 +379,33 @@ export class OTTGameEngine {
       piece,
       captured: captured || null,
     };
-    const winner = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
-    const nextTurn: 1 | 2 = winner ? state.turn : state.turn === 1 ? 2 : 1;
+
+    let winner = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
+    const nextTurnCandidate: 1 | 2 = state.turn === 1 ? 2 : 1;
+
+    // Draw check 1: Max steps reached
+    if (winner === null && nextStepCount >= MAX_MATCH_STEPS) {
+      winner = 0; // Hòa cờ (Draw)
+    }
+
+    // Draw check 2: Stalemate (Next player has no legal moves)
+    if (winner === null) {
+      const probeState: GameState = {
+        seed: state.seed,
+        pieceCount: state.pieceCount,
+        board: nextBoard,
+        turn: nextTurnCandidate,
+        stepCount: nextStepCount,
+        winner: null,
+        lastMove: lastMoveInfo,
+        rules: state.rules || null,
+      };
+      if (this.getAllValidMoves(probeState).length === 0) {
+        winner = 0; // Hòa cờ do đối thủ hết nước đi (Stalemate)
+      }
+    }
+
+    const nextTurn: 1 | 2 = winner !== null ? state.turn : nextTurnCandidate;
 
     return {
       seed: state.seed,
@@ -423,7 +462,7 @@ export class OTTGameEngine {
       board: new Int8Array(obj.board),
       turn: obj.turn,
       stepCount: obj.stepCount,
-      winner: obj.winner || null,
+      winner: obj.winner === undefined ? null : obj.winner,
       lastMove: obj.lastMove || null,
       rules: obj.rules || null,
     };
@@ -516,8 +555,8 @@ export class OTTGameEngine {
       specialCells: {
         a1: SPECIAL_A1_INDEX,
         i9: SPECIAL_I9_INDEX,
-        myWinIndex: myId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
-        opponentWinIndex: oppId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
+        myWinIndex: myId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
+        opponentWinIndex: oppId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
       },
       rules: state.rules || null,
       blockedCells: blockedArr,
