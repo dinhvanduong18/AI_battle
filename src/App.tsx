@@ -162,14 +162,22 @@ function AppWorkspace() {
       const isSparring =
         pendingSparringMatchId === m.id ||
         pkt.opponent?.id === '00000000-0000-4000-8000-000000000001';
+      const mySeat =
+        pkt.seat === 1 || pkt.seat === 2
+          ? pkt.seat
+          : pkt.role === 'player1'
+          ? 1
+          : pkt.role === 'player2'
+          ? 2
+          : null;
 
       setActiveMatch({
         source: 'backend',
         matchId: m.id,
         seed: m.seed,
         pieceCount: m.pieceCount || 9,
-        mode: m.mode || 'bot',
-        mySeat: pkt.seat,
+        mode: pkt.mode || m.mode || m.match_type || 'bot',
+        mySeat,
         player1Name: m.player1?.displayName || 'Player 1',
         player2Name: m.player2?.displayName || 'Player 2',
         player1Elo: m.player1?.elo,
