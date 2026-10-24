@@ -173,7 +173,6 @@ function AppWorkspace() {
       const isSparring =
         pendingSparringMatchId === m.id ||
         pkt.opponent?.id === '00000000-0000-4000-8000-000000000001';
-
       setActiveMatch({
         source: 'backend',
         matchId: m.id,
