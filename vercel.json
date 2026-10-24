@@ -1,0 +1,11 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "rewrites": [
+    {
+      "source": "/((?!bot-sandbox\\.js|client/|assets/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

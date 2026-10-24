@@ -1,0 +1,142 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-canvas: rgba(13, 9, 22, 0.76);
+    --bg-elevated: rgba(21, 15, 34, 0.82);
+    --bg-panel: rgba(30, 21, 47, 0.88);
+    --bg-hover: rgba(43, 30, 66, 0.85);
+    --border-subtle: rgba(255, 255, 255, 0.1);
+    --border-accent: rgba(249, 115, 22, 0.42);
+
+    --text-primary: #f8f5fc;
+    --text-secondary: #bdb2d4;
+    --text-muted: #8477a1;
+
+    --accent-primary: #f97316;
+    --accent-primary-hover: #ea580c;
+    --accent-secondary: #a855f7;
+
+    --p1-main: #fb923c;
+    --p1-bg: rgba(249, 115, 22, 0.18);
+    --p1-border: rgba(249, 115, 22, 0.58);
+
+    --p2-main: #c084fc;
+    --p2-bg: rgba(168, 85, 247, 0.2);
+    --p2-border: rgba(192, 132, 252, 0.58);
+
+    --cell-light: #251b38;
+    --cell-dark: #191227;
+    --cell-blocked: #0e0a16;
+    --shrine-a1: rgba(249, 115, 22, 0.24);
+    --shrine-i9: rgba(168, 85, 247, 0.26);
+  }
+
+  body {
+    background-color: #090610;
+    color: var(--text-primary);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    letter-spacing: 0.005em;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Outfit', system-ui, -apple-system, sans-serif;
+  }
+
+  code, pre, textarea.code-editor, .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes capturePulse {
+  0% {
+    transform: scale(0.88);
+    opacity: 0.7;
+  }
+  55% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-capture {
+  animation: capturePulse 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Subtle Compositor-Only Firefly Drift */
+@keyframes fireflyDriftA {
+  0% {
+    transform: translate3d(0, 0, 0) scale(0.85);
+    opacity: 0.2;
+  }
+  50% {
+    transform: translate3d(26px, -42px, 0) scale(1.15);
+    opacity: 0.85;
+  }
+  100% {
+    transform: translate3d(-14px, -84px, 0) scale(0.8);
+    opacity: 0.15;
+  }
+}
+
+@keyframes fireflyDriftB {
+  0% {
+    transform: translate3d(0, 0, 0) scale(0.9);
+    opacity: 0.15;
+  }
+  45% {
+    transform: translate3d(-30px, -36px, 0) scale(1.2);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate3d(18px, -78px, 0) scale(0.75);
+    opacity: 0.15;
+  }
+}
+
+.firefly-mote {
+  position: absolute;
+  border-radius: 9999px;
+  will-change: transform, opacity;
+}
+
+.firefly-amber {
+  background: radial-gradient(circle, #fde68a 0%, #f97316 55%, rgba(249, 115, 22, 0) 100%);
+  box-shadow: 0 0 10px 2px rgba(251, 146, 60, 0.55);
+}
+
+.firefly-violet {
+  background: radial-gradient(circle, #f3e8ff 0%, #c084fc 55%, rgba(192, 132, 252, 0) 100%);
+  box-shadow: 0 0 10px 2px rgba(192, 132, 252, 0.45);
+}
+
+.ff-1 { left: 8%; top: 78%; width: 6px; height: 6px; animation: fireflyDriftA 11s ease-in-out infinite; }
+.ff-2 { left: 16%; top: 62%; width: 5px; height: 5px; animation: fireflyDriftB 14s ease-in-out 2s infinite; }
+.ff-3 { left: 25%; top: 84%; width: 7px; height: 7px; animation: fireflyDriftA 13s ease-in-out 4s infinite; }
+.ff-4 { left: 36%; top: 72%; width: 4px; height: 4px; animation: fireflyDriftB 10s ease-in-out 1s infinite; }
+.ff-5 { left: 48%; top: 88%; width: 6px; height: 6px; animation: fireflyDriftA 15s ease-in-out 3s infinite; }
+.ff-6 { left: 59%; top: 68%; width: 5px; height: 5px; animation: fireflyDriftB 12s ease-in-out 5s infinite; }
+.ff-7 { left: 68%; top: 82%; width: 7px; height: 7px; animation: fireflyDriftA 14s ease-in-out 1.5s infinite; }
+.ff-8 { left: 77%; top: 58%; width: 5px; height: 5px; animation: fireflyDriftB 11s ease-in-out 3.5s infinite; }
+.ff-9 { left: 86%; top: 76%; width: 6px; height: 6px; animation: fireflyDriftA 13s ease-in-out 0.8s infinite; }
+.ff-10 { left: 92%; top: 64%; width: 4px; height: 4px; animation: fireflyDriftB 16s ease-in-out 2.6s infinite; }
+.ff-11 { left: 12%; top: 36%; width: 5px; height: 5px; animation: fireflyDriftB 15s ease-in-out 4.2s infinite; }
+.ff-12 { left: 82%; top: 32%; width: 5px; height: 5px; animation: fireflyDriftA 12s ease-in-out 2.2s infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-capture,
+  .ff-1, .ff-2, .ff-3, .ff-4, .ff-5, .ff-6,
+  .ff-7, .ff-8, .ff-9, .ff-10, .ff-11, .ff-12 {
+    animation: none;
+  }
+}

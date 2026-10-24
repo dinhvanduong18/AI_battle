@@ -1,0 +1,6 @@
+{
+  "summary":  "Bản kế hoạch tái cấu trúc toàn diện UX/UI cho nền tảng OTTv2 (AI Battle Platform): giải thích rõ việc nâng cấp từ HTML/JS thuần sang React + TypeScript (sẵn sàng deploy Vercel + Render), bảo toàn 100% Engine/Python Bot/dữ liệu PostgreSQL, tinh gọn bố cục bàn cờ và thiết kế bộ Theme sự kiện Halloween kèm nút bật/tắt.",
+  "updatedAt":  "2026-10-24T03:56:13.560050898Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}
