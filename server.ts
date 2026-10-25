@@ -705,9 +705,11 @@ interface SparringSession {
   pendingCommits: Map<number, { commit: string; commitAttestation: any }>;
   moves: any[];
   destroyed: boolean;
+  botTurnTimeout?: ReturnType<typeof setTimeout>;
 }
 
 const sparringSessions = new Map<string, SparringSession>();
+const SPARRING_BOT_TURN_TIMEOUT_MS = 5000;
 
 function pickTacticalBotMove(state: any, botSeat: 1 | 2) {
   const botState = OTTGameEngine.createBotGameState(state, botSeat);
@@ -1658,8 +1660,98 @@ async function startServer() {
       });
     };
 
+    const forfeitTimedOutBot = () => {
+      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
+      const match = db.matches.find((item) => item.id === session.matchId && item.status === 'active');
+      if (!match) return;
+
+      session.destroyed = true;
+      if (session.botTurnTimeout) clearTimeout(session.botTurnTimeout);
+      session.botTurnTimeout = undefined;
+      sparringSessions.delete(match.id);
+
+      const u1 = db.users.find((u) => u.id === match.player1_id);
+      const u2 = db.users.find((u) => u.id === match.player2_id);
+      if (!u1 || !u2) {
+        throw new Error(`Cannot record sparring timeout for match ${match.id}: player record not found.`);
+      }
+
+      const winnerId = session.humanSeat === 1 ? match.player1_id : match.player2_id;
+      const score1 = winnerId === match.player1_id ? 1 : 0;
+      const eloUpdated = match.match_type === 'bot';
+      const u1Before = u1.elo;
+      const u2Before = u2.elo;
+      const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
+      const u2After = eloUpdated ? calculateElo(u2Before, u1Before, 1 - score1) : u2Before;
+
+      match.status = 'completed';
+      match.winner_id = winnerId;
+      match.completed_at = new Date().toISOString();
+      if (eloUpdated) {
+        u1.elo = u1After;
+        u2.elo = u2After;
+      }
+
+      if (match.tournament_id) {
+        const e1 = db.tournamentEntries.find(
+          (entry) => entry.tournament_id === match.tournament_id && entry.player_id === u1.id
+        );
+        const e2 = db.tournamentEntries.find(
+          (entry) => entry.tournament_id === match.tournament_id && entry.player_id === u2.id
+        );
+        for (const [entry, score] of [[e1, score1], [e2, 1 - score1]] as const) {
+          if (!entry) continue;
+          entry.matches_played += 1;
+          if (score === 1) entry.wins += 1;
+          else entry.losses += 1;
+          if (match.tournament_phase === 'ranked') {
+            const progress = applyTournamentResult(
+              entry.tier,
+              entry.rank_stars,
+              entry.season_points,
+              score
+            );
+            entry.tier = progress.tier;
+            entry.rank_stars = progress.stars;
+            entry.season_points = progress.seasonPoints;
+            entry.points = entry.wins;
+          }
+        }
+      }
+
+      db.matchResults.push({
+        match_id: match.id,
+        player1_elo_before: u1Before,
+        player2_elo_before: u2Before,
+        player1_elo_after: u1After,
+        player2_elo_after: u2After,
+        result_player1: score1,
+        created_at: match.completed_at,
+      });
+      saveDb();
+
+      sendWs(humanWs, 'match-forfeited', {
+        matchId: match.id,
+        winnerId,
+        winnerPlayer: session.humanSeat,
+        eloAfter: session.humanSeat === 1 ? u1After : u2After,
+        eloUpdated,
+        message: 'Bot đối thủ không đi trong vòng 5 giây. Bạn thắng kỹ thuật!',
+      });
+    };
+
     const triggerBotMoveIfNeeded = async () => {
       if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
+      if (!session.botTurnTimeout) {
+        session.botTurnTimeout = setTimeout(() => {
+          try {
+            forfeitTimedOutBot();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Không thể xử lý Bot hết thời gian.';
+            sendWs(humanWs, 'error', { message });
+          }
+        }, SPARRING_BOT_TURN_TIMEOUT_MS);
+      }
       await new Promise((r) => setTimeout(r, 220));
       if (session.destroyed || session.state.winner) return;
       const move = pickTacticalBotMove(session.state, session.botSeat);
@@ -1681,6 +1773,7 @@ async function startServer() {
         hash: commit,
       };
       const commitSig = await signWithWebCrypto(session.privateKey, commitPayload);
+      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
       sendToHuman({
         type: 'CONSENSUS_COMMIT',
         attestation: { payload: commitPayload, signature: commitSig },
@@ -1696,6 +1789,7 @@ async function startServer() {
         commit,
       };
       const revealSig = await signWithWebCrypto(session.privateKey, revealPayload);
+      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
       session.state = OTTGameEngine.applyMove(session.state, move);
       const stateHash = sha256Canonical(statePayload(session.state));
       const ackPayload = {
@@ -1716,8 +1810,11 @@ async function startServer() {
         type: 'CONSENSUS_ACK',
         attestation: { payload: ackPayload, signature: ackSig },
       });
+      if (session.botTurnTimeout) clearTimeout(session.botTurnTimeout);
+      session.botTurnTimeout = undefined;
 
       if (session.state.winner) {
+        session.destroyed = true;
         const finalProof = {
           matchId: session.matchId,
           roomId: session.matchId,
@@ -1788,6 +1885,9 @@ async function startServer() {
       });
 
       if (session.state.winner) {
+        session.destroyed = true;
+        if (session.botTurnTimeout) clearTimeout(session.botTurnTimeout);
+        session.botTurnTimeout = undefined;
         const finalProof = {
           matchId: session.matchId,
           roomId: session.matchId,
