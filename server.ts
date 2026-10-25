@@ -978,7 +978,15 @@ async function startServer() {
             id: m.id,
             seed: m.seed,
             status: m.status,
-            match_type: m.match_type,
+            match_type:
+              m.match_type === 'bot' ||
+              Boolean(
+                mr &&
+                  (mr.player1_elo_before !== mr.player1_elo_after ||
+                    mr.player2_elo_before !== mr.player2_elo_after)
+              )
+                ? 'bot'
+                : 'human',
             winner_id: m.winner_id,
             final_state_hash: m.final_state_hash,
             replay_sha256: m.replay_sha256,
