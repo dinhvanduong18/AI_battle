@@ -90,8 +90,8 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
         if (!raw || typeof raw !== 'object') return;
 
         if (raw.type === 'JOIN_REQUEST') {
-          if (raw.role === 'player' && raw.participantId === ownerId) {
-            conn.send({ type: 'ROOM_REJECT', reason: 'Bạn không thể vào đấu trong phòng do chính mình tạo.' });
+          if (raw.participantId === ownerId) {
+            conn.send({ type: 'ROOM_REJECT', reason: 'Bạn không thể vào chơi hoặc xem phòng do chính mình tạo.' });
             return;
           }
 

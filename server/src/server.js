@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { createHash, randomInt, randomUUID, randomBytes } from 'node:crypto';
+import { createHash, randomInt, randomUUID, randomBytes, generateKeyPairSync, sign as signCrypto } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { Pool } from 'pg';
 import { createClient } from 'redis';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -19,6 +20,9 @@ import {
 } from './tournament-ranks.js';
 import { areBothMatchPlayersOffline } from './match-disconnect.js';
 
+const require = createRequire(import.meta.url);
+const { OTTGameEngine } = require('../../shared/OTTGameEngine.js');
+
 const pool = new Pool({ connectionString: config.databaseUrl });
 const redis = createClient({ url: config.redisUrl });
 redis.on('error', err => console.error('Redis error:', err.message));
@@ -28,11 +32,13 @@ const replayStorage = createReplayStorage(config);
 const liveSockets = new Map();
 const searchTimers = new Map();
 const botForfeitMatchIds = new Set();
+const sparringSessions = new Map();
+const SPARRING_BOT_ID = '00000000-0000-4000-8000-000000000001';
 const MAX_BODY = 2 * 1024 * 1024;
 let tournamentLifecycleTimer = null;
 let disconnectForfeitTimer = null;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const DISCONNECT_FORFEIT_MS = 0;
+const DISCONNECT_FORFEIT_MS = 10_000;
 const TOURNAMENT_QUEUE_TIERS = [...TOURNAMENT_RANKS, 'Practice'];
 const DEFAULT_SPRINT_RULES = ['standard', 'center_blockers', 'clipped_corners', 'corridor'];
 const SPRINT_RULE_LAYOUTS = {
@@ -158,6 +164,165 @@ async function createMatch(user, paired, mode = 'human') {
   const record = { id: matchId, seed, player1_id: player1.id, player2_id: player2.id, match_type: matchType, created_at: new Date().toISOString() };
   for (const [player, role, other] of [[player1, 'player1', player2], [player2, 'player2', player1]]) {
     await deliverToUser(player.id, 'match-found', { match: record, role, opponent: publicUser(other), signaling: 'server-relay', mode });
+  }
+}
+
+const canonicalize = value => Array.isArray(value) ? `[${value.map(canonicalize).join(',')}]` :
+  value && typeof value === 'object' ? `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(',')}}` : JSON.stringify(value);
+const sparringStatePayload = state => ({
+  board: Array.from(state.board), turn: state.turn, stepCount: state.stepCount,
+  winner: state.winner || null, seed: state.seed, pieceCount: state.pieceCount,
+  lastMove: state.lastMove || null,
+  ...(state.rules ? { rules: state.rules } : {})
+});
+function signSparringPayload(privateKey, payload) {
+  return signCrypto('sha256', Buffer.from(canonicalize(payload)), {
+    key: privateKey,
+    dsaEncoding: 'ieee-p1363'
+  }).toString('hex');
+}
+function pickSparringMove(state, botSeat) {
+  const validMoves = OTTGameEngine.createBotGameState(state, botSeat).validMoves || [];
+  if (!validMoves.length) return null;
+  let best = validMoves[0];
+  let bestScore = -Infinity;
+  for (const move of validMoves) {
+    const winningCell = botSeat === 1 ? 8 : 72;
+    if (move.to === winningCell) return { from: move.from, to: move.to };
+    const distanceToA1 = Math.abs(move.toRow - 8) + Math.abs(move.toCol);
+    const distanceToI9 = Math.abs(move.toRow) + Math.abs(move.toCol - 8);
+    const score = (move.isAttack ? 145 : 0) - Math.min(distanceToA1, distanceToI9) * 12 -
+      (Math.abs(move.toRow - 4) + Math.abs(move.toCol - 4)) * 2 + Math.random() * 10;
+    if (score > bestScore) {
+      bestScore = score;
+      best = move;
+    }
+  }
+  return { from: best.from, to: best.to };
+}
+
+async function createSparringMatch(user, mode = 'human', tournamentId = null) {
+  const botResult = await pool.query(
+    'SELECT id,email,display_name,elo,is_admin,avatar_id FROM users WHERE id=$1',
+    [SPARRING_BOT_ID]
+  );
+  const bot = botResult.rows[0];
+  if (!bot) throw Object.assign(new Error('Hắc Kỵ Sĩ AI chưa được khởi tạo trên máy chủ.'), { status: 503 });
+
+  let tournament = null;
+  if (tournamentId) {
+    const result = await pool.query(
+      "SELECT id,status,current_week,rules_json,registration_closes_at,ends_at FROM tournaments WHERE id=$1",
+      [tournamentId]
+    );
+    tournament = result.rows[0];
+    if (!tournament || !['registration', 'qualifying'].includes(tournament.status) || new Date(tournament.ends_at) <= new Date()) {
+      throw Object.assign(new Error('Giải đấu không còn mở để đấu với Hắc Kỵ Sĩ AI.'), { status: 409 });
+    }
+  }
+
+  const humanSeat = Math.random() < 0.5 ? 1 : 2;
+  const player1 = humanSeat === 1 ? user : bot;
+  const player2 = humanSeat === 2 ? user : bot;
+  const seed = randomInt(1, 0x7fffffff);
+  const matchId = randomUUID();
+  const phase = tournament ? tournament.status === 'registration' ? 'practice' : 'ranked' : null;
+  const rules = tournament && phase === 'ranked'
+    ? tournament.rules_json || weeklyRules(tournament.current_week || 1)
+    : null;
+  const modeType = mode === 'bot' ? 'bot' : 'human';
+  await pool.query(
+    `INSERT INTO matches(id,seed,player1_id,player2_id,status,match_type,tournament_id,tournament_phase,tournament_rules,is_sparring)
+     VALUES($1,$2,$3,$4,'active',$5,$6,$7,$8,TRUE)`,
+    [matchId, seed, player1.id, player2.id, modeType, tournament?.id || null, phase, rules ? JSON.stringify(rules) : null]
+  );
+
+  const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const publicJwk = keys.publicKey.export({ format: 'jwk' });
+  await pool.query(`UPDATE matches SET ${humanSeat === 1 ? 'player2_key' : 'player1_key'}=$1::jsonb WHERE id=$2`, [JSON.stringify(publicJwk), matchId]);
+
+  const session = {
+    matchId, humanId: user.id, humanSeat, botSeat: humanSeat === 1 ? 2 : 1,
+    privateKey: keys.privateKey, publicJwk,
+    state: OTTGameEngine.createGame(seed, 9, rules), destroyed: false
+  };
+  sparringSessions.set(matchId, session);
+
+  const socket = userSocket(user.id);
+  if (!socket) throw Object.assign(new Error('Kết nối máy chủ đã đóng. Hãy thử tìm trận lại.'), { status: 409 });
+  socket.searching = false;
+  socket.searchCancelled = true;
+  const playerPayload = player => ({ id: player.id, displayName: player.display_name, elo: player.elo });
+  const match = {
+    id: matchId, seed, pieceCount: 9, mode: modeType, match_type: modeType,
+    tournamentId: tournament?.id || null, tournamentPhase: phase, rules,
+    player1: playerPayload(player1), player2: playerPayload(player2)
+  };
+  const opponent = playerPayload(bot);
+  send(socket, 'sparring-ready', { matchId, botSeat: session.botSeat, publicKey: publicJwk });
+  send(socket, 'match-found', {
+    role: humanSeat === 1 ? 'player1' : 'player2', seat: humanSeat,
+    match, opponent, signaling: 'server-relay', mode: modeType
+  });
+  return session;
+}
+
+async function handleSparringRelay(session, socket, packet) {
+  if (!session || session.destroyed || session.humanId !== socket.user.id) return;
+  const sendToHuman = payload => send(socket, 'match-relay', {
+    matchId: session.matchId, from: SPARRING_BOT_ID, payload
+  });
+  const broadcastFinalProof = state => {
+    const proof = {
+      matchId: session.matchId, roomId: session.matchId, stepCount: state.stepCount,
+      stateHash: hashCanonical(sparringStatePayload(state)), winner: state.winner
+    };
+    sendToHuman({
+      type: 'FINAL_PROOF', seat: session.botSeat, proof,
+      signature: signSparringPayload(session.privateKey, proof)
+    });
+  };
+  const playBotTurn = async () => {
+    if (session.destroyed || session.state.winner !== null || session.state.turn !== session.botSeat) return;
+    await new Promise(resolve => setTimeout(resolve, 180));
+    if (session.destroyed || session.state.winner !== null) return;
+    const move = pickSparringMove(session.state, session.botSeat);
+    if (!move) return;
+    const stepCount = session.state.stepCount;
+    const nonce = randomBytes(32).toString('hex');
+    const commit = hashCanonical({ matchId: session.matchId, stepCount, player: session.botSeat, move, nonce });
+    const commitPayload = { kind: 'move-commit', matchId: session.matchId, stepCount, player: session.botSeat, hash: commit };
+    sendToHuman({ type: 'CONSENSUS_COMMIT', attestation: { payload: commitPayload, signature: signSparringPayload(session.privateKey, commitPayload) } });
+    const revealPayload = { kind: 'move-reveal', matchId: session.matchId, stepCount, player: session.botSeat, move, nonce, commit };
+    const nextState = OTTGameEngine.applyMove(session.state, move);
+    session.state = nextState;
+    const stateHash = hashCanonical(sparringStatePayload(nextState));
+    const ackPayload = { kind: 'state-ack', matchId: session.matchId, stepCount: nextState.stepCount, player: session.botSeat, moveCommit: commit, stateHash };
+    sendToHuman({ type: 'CONSENSUS_REVEAL', attestation: { payload: revealPayload, signature: signSparringPayload(session.privateKey, revealPayload) } });
+    sendToHuman({ type: 'CONSENSUS_ACK', attestation: { payload: ackPayload, signature: signSparringPayload(session.privateKey, ackPayload) } });
+    if (nextState.winner !== null) broadcastFinalProof(nextState);
+  };
+
+  if (packet.type === 'BOT_READY') {
+    sendToHuman({ type: 'BOT_READY', botLabel: 'Hắc Kỵ Sĩ AI' });
+    await playBotTurn();
+  } else if (packet.type === 'CONSENSUS_HELLO') {
+    sendToHuman({ type: 'CONSENSUS_HELLO', seat: session.botSeat, publicKey: session.publicJwk });
+    if (packet.autoStart) await playBotTurn();
+  } else if (packet.type === 'CONSENSUS_REVEAL') {
+    const payload = packet.attestation?.payload;
+    if (!payload || payload.player !== session.humanSeat || payload.matchId !== session.matchId ||
+        payload.stepCount !== session.state.stepCount || session.state.turn !== session.humanSeat ||
+        !payload.move || !Number.isInteger(payload.move.from) || !Number.isInteger(payload.move.to)) return;
+    session.state = OTTGameEngine.applyMove(session.state, payload.move);
+    const stateHash = hashCanonical(sparringStatePayload(session.state));
+    const ackPayload = {
+      kind: 'state-ack', matchId: session.matchId, stepCount: session.state.stepCount,
+      player: session.botSeat, moveCommit: payload.commit, stateHash
+    };
+    sendToHuman({ type: 'CONSENSUS_ACK', attestation: { payload: ackPayload, signature: signSparringPayload(session.privateKey, ackPayload) } });
+    if (session.state.winner !== null) broadcastFinalProof(session.state);
+    else await playBotTurn();
   }
 }
 
@@ -633,7 +798,7 @@ async function submitResult(userId, body) {
       const row = prior.rows[0];
       return { alreadySubmitted: true, matchId: match.id, winnerId: match.winner_id, finalStateHash: match.final_state_hash,
         elo: { player1: { before: row.player1_elo_before, after: row.player1_elo_after }, player2: { before: row.player2_elo_before, after: row.player2_elo_after } },
-        eloUpdated: match.match_type === 'bot',
+        eloUpdated: match.match_type === 'bot' && !match.is_sparring,
         replaySha256: match.replay_sha256 };
     }
     if (match.status !== 'active') throw Object.assign(new Error('Match is not active'), { status: 409 });
@@ -691,7 +856,7 @@ async function submitResult(userId, body) {
     const u1 = usersResult.rows.find(user => user.id === match.player1_id);
     const u2 = usersResult.rows.find(user => user.id === match.player2_id);
     const score1 = replayResult.winner === 1 ? 1 : replayResult.winner === 2 ? 0 : 0.5;
-    const eloUpdated = match.match_type === 'bot';
+    const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
     const elo1 = eloUpdated ? calculateElo(u1.elo, u2.elo, score1, config.fideK) : u1.elo;
     const elo2 = eloUpdated ? calculateElo(u2.elo, u1.elo, 1 - score1, config.fideK) : u2.elo;
     const storedReplay = await replayStorage.put(match.id, body.replay);
@@ -704,6 +869,7 @@ async function submitResult(userId, body) {
     await updateTournamentEntriesForResult(client, match, score1);
     await client.query(`UPDATE matches SET status='completed', winner_id=$1, final_state_hash=$2, replay_key=$3, replay_sha256=$4, replay_json=$5::jsonb, player1_proof=$6::jsonb, player2_proof=$7::jsonb, completed_at=now() WHERE id=$8`, [winnerId, replayResult.finalHash, storedReplay.key, storedReplay.checksum, storedReplay.json ? JSON.stringify(storedReplay.json) : null, JSON.stringify(p1), JSON.stringify(p2), match.id]);
     await client.query('COMMIT');
+    sparringSessions.delete(match.id);
     return { matchId: match.id, winnerId, finalStateHash: replayResult.finalHash, elo: { player1: { before: u1.elo, after: elo1 }, player2: { before: u2.elo, after: elo2 } }, eloUpdated, replaySha256: storedReplay.checksum };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -785,7 +951,7 @@ async function resolveDisconnectedMatch(matchId) {
     const player2 = users.rows.find(user => user.id === match.player2_id);
     if (!player1 || !player2) throw new Error('A player in the disconnected match no longer exists');
 
-    const eloUpdated = match.match_type === 'bot';
+    const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
     const player1EloAfter = eloUpdated ? calculateElo(player1.elo, player2.elo, score1, config.fideK) : player1.elo;
     const player2EloAfter = eloUpdated ? calculateElo(player2.elo, player1.elo, 1 - score1, config.fideK) : player2.elo;
     if (eloUpdated) {
@@ -905,7 +1071,7 @@ async function submitConsensusDispute(userId, body) {
           resolved: decision.status === 'adjudicated',
           winnerPlayer: decision.winner_id === match.player1_id ? 1 : decision.winner_id === match.player2_id ? 2 : null,
           offenderPlayer: decision.offender_id === match.player1_id ? 1 : decision.offender_id === match.player2_id ? 2 : null,
-          eloUpdated: decision.status === 'adjudicated' && match.match_type === 'bot',
+          eloUpdated: decision.status === 'adjudicated' && match.match_type === 'bot' && !match.is_sparring,
           player1EloAfter: decision.player1_elo_after,
           player2EloAfter: decision.player2_elo_after,
           message: 'This match dispute has already been processed.'
@@ -956,7 +1122,7 @@ async function submitConsensusDispute(userId, body) {
       const player1 = users.rows.find(user => user.id === match.player1_id);
       const player2 = users.rows.find(user => user.id === match.player2_id);
       if (!player1 || !player2) throw new Error('A player in the disputed match no longer exists');
-      const eloUpdated = match.match_type === 'bot';
+      const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
       const player1EloAfter = eloUpdated ? calculateElo(player1.elo, player2.elo, score1, config.fideK) : player1.elo;
       const player2EloAfter = eloUpdated ? calculateElo(player2.elo, player1.elo, 1 - score1, config.fideK) : player2.elo;
       if (eloUpdated) {
@@ -1609,6 +1775,10 @@ wss.on('connection', ws => {
         ws.searchMode = requestedMode;
         send(ws, 'searching', { elo: ws.user.elo, mode: requestedMode });
         await runSearch(userId, ws.searchMode);
+      } else if (packet.type === 'find-sparring-match') {
+        if (ws.searching) throw Object.assign(new Error('Hãy hủy lượt tìm trận hiện tại trước.'), { status: 409 });
+        await cancelQueue(redis, userId);
+        await createSparringMatch(ws.user, packet.mode, packet.tournamentId || null);
       } else if (packet.type === 'find-tournament-match') {
         if (ws.searching) return;
         if (!/^[0-9a-f-]{36}$/i.test(packet.tournamentId || '')) {
@@ -1766,6 +1936,11 @@ wss.on('connection', ws => {
         const result = await pool.query('SELECT player1_id,player2_id,status FROM matches WHERE id=$1', [packet.matchId]);
         const match = result.rows[0];
         if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(userId)) throw new Error('Not authorized to signal this match');
+        const sparring = packet.type === 'match-relay' ? sparringSessions.get(packet.matchId) : null;
+        if (sparring) {
+          await handleSparringRelay(sparring, ws, packet.payload);
+          return;
+        }
         const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
         const online = await redis.get(`ottv2:presence:${peerId}`);
         if (!online) return send(ws, 'peer-offline', { matchId: packet.matchId });
@@ -1880,6 +2055,7 @@ async function main() {
   await pool.query(await readFile(new URL('../migrations/007_match_disputes.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/008_player_avatar.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/009_legacy_match_modes.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/010_sparring_bot.sql', import.meta.url), 'utf8'));
   await updateTournamentLifecycle();
   tournamentLifecycleTimer = setInterval(() => updateTournamentLifecycle().catch(error => {
     console.error('Tournament lifecycle update failed:', error.message);

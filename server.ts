@@ -325,10 +325,13 @@ interface MatchRecord {
   player1_id: string;
   player2_id: string;
   match_type: 'human' | 'bot';
+  is_sparring?: boolean;
   status: 'pending' | 'active' | 'completed' | 'disputed' | 'abandoned';
   tournament_id: string | null;
   tournament_phase: 'practice' | 'ranked' | null;
   tournament_rules: any | null;
+  disconnected_player_id?: string | null;
+  disconnected_at?: string | null;
   player1_bot_version?: number;
   player2_bot_version?: number;
   player1_bot_code?: string;
@@ -987,7 +990,7 @@ async function startServer() {
             player1_id: m.player1_id,
             player2_id: m.player2_id,
             elo_delta:
-              mr && m.match_type === 'bot'
+              mr && m.match_type === 'bot' && !m.is_sparring
                 ? m.player1_id === user.id
                   ? mr.player1_elo_after - mr.player1_elo_before
                   : mr.player2_elo_after - mr.player2_elo_before
@@ -1200,8 +1203,8 @@ async function startServer() {
         res.status(404).json({ error: 'Không tìm thấy giải đấu.' });
         return;
       }
-      if (t.status !== 'registration' && t.status !== 'qualifying') {
-        res.status(409).json({ error: 'Giải đấu đã kết thúc.' });
+      if (t.status !== 'registration' || new Date(t.registration_closes_at).getTime() <= Date.now()) {
+        res.status(409).json({ error: 'Giải đấu đã đóng đăng ký; Sprint đã bắt đầu hoặc hết hạn đăng ký.' });
         return;
       }
       const existing = db.tournamentEntries.find(
@@ -1226,7 +1229,7 @@ async function startServer() {
         losses: 0,
         points: 0,
         tournament_elo: user.elo,
-        tier: t.status === 'qualifying' ? 'Bronze' : rankTierFromElo(user.elo),
+        tier: rankTierFromElo(user.elo),
         rank_stars: 0,
         season_points: 0,
         registered_at: new Date().toISOString(),
@@ -1261,7 +1264,7 @@ async function startServer() {
                 player2: { before: mr.player2_elo_before, after: mr.player2_elo_after },
               }
             : null,
-          eloUpdated: match.match_type === 'bot',
+          eloUpdated: match.match_type === 'bot' && !match.is_sparring,
           replaySha256: match.replay_sha256,
         });
         return;
@@ -1307,7 +1310,7 @@ async function startServer() {
       const u1 = db.users.find((u) => u.id === match.player1_id)!;
       const u2 = db.users.find((u) => u.id === match.player2_id)!;
       const score1 = replayResult.winner === 1 ? 1 : replayResult.winner === 2 ? 0 : 0.5;
-      const eloUpdated = match.match_type === 'bot';
+      const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
       const u1Before = u1.elo;
       const u2Before = u2.elo;
       const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
@@ -1415,7 +1418,7 @@ async function startServer() {
                 player2: { before: mr.player2_elo_before, after: mr.player2_elo_after },
               }
             : null,
-          eloUpdated: match.match_type === 'bot',
+          eloUpdated: match.match_type === 'bot' && !match.is_sparring,
         });
         return;
       }
@@ -1435,7 +1438,7 @@ async function startServer() {
       const u1 = db.users.find((u) => u.id === match.player1_id)!;
       const u2 = db.users.find((u) => u.id === match.player2_id)!;
       const score1 = user.id === match.player1_id ? 1 : 0;
-      const eloUpdated = match.match_type === 'bot';
+      const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
       const u1Before = u1.elo;
       const u2Before = u2.elo;
       const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
@@ -1546,12 +1549,101 @@ async function startServer() {
   const humanQueue = new Set<string>();
   const botQueue = new Set<string>();
   const tournamentQueue = new Map<string, Set<string>>();
+  const DISCONNECT_GRACE_MS = 10_000;
 
   const sendWs = (ws: WebSocket | undefined, type: string, data: Record<string, unknown> = {}) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type, ...data }));
     }
   };
+
+  function resolveDisconnectedMatch(match: MatchRecord, now = Date.now()) {
+    const disconnectedAt = match.disconnected_at ? new Date(match.disconnected_at).getTime() : NaN;
+    const disconnectedId = match.disconnected_player_id;
+    if (
+      match.status !== 'active' || !disconnectedId || !Number.isFinite(disconnectedAt) ||
+      now - disconnectedAt < DISCONNECT_GRACE_MS
+    ) return false;
+
+    const winnerId = disconnectedId === match.player1_id ? match.player2_id : match.player1_id;
+    const player1 = db.users.find((entry) => entry.id === match.player1_id);
+    const player2 = db.users.find((entry) => entry.id === match.player2_id);
+    if (!player1 || !player2) return false;
+
+    const resultPlayer1 = winnerId === match.player1_id ? 1 : 0;
+    const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
+    const player1Before = player1.elo;
+    const player2Before = player2.elo;
+    const player1After = eloUpdated ? calculateElo(player1Before, player2Before, resultPlayer1) : player1Before;
+    const player2After = eloUpdated ? calculateElo(player2Before, player1Before, 1 - resultPlayer1) : player2Before;
+    if (eloUpdated) {
+      player1.elo = player1After;
+      player2.elo = player2After;
+    }
+
+    match.status = 'completed';
+    match.winner_id = winnerId;
+    match.completed_at = new Date(now).toISOString();
+    match.disconnected_player_id = null;
+    match.disconnected_at = null;
+    db.matchResults.push({
+      match_id: match.id,
+      player1_elo_before: player1Before,
+      player2_elo_before: player2Before,
+      player1_elo_after: player1After,
+      player2_elo_after: player2After,
+      result_player1: resultPlayer1,
+      created_at: match.completed_at,
+    });
+
+    if (match.tournament_id) {
+      for (const [playerId, score] of [[match.player1_id, resultPlayer1], [match.player2_id, 1 - resultPlayer1]] as const) {
+        const entry = db.tournamentEntries.find((item) => item.tournament_id === match.tournament_id && item.player_id === playerId);
+        if (!entry) continue;
+        entry.matches_played += 1;
+        if (score === 1) entry.wins += 1;
+        else entry.losses += 1;
+        if (match.tournament_phase === 'ranked') {
+          const progress = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, score);
+          entry.tier = progress.tier;
+          entry.rank_stars = progress.stars;
+          entry.season_points = progress.seasonPoints;
+          entry.points = entry.wins;
+        }
+      }
+    }
+
+    sparringSessions.delete(match.id);
+    saveDb();
+    const common = {
+      matchId: match.id,
+      winnerId,
+      winnerPlayer: winnerId === match.player1_id ? 1 : 2,
+      disconnectedId,
+      eloUpdated,
+    };
+    sendWs(liveSockets.get(winnerId), 'match-forfeited-win', {
+      ...common,
+      eloAfter: winnerId === match.player1_id ? player1After : player2After,
+      message: 'Bạn thắng kỹ thuật vì đối thủ không quay lại trong 10 giây.',
+    });
+    sendWs(liveSockets.get(disconnectedId), 'match-forfeited', {
+      ...common,
+      eloAfter: disconnectedId === match.player1_id ? player1After : player2After,
+      message: 'Bạn bị xử thua vì không quay lại trong 10 giây.',
+    });
+    return true;
+  }
+
+  const disconnectForfeitTimer = setInterval(() => {
+    const now = Date.now();
+    let changed = false;
+    for (const match of db.matches) {
+      if (resolveDisconnectedMatch(match, now)) changed = true;
+    }
+    if (changed) saveDb();
+  }, 1000);
+  disconnectForfeitTimer.unref();
 
   function clearUserQueues(userId: string) {
     humanQueue.delete(userId);
@@ -1835,12 +1927,80 @@ async function startServer() {
           liveSockets.set(user.id, ws);
           if (prev && prev !== ws) prev.close(4001, 'Replaced by newer session');
           sendWs(ws, 'authenticated', { user: publicUser(user) });
+          for (const match of db.matches) {
+            if (
+              match.status !== 'active' || match.disconnected_player_id !== user.id ||
+              !match.disconnected_at || Date.now() - new Date(match.disconnected_at).getTime() >= DISCONNECT_GRACE_MS
+            ) continue;
+            const player1 = db.users.find((entry) => entry.id === match.player1_id);
+            const player2 = db.users.find((entry) => entry.id === match.player2_id);
+            sendWs(ws, 'match-rejoin-available', {
+              match: {
+                id: match.id,
+                seed: match.seed,
+                match_type: match.match_type,
+                tournament_id: match.tournament_id,
+                tournament_phase: match.tournament_phase,
+                player1: { displayName: player1?.display_name || 'Player 1', elo: player1?.elo },
+                player2: { displayName: player2?.display_name || 'Player 2', elo: player2?.elo },
+              },
+              role: match.player1_id === user.id ? 'player1' : 'player2',
+              expiresAt: new Date(new Date(match.disconnected_at).getTime() + DISCONNECT_GRACE_MS).toISOString(),
+            });
+          }
           return;
         }
 
         const user = db.users.find((u) => u.id === ws.userId)!;
 
-        if (packet.type === 'find-match' || packet.type === 'find-bot-match') {
+        if (packet.type === 'leave-match' || packet.type === 'rejoin-match') {
+          const match = db.matches.find((entry) => entry.id === packet.matchId && entry.status === 'active');
+          if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
+            sendWs(ws, 'error', { message: 'Không tìm thấy trận đấu đang diễn ra.' });
+            return;
+          }
+
+          if (packet.type === 'leave-match') {
+            match.disconnected_player_id = user.id;
+            match.disconnected_at = new Date().toISOString();
+            saveDb();
+            const opponentId = match.player1_id === user.id ? match.player2_id : match.player1_id;
+            const expiresAt = new Date(Date.now() + DISCONNECT_GRACE_MS).toISOString();
+            sendWs(liveSockets.get(opponentId), 'peer-disconnected', {
+              matchId: match.id,
+              disconnectedPlayerId: user.id,
+              expiresAt,
+            });
+            sendWs(ws, 'match-left', { matchId: match.id, expiresAt });
+          } else {
+            if (
+              match.disconnected_player_id !== user.id || !match.disconnected_at ||
+              Date.now() - new Date(match.disconnected_at).getTime() >= DISCONNECT_GRACE_MS
+            ) {
+              sendWs(ws, 'error', { message: 'Đã hết thời gian quay lại trận đấu.' });
+              return;
+            }
+            match.disconnected_player_id = null;
+            match.disconnected_at = null;
+            saveDb();
+            const player1 = db.users.find((entry) => entry.id === match.player1_id);
+            const player2 = db.users.find((entry) => entry.id === match.player2_id);
+            sendWs(ws, 'match-rejoined', {
+              match: {
+                id: match.id,
+                seed: match.seed,
+                pieceCount: 9,
+                match_type: match.match_type,
+                tournament_id: match.tournament_id,
+                tournament_phase: match.tournament_phase,
+                player1: { displayName: player1?.display_name || 'Player 1', elo: player1?.elo },
+                player2: { displayName: player2?.display_name || 'Player 2', elo: player2?.elo },
+              },
+              role: match.player1_id === user.id ? 'player1' : 'player2',
+              mode: match.match_type,
+            });
+          }
+        } else if (packet.type === 'find-match' || packet.type === 'find-bot-match') {
           clearUserQueues(user.id);
           const mode: 'human' | 'bot' = packet.type === 'find-bot-match' ? 'bot' : 'human';
           const targetQueue = mode === 'bot' ? botQueue : humanQueue;
@@ -1908,6 +2068,8 @@ async function startServer() {
             : null;
           const sysBot = db.users.find((u) => u.is_system_bot)!;
           const match = pairPlayers(user, sysBot, mode, t);
+          match.is_sparring = true;
+          saveDb();
 
           const kp = await webcrypto.subtle.generateKey(
             { name: 'ECDSA', namedCurve: 'P-256' },
@@ -1984,7 +2146,7 @@ async function startServer() {
             const u1 = db.users.find((u) => u.id === match.player1_id)!;
             const u2 = db.users.find((u) => u.id === match.player2_id)!;
             const score1 = winningUserId === match.player1_id ? 1 : 0;
-            const eloUpdated = match.match_type === 'bot';
+            const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
             const u1Before = u1.elo;
             const u2Before = u2.elo;
             const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
@@ -2044,6 +2206,19 @@ async function startServer() {
         clearUserQueues(ws.userId);
         if (liveSockets.get(ws.userId) === ws) {
           liveSockets.delete(ws.userId);
+          const disconnectedAt = new Date().toISOString();
+          for (const match of db.matches) {
+            if (match.status !== 'active' || (match.player1_id !== ws.userId && match.player2_id !== ws.userId)) continue;
+            match.disconnected_player_id = ws.userId;
+            match.disconnected_at ||= disconnectedAt;
+            const opponentId = match.player1_id === ws.userId ? match.player2_id : match.player1_id;
+            sendWs(liveSockets.get(opponentId), 'peer-disconnected', {
+              matchId: match.id,
+              disconnectedPlayerId: ws.userId,
+              expiresAt: new Date(new Date(match.disconnected_at).getTime() + DISCONNECT_GRACE_MS).toISOString(),
+            });
+          }
+          saveDb();
         }
       }
     });

@@ -137,7 +137,15 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       onUserUpdated(updated);
       notify('Đã cập nhật avatar kỳ thủ.', 'success');
     } catch (err: any) {
-      notify(err.message || 'Không thể cập nhật avatar.', 'error');
+      const message = String(err?.message || '');
+      if (/nhập tên mới/i.test(message)) {
+        notify(
+          'Máy chủ chưa được cập nhật tính năng đổi avatar. Hãy triển khai lại backend từ phiên bản mới nhất rồi thử lại.',
+          'error'
+        );
+      } else {
+        notify(message || 'Không thể cập nhật avatar.', 'error');
+      }
     } finally {
       setLoading(false);
     }

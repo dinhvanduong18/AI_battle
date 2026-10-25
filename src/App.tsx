@@ -295,19 +295,28 @@ function AppWorkspace() {
   const handleExitActiveMatch = useCallback(() => {
     const leavingMatch = activeMatch?.source === 'backend' ? activeMatch : null;
     if (leavingMatch) {
-      backendClient.leaveMatch(leavingMatch.matchId);
       setReconnectOffer({
         session: leavingMatch,
         expiresAt: new Date(Date.now() + 10000).toISOString(),
-       });
-     }
-    if (p2pCleanupRef.current) {
-      p2pCleanupRef.current();
-      p2pCleanupRef.current = null;
+      });
     }
-    backendClient.closePeerChannel();
     setActiveMatch(null);
     refreshPublicAndUserData();
+
+    // Navigation must complete even if a stale P2P/WebSocket cleanup throws.
+    try {
+      if (leavingMatch) backendClient.leaveMatch(leavingMatch.matchId);
+    } catch (err) {
+      console.warn('Could not notify the server that the player left the match.', err);
+    }
+    try {
+      p2pCleanupRef.current?.();
+    } catch (err) {
+      console.warn('Could not clean up the private-room connection.', err);
+    } finally {
+      p2pCleanupRef.current = null;
+      backendClient.closePeerChannel();
+    }
   }, [activeMatch, refreshPublicAndUserData]);
 
   const reconnectSeconds = reconnectOffer
@@ -320,6 +329,7 @@ function AppWorkspace() {
       <HalloweenBackdrop />
 
       {/* Desktop Persistent Sidebar */}
+      {!activeMatch && (
       <aside className="relative z-20 hidden lg:flex lg:flex-col lg:w-64 shrink-0 border-r border-[var(--border-subtle)] bg-[#120c1e]/85 backdrop-blur-md">
         <div className="h-16 px-6 flex items-center border-b border-[var(--border-subtle)]">
           <button
@@ -389,9 +399,10 @@ function AppWorkspace() {
           </button>
         </div>
       </aside>
+      )}
 
       {/* Mobile Navigation Drawer */}
-      {mobileMenuOpen && (
+      {!activeMatch && mobileMenuOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/75 lg:hidden"
           onClick={() => setMobileMenuOpen(false)}
@@ -472,6 +483,7 @@ function AppWorkspace() {
         {/* Clean Single-Row Top Header */}
         <header className="h-16 px-4 sm:px-8 border-b border-[var(--border-subtle)] bg-[#120c1e]/80 backdrop-blur-md flex items-center justify-between gap-4 sticky top-0 z-30">
           <div className="flex items-center gap-3 min-w-0">
+            {!activeMatch && (
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
@@ -480,6 +492,7 @@ function AppWorkspace() {
             >
               <Menu className="w-5 h-5" />
             </button>
+            )}
             <h1 className="text-base sm:text-lg font-bold text-[var(--text-primary)] truncate">
               {activeMatch ? 'Bàn Thi Đấu Chiến Thuật 9×9' : VIEW_TITLES[activeView]}
             </h1>

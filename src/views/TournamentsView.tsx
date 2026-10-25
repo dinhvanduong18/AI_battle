@@ -5,7 +5,6 @@ import {
   Calendar,
   Film,
   Loader2,
-  Play,
   Plus,
   ShieldCheck,
   Sparkles,
@@ -25,6 +24,7 @@ import {
   type TournamentItem,
 } from '../core/backendClient';
 import { Board9x9 } from '../components/Board9x9';
+import { LeaderboardRank } from '../components/LeaderboardRank';
 import { useToast } from '../components/ToastProvider';
 
 interface TournamentsViewProps {
@@ -345,7 +345,13 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     </div>
                   )}
 
-                  {t.status !== 'completed' && (
+                  {t.status === 'qualifying' && !myEntry && (
+                    <div className="text-xs text-[var(--text-muted)]">
+                      ÄÃ£ Ä‘Ã³ng Ä‘Äƒng kÃ½; Sprint {t.current_week || 1} Ä‘Ã£ báº¯t Ä‘áº§u.
+                    </div>
+                  )}
+
+                  {t.status !== 'completed' && (myEntry || t.status === 'registration') && (
                     <div className="flex flex-wrap items-center gap-2.5">
                       {!myEntry ? (
                         <button
@@ -471,7 +477,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                               className={isMe ? 'bg-[var(--p1-bg)]' : 'hover:bg-[var(--bg-hover)]/40'}
                             >
                               <td className="py-2.5 pr-2 font-mono text-[var(--text-secondary)]">
-                                {String(idx + 1).padStart(2, '0')}
+                                <LeaderboardRank rank={idx + 1} />
                               </td>
                               <td className="py-2.5 px-2 font-medium text-[var(--text-primary)]">
                                 {row.display_name}
@@ -747,7 +753,17 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             return (
               <div
                 key={t.id}
-                className="p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-col justify-between space-y-5 hover:border-[var(--border-accent)] transition-colors"
+                role="button"
+                tabIndex={0}
+                aria-label={`Mở giải đấu ${t.name}`}
+                onClick={() => setSelectedId(t.id)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    setSelectedId(t.id);
+                  }
+                }}
+                className="p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-col justify-between space-y-5 hover:border-[var(--border-accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] transition-colors cursor-pointer"
               >
                 <div className="space-y-2.5">
                   <div className="text-xs font-medium text-[var(--accent-primary)] tabular-nums">
@@ -778,14 +794,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     )}
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setSelectedId(t.id)}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <Play className="w-3.5 h-3.5" />
-                    Xem chi tiết & Thi đấu
-                  </button>
+                  <span className="text-xs text-[var(--text-secondary)]">Nhấn vào thẻ để xem chi tiết và tham gia →</span>
                 </div>
               </div>
             );

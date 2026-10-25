@@ -610,7 +610,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         onExit();
         return;
       }
-      const winner = session.mySeat === 1 ? 2 : 1;
+      const winner: 1 | 2 = session.mySeat === 1 ? 2 : 1;
       const forfeitedState = { ...stateRef.current, winner, turn: winner };
       stateRef.current = forfeitedState;
       setGameState(forfeitedState);

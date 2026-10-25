@@ -10,6 +10,7 @@ import {
   Trophy,
 } from 'lucide-react';
 import type { BackendUser, MatchSummary, TournamentItem } from '../core/backendClient';
+import { LeaderboardRank } from '../components/LeaderboardRank';
 import {
   HalloweenMascotPiece,
   HalloweenObstacleGlyph,
@@ -529,7 +530,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                         }`}
                       >
                         <td className="py-2.5 pr-2 font-mono font-semibold text-[var(--text-secondary)]">
-                          {String(idx + 1).padStart(2, '0')}
+                          <LeaderboardRank rank={idx + 1} />
                         </td>
                         <td className="py-2.5 px-2 font-medium text-[var(--text-primary)]">
                           <span className="inline-flex items-center gap-2">

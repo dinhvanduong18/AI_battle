@@ -378,7 +378,12 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                             Mở Replay
                           </button>
                         ) : (
-                          <span className="text-[var(--text-muted)]">—</span>
+                          <span
+                            className="text-[var(--text-muted)]"
+                            title="Máy chủ không có dữ liệu Replay cho trận này."
+                          >
+                            Chưa lưu
+                          </span>
                         )}
                       </td>
                     </tr>
