@@ -1661,7 +1661,11 @@ async function startServer() {
     };
 
     const forfeitTimedOutBot = () => {
-      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
+      if (
+        session.destroyed ||
+        session.state.winner !== null ||
+        session.state.turn !== session.botSeat
+      ) return;
       const match = db.matches.find((item) => item.id === session.matchId && item.status === 'active');
       if (!match) return;
 
@@ -1741,7 +1745,11 @@ async function startServer() {
     };
 
     const triggerBotMoveIfNeeded = async () => {
-      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
+      if (
+        session.destroyed ||
+        session.state.winner !== null ||
+        session.state.turn !== session.botSeat
+      ) return;
       if (!session.botTurnTimeout) {
         session.botTurnTimeout = setTimeout(() => {
           try {
@@ -1753,7 +1761,7 @@ async function startServer() {
         }, SPARRING_BOT_TURN_TIMEOUT_MS);
       }
       await new Promise((r) => setTimeout(r, 220));
-      if (session.destroyed || session.state.winner) return;
+      if (session.destroyed || session.state.winner !== null) return;
       const move = pickTacticalBotMove(session.state, session.botSeat);
       if (!move) return;
       const stepIdx = session.state.stepCount;
@@ -1773,7 +1781,11 @@ async function startServer() {
         hash: commit,
       };
       const commitSig = await signWithWebCrypto(session.privateKey, commitPayload);
-      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
+      if (
+        session.destroyed ||
+        session.state.winner !== null ||
+        session.state.turn !== session.botSeat
+      ) return;
       sendToHuman({
         type: 'CONSENSUS_COMMIT',
         attestation: { payload: commitPayload, signature: commitSig },
@@ -1789,7 +1801,11 @@ async function startServer() {
         commit,
       };
       const revealSig = await signWithWebCrypto(session.privateKey, revealPayload);
-      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
+      if (
+        session.destroyed ||
+        session.state.winner !== null ||
+        session.state.turn !== session.botSeat
+      ) return;
       session.state = OTTGameEngine.applyMove(session.state, move);
       const stateHash = sha256Canonical(statePayload(session.state));
       const ackPayload = {
@@ -1813,7 +1829,7 @@ async function startServer() {
       if (session.botTurnTimeout) clearTimeout(session.botTurnTimeout);
       session.botTurnTimeout = undefined;
 
-      if (session.state.winner) {
+      if (session.state.winner !== null) {
         session.destroyed = true;
         const finalProof = {
           matchId: session.matchId,
@@ -1884,7 +1900,7 @@ async function startServer() {
         attestation: { payload: ackPayload, signature: ackSig },
       });
 
-      if (session.state.winner) {
+      if (session.state.winner !== null) {
         session.destroyed = true;
         if (session.botTurnTimeout) clearTimeout(session.botTurnTimeout);
         session.botTurnTimeout = undefined;
