@@ -566,6 +566,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       }
 
       if (packet.type === 'peer-disconnected' && packet.matchId === session.matchId) {
+        setPeerOffline(true);
         notify('Đối thủ đã rời trận. Nếu không quay lại trong 10 giây, bạn sẽ được xử thắng.', 'info');
         return;
       }

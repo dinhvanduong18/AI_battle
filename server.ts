@@ -1436,11 +1436,17 @@ async function startServer() {
       }
 
       const opponentId = match.player1_id === user.id ? match.player2_id : match.player1_id;
+      if (match.disconnected_player_id !== opponentId || !match.disconnected_at) {
+        res.status(409).json({ error: 'Máy chủ chưa ghi nhận đối thủ rời trận.' });
+        return;
+      }
       const oppSocket = liveSockets.get(opponentId);
 
       match.status = 'completed';
       match.winner_id = user.id;
       match.completed_at = new Date().toISOString();
+      match.disconnected_player_id = null;
+      match.disconnected_at = null;
       sparringSessions.delete(match.id);
 
       const u1 = db.users.find((u) => u.id === match.player1_id)!;

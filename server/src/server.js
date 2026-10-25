@@ -877,7 +877,7 @@ async function submitResult(userId, body) {
   } finally { client.release(); }
 }
 
-async function resolveDisconnectedMatch(matchId) {
+async function resolveDisconnectedMatch(matchId, force = false) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -885,9 +885,9 @@ async function resolveDisconnectedMatch(matchId) {
       `SELECT * FROM matches
        WHERE id=$1 AND status='active'
          AND disconnected_player_id IS NOT NULL
-         AND disconnected_at <= clock_timestamp() - ($2 * interval '1 millisecond')
+         AND ($2::boolean OR disconnected_at <= clock_timestamp() - ($3 * interval '1 millisecond'))
        FOR UPDATE`,
-      [matchId, DISCONNECT_FORFEIT_MS]
+      [matchId, force, DISCONNECT_FORFEIT_MS]
     );
     const match = found.rows[0];
     if (!match) {
@@ -984,8 +984,8 @@ async function resolveDisconnectedMatch(matchId) {
   }
 }
 
-async function processMatchForfeit(matchId, reason = 'disconnect') {
-  const result = await resolveDisconnectedMatch(matchId);
+async function processMatchForfeit(matchId, reason = 'disconnect', force = false) {
+  const result = await resolveDisconnectedMatch(matchId, force);
   if (!result) return;
   const players = [result.player1Id, result.player2Id];
   if (result.abandoned) {
@@ -1019,6 +1019,7 @@ async function processMatchForfeit(matchId, reason = 'disconnect') {
       eloAfter: playerNumber === 1 ? result.player1EloAfter : result.player2EloAfter
     });
   }
+  return result;
 }
 
 async function processDisconnectedMatches() {
@@ -1668,31 +1669,40 @@ const httpServer = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/match/claim-disconnect') {
       const auth = authFromHeader(req);
       const body = await readBody(req);
-      const proof = body.proof;
-      if (!proof || proof.kind !== 'disconnect-claim' || !body.signature || !Number.isInteger(proof.lastAckedStep) ||
-          !/^[0-9a-f]{64}$/i.test(proof.lastAckedStateHash || '')) return json(res, 400, { error: 'Malformed disconnect claim' });
-      const transaction = await pool.connect();
-      try {
-        await transaction.query('BEGIN');
-        const found = await transaction.query('SELECT * FROM matches WHERE id=$1 FOR UPDATE', [proof.matchId]);
-        const match = found.rows[0];
-        if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(auth.sub)) throw Object.assign(new Error('Active match not found for this player'), { status: 404 });
-        const claimantSeat = match.player1_id === auth.sub ? 1 : 2;
-        const disconnectedId = claimantSeat === 1 ? match.player2_id : match.player1_id;
-        const disconnectedSeat = claimantSeat === 1 ? 2 : 1;
-        if (proof.claimantPlayer !== claimantSeat || proof.disconnectedPlayer !== disconnectedSeat || proof.winner !== claimantSeat ||
-            match.disconnected_player_id !== disconnectedId || !match.disconnected_at || Date.now() - new Date(match.disconnected_at).getTime() < 10000) {
-          throw Object.assign(new Error('Server has not observed the opponent disconnected for 10 seconds'), { status: 409 });
-        }
-        const key = claimantSeat === 1 ? match.player1_key : match.player2_key;
-        if (!verifySessionProof(key, proof, body.signature)) throw Object.assign(new Error('Disconnect claim signature is invalid'), { status: 400 });
-        await transaction.query("INSERT INTO disconnect_claims(match_id,claimant_id,disconnected_id,proof,signature,status) VALUES($1,$2,$3,$4::jsonb,$5,'needs-review') ON CONFLICT(match_id,claimant_id) DO NOTHING", [match.id, auth.sub, disconnectedId, JSON.stringify(proof), body.signature]);
-        await transaction.query("UPDATE matches SET status='disputed' WHERE id=$1", [match.id]);
-        await transaction.query('COMMIT');
-        return json(res, 202, { status: 'needs-review', message: 'Signed disconnect evidence stored. The match is disputed; no Elo was awarded automatically.' });
-      } catch (err) {
-        await transaction.query('ROLLBACK'); throw err;
-      } finally { transaction.release(); }
+      const matchId = String(body.matchId || '');
+      const found = await pool.query(
+        'SELECT id,status,player1_id,player2_id,disconnected_player_id FROM matches WHERE id=$1',
+        [matchId]
+      );
+      const match = found.rows[0];
+      if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(auth.sub)) {
+        throw Object.assign(new Error('Active match not found for this player'), { status: 404 });
+      }
+      const opponentId = match.player1_id === auth.sub ? match.player2_id : match.player1_id;
+      if (match.disconnected_player_id !== opponentId) {
+        throw Object.assign(new Error('Server has not observed the opponent leave the match'), { status: 409 });
+      }
+      const result = await processMatchForfeit(matchId, 'disconnect', true);
+      if (!result || result.abandoned) {
+        throw Object.assign(new Error('Could not award a technical win for this match'), { status: 409 });
+      }
+      const eloResult = await pool.query(
+        `SELECT player1_elo_before,player2_elo_before,player1_elo_after,player2_elo_after
+         FROM match_results WHERE match_id=$1 ORDER BY created_at DESC LIMIT 1`,
+        [matchId]
+      );
+      const storedElo = eloResult.rows[0];
+      return json(res, 200, {
+        ok: true,
+        matchId,
+        winnerId: result.winnerId,
+        message: 'Xử thắng kỹ thuật thành công! Máy chủ đã xác nhận đối thủ rời trận.',
+        eloUpdated: result.eloUpdated,
+        elo: storedElo ? {
+          player1: { before: storedElo.player1_elo_before, after: storedElo.player1_elo_after },
+          player2: { before: storedElo.player2_elo_before, after: storedElo.player2_elo_after },
+        } : null,
+      });
     }
     if (req.method === 'POST' && url.pathname === '/api/match/consensus-dispute') {
       const auth = authFromHeader(req);
