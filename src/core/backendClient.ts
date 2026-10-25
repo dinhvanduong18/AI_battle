@@ -298,10 +298,8 @@ export class BackendClient {
     return res;
   }
 
-  async claimDisconnect(matchId: string) {
-    const res = await this.request('/api/match/claim-disconnect', 'POST', { matchId }, true);
-    await this.refreshMe().catch(() => {});
-    return res;
+  async submitConsensusDispute(report: unknown, evidence: unknown) {
+    return this.request('/api/match/consensus-dispute', 'POST', { report, evidence }, true);
   }
 
   // ── WebSocket + Dual-Transport P2P Connection ─────────────────
@@ -362,7 +360,7 @@ export class BackendClient {
     ) {
       this.activeMatchId = null;
     }
-    if (packet.type === 'match-found' || packet.type === 'match-rejoined') {
+    if (packet.type === 'match-found') {
       this.activeMatchId = packet.match?.id || null;
       const opponentId = packet.opponent?.id;
       const isSparringMatch =
@@ -384,7 +382,8 @@ export class BackendClient {
       return;
     }
     if (packet.type === 'match-relay') {
-      this.emit('peer-data', packet.payload);
+      // The server wraps relayed peer data with matchId/from metadata.
+      this.emit('peer-data', packet.payload?.payload ?? packet.payload);
       return;
     }
     this.emit(packet.type, packet);
@@ -497,12 +496,6 @@ export class BackendClient {
       this.sendWs({ type: 'leave-match', matchId });
     }
     this.activeMatchId = null;
-  }
-
-  async rejoinMatch(matchId: string) {
-    await this.connectWs();
-    this.activeMatchId = matchId;
-    this.sendWs({ type: 'rejoin-match', matchId });
   }
 
   registerSessionKey(matchId: string, publicKey: JsonWebKey) {

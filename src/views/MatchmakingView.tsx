@@ -6,6 +6,7 @@ import {
   LogIn,
   Search,
   ShieldCheck,
+  Sparkles,
   Swords,
   UserCheck,
   XCircle,
@@ -32,6 +33,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
 }) => {
   const { notify } = useToast();
   const [searchingMode, setSearchingMode] = useState<'bot' | 'human' | null>(null);
+  const [startingSparring, setStartingSparring] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [filterType, setFilterType] = useState<'all' | 'bot' | 'human'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -49,10 +51,12 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
     });
     const offFound = backendClient.on('match-found', () => {
       setSearchingMode(null);
+      setStartingSparring(false);
       setElapsedSec(0);
     });
     const offErr = backendClient.on('error', (pkt) => {
       setSearchingMode(null);
+      setStartingSparring(false);
       if (pkt?.message) notify(pkt.message, 'error');
     });
 
@@ -90,6 +94,21 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
     backendClient.cancelMatch();
     setSearchingMode(null);
     setElapsedSec(0);
+  };
+
+  const handleSparring = async (mode: 'human' | 'bot') => {
+    if (!user) {
+      onOpenAuth('login');
+      return;
+    }
+    try {
+      setStartingSparring(true);
+      await backendClient.findSparringMatch(mode);
+      notify('Đang kết nối với Hắc Kỵ Sĩ AI…', 'info');
+    } catch (err: any) {
+      setStartingSparring(false);
+      notify(err.message || 'Không thể bắt đầu trận với Hắc Kỵ Sĩ AI.', 'error');
+    }
   };
 
   const filteredMatches = matches.filter((m) => {
@@ -169,6 +188,15 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
               <Swords className="w-4 h-4" />
               Tìm trận Bot trực tuyến
             </button>
+            <button
+              type="button"
+              disabled={searchingMode !== null || startingSparring}
+              onClick={() => handleSparring('bot')}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold text-[var(--accent-primary)] border border-[var(--accent-primary)]/60 hover:bg-[var(--accent-primary)]/10 disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              {startingSparring ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              Đấu xếp hạng với Hắc Kỵ Sĩ AI
+            </button>
           </div>
         </div>
 
@@ -201,6 +229,15 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
             >
               <UserCheck className="w-4 h-4" />
               Tìm đối thủ 1v1 trực tuyến
+            </button>
+            <button
+              type="button"
+              disabled={searchingMode !== null || startingSparring}
+              onClick={() => handleSparring('human')}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold text-[var(--p2-main)] border border-[var(--border-subtle)] hover:bg-[var(--p2-main)]/10 disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              {startingSparring ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              Cầm quân đấu Hắc Kỵ Sĩ AI
             </button>
           </div>
         </div>

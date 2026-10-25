@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Bot,
@@ -11,7 +11,6 @@ import {
   ShieldAlert,
   ShieldCheck,
   Swords,
-  WifiOff,
 } from 'lucide-react';
 import {
   OTTGameEngine,
@@ -22,6 +21,7 @@ import {
 } from '../core/ottEngine';
 import {
   createNonce,
+  digest,
   generateIdentity,
   hashMove,
   hashState,
@@ -119,9 +119,12 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const [botSecondsLeft, setBotSecondsLeft] = useState(BOT_TURN_TIMEOUT_MS / 1000);
   const [botThinking, setBotThinking] = useState(false);
 
-  // Disconnect & Forfeit handling
-  const [peerOffline, setPeerOffline] = useState(false);
-  const [claimingWin, setClaimingWin] = useState(false);
+  // Hash dispute status returned by the backend.
+  const [hashNotice, setHashNotice] = useState<{
+    step: number;
+    status: 'checking' | 'resolved' | 'unresolved' | 'error';
+    message: string;
+  } | null>(null);
 
   // Consensus Cryptographic State
   const identityRef = useRef<ConsensusIdentity | null>(null);
@@ -131,9 +134,12 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     null
   );
   const replayMovesRef = useRef<any[]>([]);
+  const acknowledgementsRef = useRef<Map<number, any[]>>(new Map());
+  const submittedHashDisputesRef = useRef<Set<number>>(new Set());
   const myFinalProofRef = useRef<{ proof: any; signature: string } | null>(null);
   const peerFinalProofRef = useRef<{ proof: any; signature: string } | null>(null);
   const submittedResultRef = useRef(false);
+  const reportHashMismatchRef = useRef<() => void>(() => {});
   const botRunnerRef = useRef<BotRunner | null>(null);
   const steppingBotRef = useRef(false);
 
@@ -146,6 +152,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     verified?: boolean;
   } | null>(null);
 
+
   const sendMessageToPeer = useCallback(
     (payload: unknown) => {
       if (session.source === 'backend') {
@@ -156,6 +163,21 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     },
     [session]
   );
+
+  const rememberAcknowledgement = useCallback((attestation: any) => {
+    const payload = attestation?.payload;
+    if (payload?.kind !== 'state-ack' || payload.matchId !== session.matchId ||
+        !Number.isInteger(payload.stepCount) || (payload.player !== 1 && payload.player !== 2)) return;
+    const acknowledgements = acknowledgementsRef.current.get(payload.stepCount) || [];
+    const existingIndex = acknowledgements.findIndex((item) => item?.payload?.player === payload.player);
+    if (existingIndex >= 0) acknowledgements[existingIndex] = attestation;
+    else acknowledgements.push(attestation);
+    acknowledgementsRef.current.set(payload.stepCount, acknowledgements);
+    const move = replayMovesRef.current.find((entry) =>
+      entry.stepCount === payload.stepCount && entry.commit === payload.moveCommit
+    );
+    if (move) move.acknowledgements = acknowledgements;
+  }, [session.matchId]);
 
   // Submit result once both signed final proofs arrive
   const trySubmitBackendResult = useCallback(async () => {
@@ -290,6 +312,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       };
       const ackSig = await signPayload(identityRef.current, ackPayload);
 
+      const ownAcknowledgement = { payload: ackPayload, signature: ackSig };
+      rememberAcknowledgement(ownAcknowledgement);
       replayMovesRef.current.push({
         stepCount: nextState.stepCount,
         player: session.mySeat,
@@ -297,7 +321,11 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         nonce,
         commit,
         stateHash,
+        commitAttestation: { payload: commitPayload, signature: commitSig },
+        revealAttestation: { payload: revealPayload, signature: revealSig },
+        acknowledgements: acknowledgementsRef.current.get(nextState.stepCount) || [],
       });
+      reportHashMismatchRef.current();
 
       stateRef.current = nextState;
       setGameState(nextState);
@@ -338,32 +366,93 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         await signAndBroadcastFinalProof(nextState);
       }
     },
-    [sendMessageToPeer, session.matchId, session.mySeat, signAndBroadcastFinalProof]
+    [rememberAcknowledgement, sendMessageToPeer, session.matchId, session.mySeat, signAndBroadcastFinalProof]
   );
 
-  // Claim Technical Win if opponent disconnects / abandons match
-  const handleClaimDisconnect = async () => {
-    if (session.source !== 'backend' || session.mySeat === null) return;
+  const handleReportHashMismatch = useCallback(async () => {
+    if (session.source !== 'backend' || session.mySeat === null || !identityRef.current) return;
+    const entries = replayMovesRef.current;
+    const mismatchIndex = entries.findIndex((entry) => {
+      const opponentAck = entry.acknowledgements?.find((ack: any) => ack?.payload?.player !== session.mySeat);
+      return opponentAck && opponentAck.payload?.stateHash !== entry.stateHash;
+    });
+    if (mismatchIndex < 0) return;
+
+    const disputedStep = entries[mismatchIndex];
+    const step = disputedStep.stepCount;
+    if (submittedHashDisputesRef.current.has(step)) return;
+    setHashNotice({
+      step,
+      status: 'checking',
+      message: `Phát hiện hash hai bên không khớp ở nước ${step}. Có thể có gian lận; đang chờ máy chủ xác minh.`,
+    });
+
     try {
-      setClaimingWin(true);
-      const res = await backendClient.claimDisconnect(session.matchId);
-      const myEloObj = session.mySeat === 1 ? res.elo?.player1 : res.elo?.player2;
-      setResultSummary({
-        eloBefore: myEloObj?.before,
-        eloAfter: myEloObj?.after,
-        eloUpdated: res.eloUpdated,
-        tournamentUpdate: res.tournamentUpdate || null,
-        verified: true,
-      });
-      setGameState((prev) => ({ ...prev, winner: session.mySeat }));
-      notify(res.message || 'Xử thắng kỹ thuật thành công!', 'success');
-      soundFx.playVictory();
+      const opponentAck = disputedStep.acknowledgements?.find((ack: any) => ack?.payload?.player !== session.mySeat);
+      const ownAck = disputedStep.acknowledgements?.find((ack: any) => ack?.payload?.player === session.mySeat);
+      if (!opponentAck || !ownAck) {
+        setHashNotice({ step, status: 'error', message: 'Hash bị lệch nhưng chưa nhận đủ chữ ký từ hai bên để xác minh.' });
+        return;
+      }
+      if (!peerPubKeyRef.current ||
+          !(await verifyPayload(peerPubKeyRef.current, opponentAck.payload, opponentAck.signature))) {
+        setHashNotice({ step, status: 'error', message: 'Chữ ký hash của đối thủ không hợp lệ; không thể gửi bằng chứng.' });
+        return;
+      }
+      if (ownAck.payload.stateHash !== disputedStep.stateHash || disputedStep.stateHash === opponentAck.payload.stateHash) {
+        setHashNotice({ step, status: 'error', message: 'Chưa có bằng chứng chữ ký đủ để xác định hash nào bị thay đổi.' });
+        return;
+      }
+      const incompleteHistory = entries.slice(0, mismatchIndex).some((entry) =>
+        !entry.commitAttestation || !entry.revealAttestation || entry.acknowledgements?.length !== 2
+      );
+      if (incompleteHistory || !disputedStep.commitAttestation || !disputedStep.revealAttestation ||
+          disputedStep.acknowledgements?.length !== 2) {
+        setHashNotice({ step, status: 'error', message: 'Lịch sử chưa đủ chữ ký để máy chủ xác minh hash bị lệch.' });
+        return;
+      }
+
+      submittedHashDisputesRef.current.add(step);
+      const evidence = {
+        format: 'ottv2-consensus-dispute-v1',
+        matchId: session.matchId,
+        seed: session.seed,
+        initialState: initialSerializedRef.current,
+        moves: entries.slice(0, mismatchIndex),
+        disputedStep,
+      };
+      const proof = {
+        kind: 'consensus-dispute',
+        matchId: session.matchId,
+        claimantSeat: session.mySeat,
+        stepCount: step,
+        localHash: ownAck.payload.stateHash,
+        remoteHash: opponentAck.payload.stateHash,
+        evidenceHash: await digest(evidence),
+      };
+      const signature = await signPayload(identityRef.current, proof);
+      const outcome = await backendClient.submitConsensusDispute({ payload: proof, signature }, evidence);
+
+      if (outcome.resolved) {
+        const winner = outcome.winnerPlayer === 1 || outcome.winnerPlayer === 2 ? outcome.winnerPlayer : null;
+        if (winner) {
+          setGameState((previous) => ({ ...previous, winner }));
+          if (winner === session.mySeat) soundFx.playVictory();
+          else soundFx.playDefeat();
+        }
+        const ownElo = session.mySeat === 1 ? outcome.player1EloAfter : outcome.player2EloAfter;
+        setResultSummary({ eloAfter: ownElo, eloUpdated: Boolean(outcome.eloUpdated), verified: true });
+        setHashNotice({ step, status: 'resolved', message: outcome.message || 'Máy chủ xác nhận hash không hợp lệ và đã xử lý trận đấu.' });
+      } else {
+        setHashNotice({ step, status: 'unresolved', message: outcome.message || 'Máy chủ chưa thể kết luận bên nào gửi hash sai.' });
+      }
     } catch (err: any) {
-      notify(err.message || 'Không thể gửi yêu cầu xử thắng.', 'error');
-    } finally {
-      setClaimingWin(false);
+      submittedHashDisputesRef.current.delete(step);
+      setHashNotice({ step, status: 'error', message: err.message || 'Máy chủ không thể xác minh hash của trận đấu.' });
     }
-  };
+  }, [session]);
+
+  reportHashMismatchRef.current = () => { void handleReportHashMismatch(); };
 
   // Setup Consensus Identity & Peer Message Listener
   useEffect(() => {
@@ -445,7 +534,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         if (!peerPubKeyRef.current) {
           peerPubKeyRef.current = await importPublicKey(packet.publicKey);
           setConsensusReady(true);
-          setPeerOffline(false);
           if (identityRef.current && session.mySeat !== null) {
             sendMessageToPeer({
               type: 'CONSENSUS_HELLO',
@@ -460,7 +548,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
       if (packet.type === 'BOT_READY') {
         setPeerBotReady(true);
-        setPeerOffline(false);
         return;
       }
 
@@ -471,7 +558,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       }
 
       if (packet.type === 'CONSENSUS_COMMIT' && packet.attestation) {
-        setPeerOffline(false);
         pendingPeerCommitRef.current = {
           stepCount: packet.attestation.payload?.stepCount,
           hash: packet.attestation.payload?.hash,
@@ -481,9 +567,13 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       }
 
       if (packet.type === 'CONSENSUS_REVEAL' && packet.attestation) {
-        setPeerOffline(false);
         const payload = packet.attestation.payload;
         if (!payload || payload.player === session.mySeat) return;
+        const pendingCommit = pendingPeerCommitRef.current;
+        if (!pendingCommit || pendingCommit.stepCount !== payload.stepCount || pendingCommit.hash !== payload.commit) {
+          notify('Hash cam kết không khớp với nước đi được tiết lộ.', 'error');
+          return;
+        }
         const curr = stateRef.current;
         if (payload.stepCount !== curr.stepCount) return;
 
@@ -504,15 +594,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           to: payload.move.to,
         });
         const stateHash = await hashState(nextState);
-
-        replayMovesRef.current.push({
-          stepCount: nextState.stepCount,
-          player: payload.player,
-          move: { from: payload.move.from, to: payload.move.to },
-          nonce: payload.nonce,
-          commit: payload.commit,
-          stateHash,
-        });
 
         stateRef.current = nextState;
         setGameState(nextState);
@@ -544,11 +625,27 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             stateHash,
           };
           const ackSig = await signPayload(identityRef.current, ackPayload);
+          const ownAcknowledgement = { payload: ackPayload, signature: ackSig };
+          rememberAcknowledgement(ownAcknowledgement);
           sendMessageToPeer({
             type: 'CONSENSUS_ACK',
-            attestation: { payload: ackPayload, signature: ackSig },
+            attestation: ownAcknowledgement,
           });
         }
+
+        replayMovesRef.current.push({
+          stepCount: nextState.stepCount,
+          player: payload.player,
+          move: { from: payload.move.from, to: payload.move.to },
+          nonce: payload.nonce,
+          commit: payload.commit,
+          stateHash,
+          commitAttestation: pendingCommit.attestation,
+          revealAttestation: packet.attestation,
+          acknowledgements: acknowledgementsRef.current.get(nextState.stepCount) || [],
+        });
+        pendingPeerCommitRef.current = null;
+        reportHashMismatchRef.current();
 
         if (nextState.winner !== null) {
           if (nextState.winner === session.mySeat) soundFx.playVictory();
@@ -559,35 +656,30 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         return;
       }
 
+      if (packet.type === 'CONSENSUS_ACK' && packet.attestation) {
+        const ack = packet.attestation;
+        const payload = ack.payload;
+        if (!payload || payload.player === session.mySeat || payload.matchId !== session.matchId) return;
+        if (!peerPubKeyRef.current || !(await verifyPayload(peerPubKeyRef.current, payload, ack.signature))) {
+          notify('Chữ ký xác nhận hash của đối thủ không hợp lệ.', 'error');
+          return;
+        }
+        rememberAcknowledgement(ack);
+        const entry = replayMovesRef.current.find((move) =>
+          move.stepCount === payload.stepCount && move.commit === payload.moveCommit
+        );
+        if (entry && payload.stateHash !== entry.stateHash) {
+          reportHashMismatchRef.current();
+        }
+        return;
+      }
+
       if (packet.type === 'FINAL_PROOF' && packet.seat !== session.mySeat) {
         peerFinalProofRef.current = { proof: packet.proof, signature: packet.signature };
         await trySubmitBackendResult();
         return;
       }
 
-      if (packet.type === 'peer-disconnected' && packet.matchId === session.matchId) {
-        setPeerOffline(true);
-        notify('Đối thủ đã rời trận. Nếu không quay lại trong 10 giây, bạn sẽ được xử thắng.', 'info');
-        return;
-      }
-
-      if (packet.type === 'match-forfeited' && packet.matchId === session.matchId) {
-        const winner = packet.winnerPlayer === 1 || packet.winnerPlayer === 2
-          ? packet.winnerPlayer
-          : null;
-        if (!winner) return;
-        const forfeitedState = { ...stateRef.current, winner, turn: winner };
-        stateRef.current = forfeitedState;
-        setGameState(forfeitedState);
-        setResultSummary({
-          eloAfter: packet.eloAfter,
-          eloUpdated: Boolean(packet.eloUpdated),
-          verified: true,
-        });
-        if (winner === session.mySeat) soundFx.playVictory();
-        else soundFx.playDefeat();
-        notify(packet.message || 'Trận đấu đã kết thúc do đối thủ rời phòng quá lâu.', winner === session.mySeat ? 'success' : 'error');
-      }
     };
 
     const unsub =
@@ -595,14 +687,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         ? backendClient.on('peer-data', handlePeerPacket)
         : session.subscribePeerData
         ? session.subscribePeerData(handlePeerPacket)
-        : () => {};
-    const unsubDisconnect =
-      session.source === 'backend'
-        ? backendClient.on('peer-disconnected', handlePeerPacket)
-        : () => {};
-    const unsubForfeited =
-      session.source === 'backend'
-        ? backendClient.on('match-forfeited', handlePeerPacket)
         : () => {};
     const handleP2PDisconnect = () => {
       if (!active || session.source !== 'p2p' || stateRef.current.winner) return;
@@ -629,16 +713,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         ? backendClient.on('match-aborted', (pkt) => {
             notify(pkt.message || 'Trận đấu đã bị hủy.', 'error');
             onExit();
-          })
-        : () => {};
-
-    const unsubPeerOffline =
-      session.source === 'backend'
-        ? backendClient.on('peer-offline', (pkt) => {
-            if (pkt.matchId === session.matchId) {
-              setPeerOffline(true);
-              notify('Đối thủ đã mất kết nối hoặc rời trận!', 'info');
-            }
           })
         : () => {};
 
@@ -672,23 +746,50 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           })
         : () => {};
 
+    const unsubDisputeResult =
+      session.source === 'backend'
+        ? backendClient.on('match-dispute-result', (pkt) => {
+            if (pkt.matchId !== session.matchId || pkt.claimantId === backendClient.user?.id) return;
+            if (!pkt.resolved) {
+              setHashNotice({
+                step: pkt.stepCount || stateRef.current.stepCount,
+                status: 'unresolved',
+                message: pkt.message || 'Máy chủ chưa thể kết luận bên nào gửi hash sai.',
+              });
+              return;
+            }
+            const winner = pkt.winnerPlayer === 1 || pkt.winnerPlayer === 2 ? pkt.winnerPlayer : null;
+            if (!winner) return;
+            setGameState((previous) => ({ ...previous, winner }));
+            setResultSummary({ eloAfter: pkt.eloAfter, eloUpdated: Boolean(pkt.eloUpdated), verified: true });
+            setHashNotice({
+              step: pkt.stepCount || stateRef.current.stepCount,
+              status: 'resolved',
+              message: pkt.message || 'Máy chủ đã xác minh tranh chấp hash của trận đấu.',
+            });
+            if (winner === session.mySeat) soundFx.playVictory();
+            else soundFx.playDefeat();
+            notify(pkt.message || 'Máy chủ đã xác minh tranh chấp hash của trận đấu.', winner === session.mySeat ? 'success' : 'error');
+          })
+        : () => {};
+
     return () => {
       active = false;
       if (helloInterval) clearInterval(helloInterval);
       unsub();
-      unsubDisconnect();
-      unsubForfeited();
       unsubP2PDisconnect();
       unsubAborted();
-      unsubPeerOffline();
       unsubForfeitWin();
       unsubForfeitLoss();
+      unsubDisputeResult();
       botRunnerRef.current?.destroy();
     };
   }, [
     isBotMatch,
+    handleReportHashMismatch,
     notify,
     onExit,
+    rememberAcknowledgement,
     sendMessageToPeer,
     session,
     signAndBroadcastFinalProof,
@@ -949,21 +1050,22 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         </div>
       </div>
 
-      {/* Peer Disconnected Alert Banner */}
-      {peerOffline && gameState.winner === null && session.source === 'backend' && session.mySeat !== null && (
-        <div className="p-4 rounded-2xl border border-amber-500/40 bg-amber-950/25 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 text-xs text-amber-200">
-            <WifiOff className="w-4 h-4 text-amber-400" />
-            <span>Đối thủ đã mất kết nối hoặc đóng trình duyệt. Bạn có thể yêu cầu Xử Thắng Kỹ Thuật ngay lập tức.</span>
-          </div>
-          <button
-            type="button"
-            disabled={claimingWin}
-            onClick={handleClaimDisconnect}
-            className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-amber-600 hover:bg-amber-500 disabled:opacity-50 transition-colors cursor-pointer"
-          >
-            {claimingWin ? 'Đang gửi yêu cầu…' : 'Yêu cầu Xử Thắng (Rage Quit)'}
-          </button>
+      {hashNotice && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm ${
+            hashNotice.status === 'checking'
+              ? 'border-amber-500/40 bg-amber-950/25 text-amber-100'
+              : hashNotice.status === 'resolved'
+              ? 'border-emerald-500/40 bg-emerald-950/25 text-emerald-100'
+              : 'border-rose-500/40 bg-rose-950/25 text-rose-100'
+          }`}
+        >
+          {hashNotice.status === 'checking'
+            ? <Loader2 className="h-5 w-5 shrink-0 animate-spin text-amber-400" />
+            : <ShieldAlert className="h-5 w-5 shrink-0" />}
+          <span>{hashNotice.message}</span>
         </div>
       )}
 
@@ -1093,13 +1195,19 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
               className={`p-5 rounded-2xl border flex flex-wrap items-center justify-between gap-4 ${
                 gameState.winner === 0
                   ? 'border-amber-500/40 bg-amber-950/25'
-                  : 'border-emerald-500/40 bg-emerald-950/25'
+                  : session.mySeat === null || gameState.winner === session.mySeat
+                  ? 'border-emerald-500/40 bg-emerald-950/25'
+                  : 'border-rose-500/40 bg-rose-950/25'
               }`}
             >
               <div>
                 <h3
                   className={`text-lg font-bold ${
-                    gameState.winner === 0 ? 'text-amber-300' : 'text-emerald-300'
+                    gameState.winner === 0
+                      ? 'text-amber-300'
+                      : session.mySeat === null || gameState.winner === session.mySeat
+                      ? 'text-emerald-300'
+                      : 'text-rose-300'
                   }`}
                 >
                   {gameState.winner === 0
@@ -1175,16 +1283,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                     : 'Lượt của bạn — Hãy chọn quân cờ để di chuyển'
                   : 'Đang chờ nước đi của đối thủ…'}
               </span>
-              {session.source === 'backend' && session.mySeat !== null && !peerOffline && (
-                <button
-                  type="button"
-                  onClick={handleClaimDisconnect}
-                  title="Nếu đối thủ cố tình đóng trình duyệt hoặc bỏ chạy, bấm để hệ thống kiểm tra và xử thắng ngay"
-                  className="text-[11px] text-[var(--text-secondary)] hover:text-amber-400 underline ml-2 cursor-pointer"
-                >
-                  Đối thủ bỏ chạy?
-                </button>
-              )}
               <span className="text-[var(--text-secondary)] hidden sm:inline">
                 Bí Ngô (Đấm) ăn Dơi (Kéo) · Dơi ăn Bé Ma (Lá) · Bé Ma ăn Bí Ngô
               </span>

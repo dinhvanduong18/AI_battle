@@ -100,22 +100,8 @@ function AppWorkspace() {
 
   // Active 1v1 Match Session (Backend or P2P)
   const [activeMatch, setActiveMatch] = useState<ActiveMatchSession | null>(null);
-  const [reconnectOffer, setReconnectOffer] = useState<{
-    session: ActiveMatchSession;
-    expiresAt: string;
-  } | null>(null);
-  const [reconnectNow, setReconnectNow] = useState(() => Date.now());
   const p2pCleanupRef = useRef<(() => void) | null>(null);
 
-  useEffect(() => {
-    if (!reconnectOffer) return;
-    const timer = window.setInterval(() => {
-      const now = Date.now();
-      setReconnectNow(now);
-      if (new Date(reconnectOffer.expiresAt).getTime() <= now) setReconnectOffer(null);
-    }, 250);
-    return () => window.clearInterval(timer);
-  }, [reconnectOffer]);
 
   const handleEditorCodeChange = (nextCode: string) => {
     setEditorCode(nextCode);
@@ -205,64 +191,9 @@ function AppWorkspace() {
         isSparring,
       });
     });
-    const handleReconnect = (pkt: any) => {
-      const m = pkt.match;
-      if (!m) return;
-      setReconnectOffer(null);
-      setActiveMatch({
-        source: 'backend',
-        matchId: m.id,
-        seed: m.seed,
-        pieceCount: m.pieceCount || 9,
-        mode: pkt.mode || m.match_type || 'human',
-        mySeat: pkt.role === 'player1' ? 1 : 2,
-        player1Name: m.player1?.displayName || 'Player 1',
-        player2Name: m.player2?.displayName || 'Player 2',
-        player1Elo: m.player1?.elo,
-        player2Elo: m.player2?.elo,
-        rules: m.rules || null,
-        tournamentId: m.tournament_id || null,
-        tournamentPhase: m.tournament_phase || null,
-      });
-    };
-    const offRejoined = backendClient.on('match-rejoined', handleReconnect);
-    const offAvailable = backendClient.on('match-rejoin-available', (pkt) => {
-      const m = pkt.match;
-      if (!m) return;
-      setActiveMatch(null);
-      setReconnectOffer({
-        session: {
-          source: 'backend',
-          matchId: m.id,
-          seed: m.seed,
-          pieceCount: m.pieceCount || 9,
-          mode: m.match_type || 'human',
-          mySeat: pkt.role === 'player1' ? 1 : 2,
-          player1Name: m.player1?.displayName || 'Player 1',
-          player2Name: m.player2?.displayName || 'Player 2',
-          player1Elo: m.player1?.elo,
-          player2Elo: m.player2?.elo,
-          rules: m.rules || null,
-          tournamentId: m.tournament_id || null,
-          tournamentPhase: m.tournament_phase || null,
-        },
-        expiresAt: pkt.expiresAt,
-      });
-    });
-    const offForfeited = backendClient.on('match-forfeited', (pkt) => {
-      setReconnectOffer((current) => {
-        if (current?.session.matchId !== pkt.matchId) return current;
-        notify(pkt.message || 'Bạn đã thua vì không vào lại phòng trong 10 giây.', 'error');
-        return null;
-      });
-    });
-
     return () => {
       offSpar();
       offMatchFound();
-      offRejoined();
-      offAvailable();
-      offForfeited();
     };
   }, [notify]);
 
@@ -294,12 +225,6 @@ function AppWorkspace() {
 
   const handleExitActiveMatch = useCallback(() => {
     const leavingMatch = activeMatch?.source === 'backend' ? activeMatch : null;
-    if (leavingMatch) {
-      setReconnectOffer({
-        session: leavingMatch,
-        expiresAt: new Date(Date.now() + 10000).toISOString(),
-      });
-    }
     setActiveMatch(null);
     refreshPublicAndUserData();
 
@@ -319,9 +244,6 @@ function AppWorkspace() {
     }
   }, [activeMatch, refreshPublicAndUserData]);
 
-  const reconnectSeconds = reconnectOffer
-    ? Math.max(0, Math.ceil((new Date(reconnectOffer.expiresAt).getTime() - reconnectNow) / 1000))
-    : 0;
 
   return (
     <div className="relative min-h-screen flex text-[var(--text-primary)]">
@@ -521,24 +443,6 @@ function AppWorkspace() {
 
         {/* Page Viewport */}
         <main className="flex-1 w-full max-w-[1320px] mx-auto px-4 sm:px-8 py-6 sm:py-8">
-          {reconnectOffer && reconnectSeconds > 0 && !activeMatch && (
-            <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-400/40 bg-amber-400/10 px-4 py-3">
-              <div className="text-sm text-[var(--text-primary)]">
-                Bạn đã rời phòng. Hãy vào lại trong <strong>{reconnectSeconds} giây</strong> để tiếp tục trận đấu.
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  backendClient.rejoinMatch(reconnectOffer.session.matchId).catch((err: any) => {
-                    notify(err.message || 'Không thể vào lại phòng.', 'error');
-                  });
-                }}
-                className="rounded-xl bg-amber-400 px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-amber-300"
-              >
-                Vào lại phòng: {reconnectSeconds}s
-              </button>
-            </div>
-          )}
           {activeMatch ? (
             <ActiveMatchArena
               session={activeMatch}

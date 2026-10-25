@@ -1,4 +1,4 @@
-﻿import http from 'node:http';
+import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -18,6 +18,7 @@ import { promisify } from 'node:util';
 import express from 'express';
 import type { Request, Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
+import { verifyConsensusDispute } from './server/src/replay.js';
 
 const require = createRequire(import.meta.url);
 const { OTTGameEngine } = require('./shared/OTTGameEngine.js');
@@ -1404,151 +1405,132 @@ async function startServer() {
     }
   });
 
-    app.post('/api/match/claim-disconnect', (req: Request, res: Response) => {
+  app.post('/api/match/consensus-dispute', (req: Request, res: Response) => {
     try {
       const user = getAuthUser(req);
-      const matchId = String(req.body?.matchId || '');
-      const match = db.matches.find((m) => m.id === matchId);
-      if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
-        res.status(404).json({ error: 'KhÃ´ng tÃ¬m tháº¥y tráº­n Ä‘áº¥u cá»§a báº¡n.' });
+      const report = req.body?.report;
+      const proof = report?.payload;
+      const evidence = req.body?.evidence;
+      if (!proof || proof.kind !== 'consensus-dispute' || typeof report.signature !== 'string') {
+        res.status(400).json({ error: 'Bằng chứng kiểm tra hash không hợp lệ.' });
         return;
       }
-      if (match.status === 'completed') {
-        const mr = db.matchResults.find((r) => r.match_id === match.id);
-        res.json({
-          alreadySubmitted: true,
-          matchId: match.id,
-          winnerId: match.winner_id,
-          finalStateHash: match.final_state_hash,
-          elo: mr
-            ? {
-                player1: { before: mr.player1_elo_before, after: mr.player1_elo_after },
-                player2: { before: mr.player2_elo_before, after: mr.player2_elo_after },
-              }
-            : null,
-          eloUpdated: match.match_type === 'bot' && !match.is_sparring,
-        });
+      const match = db.matches.find((entry) => entry.id === proof.matchId);
+      if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
+        res.status(404).json({ error: 'Không tìm thấy trận đấu của bạn.' });
         return;
       }
       if (match.status !== 'active') {
-        res.status(409).json({ error: 'Tráº­n Ä‘áº¥u khÃ´ng cÃ²n á»Ÿ tráº¡ng thÃ¡i Ä‘ang diá»…n ra.' });
+        res.status(409).json({ error: 'Trận đấu không còn ở trạng thái đang diễn ra.' });
+        return;
+      }
+      const claimantSeat = match.player1_id === user.id ? 1 : 2;
+      if (proof.claimantSeat !== claimantSeat || proof.stepCount !== evidence?.moves?.length + 1 ||
+          proof.stepCount !== evidence?.disputedStep?.stepCount ||
+          !Array.isArray(evidence?.disputedStep?.acknowledgements) ||
+          evidence.disputedStep.acknowledgements.length !== 2 || evidence.matchId !== match.id ||
+          sha256Canonical(evidence) !== proof.evidenceHash) {
+        res.status(400).json({ error: 'Bằng chứng hash không khớp với biên bản trận đấu.' });
+        return;
+      }
+      const localAck = evidence.disputedStep.acknowledgements.find((item: any) => item?.payload?.player === claimantSeat);
+      const remoteAck = evidence.disputedStep.acknowledgements.find((item: any) => item?.payload?.player !== claimantSeat);
+      if (proof.localHash !== localAck?.payload?.stateHash || proof.remoteHash !== remoteAck?.payload?.stateHash ||
+          proof.localHash !== evidence.disputedStep.stateHash || proof.localHash === proof.remoteHash) {
+        res.status(400).json({ error: 'Hash báo cáo không khớp với hai chữ ký đã nhận.' });
+        return;
+      }
+      const claimantKey = claimantSeat === 1 ? match.player1_key : match.player2_key;
+      if (!verifySessionProof(claimantKey, proof, report.signature)) {
+        res.status(400).json({ error: 'Chữ ký bằng chứng kiểm tra hash không hợp lệ.' });
         return;
       }
 
-      const opponentId = match.player1_id === user.id ? match.player2_id : match.player1_id;
-      if (match.disconnected_player_id !== opponentId || !match.disconnected_at) {
-        res.status(409).json({ error: 'Máy chủ chưa ghi nhận đối thủ rời trận.' });
+      const decision = verifyConsensusDispute(evidence, match);
+      if (!decision.adjudicated) {
+        match.status = 'disputed';
+        match.completed_at = new Date().toISOString();
+        saveDb();
+        const outcome = {
+          matchId: match.id,
+          claimantId: user.id,
+          resolved: false,
+          message: 'Hash hai bên bất đồng nhưng máy chủ chưa xác định được duy nhất bên sai. Trận được đánh dấu tranh chấp.',
+        };
+        for (const playerId of [match.player1_id, match.player2_id]) {
+          sendWs(liveSockets.get(playerId), 'match-dispute-result', outcome);
+        }
+        res.json(outcome);
         return;
       }
-      const oppSocket = liveSockets.get(opponentId);
 
-      match.status = 'completed';
-      match.winner_id = user.id;
-      match.completed_at = new Date().toISOString();
-      match.disconnected_player_id = null;
-      match.disconnected_at = null;
-      sparringSessions.delete(match.id);
-
-      const u1 = db.users.find((u) => u.id === match.player1_id)!;
-      const u2 = db.users.find((u) => u.id === match.player2_id)!;
-      const score1 = user.id === match.player1_id ? 1 : 0;
+      const offenderId = decision.offenderSeat === 1 ? match.player1_id : match.player2_id;
+      const winnerId = offenderId === match.player1_id ? match.player2_id : match.player1_id;
+      const score1 = winnerId === match.player1_id ? 1 : 0;
+      const player1 = db.users.find((entry) => entry.id === match.player1_id)!;
+      const player2 = db.users.find((entry) => entry.id === match.player2_id)!;
       const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
-      const u1Before = u1.elo;
-      const u2Before = u2.elo;
-      const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
-      const u2After = eloUpdated ? calculateElo(u2Before, u1Before, 1 - score1) : u2Before;
-
+      const player1Before = player1.elo;
+      const player2Before = player2.elo;
+      const player1After = eloUpdated ? calculateElo(player1Before, player2Before, score1) : player1Before;
+      const player2After = eloUpdated ? calculateElo(player2Before, player1Before, 1 - score1) : player2Before;
       if (eloUpdated) {
-        u1.elo = u1After;
-        u2.elo = u2After;
+        player1.elo = player1After;
+        player2.elo = player2After;
       }
-
-      let tournamentUpdate: any = null;
+      db.matchResults.push({
+        match_id: match.id,
+        player1_elo_before: player1Before,
+        player2_elo_before: player2Before,
+        player1_elo_after: player1After,
+        player2_elo_after: player2After,
+        result_player1: score1,
+        created_at: new Date().toISOString(),
+      });
       if (match.tournament_id) {
-        const e1 = db.tournamentEntries.find(
-          (e) => e.tournament_id === match.tournament_id && e.player_id === u1.id
-        );
-        const e2 = db.tournamentEntries.find(
-          (e) => e.tournament_id === match.tournament_id && e.player_id === u2.id
-        );
-        for (const [entry, sc] of [
-          [e1, score1],
-          [e2, 1 - score1],
-        ] as const) {
+        for (const [playerId, score] of [[match.player1_id, score1], [match.player2_id, 1 - score1]] as const) {
+          const entry = db.tournamentEntries.find((item) => item.tournament_id === match.tournament_id && item.player_id === playerId);
           if (!entry) continue;
           entry.matches_played += 1;
-          if (sc === 1) entry.wins += 1;
-          else if (sc === 0) entry.losses += 1;
-          else entry.draws += 1;
+          if (score === 1) entry.wins += 1;
+          else entry.losses += 1;
           if (match.tournament_phase === 'ranked') {
-            const prog = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, sc);
-            entry.tier = prog.tier;
-            entry.rank_stars = prog.stars;
-            entry.season_points = prog.seasonPoints;
+            const progress = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, score);
+            entry.tier = progress.tier;
+            entry.rank_stars = progress.stars;
+            entry.season_points = progress.seasonPoints;
             entry.points = entry.wins;
-          }
-          if (entry.player_id === user.id) {
-            tournamentUpdate = {
-              tier: entry.tier,
-              stars: entry.rank_stars,
-              seasonPoints: entry.season_points,
-              phase: match.tournament_phase,
-            };
           }
         }
       }
-
-      db.matchResults.push({
-        match_id: match.id,
-        player1_elo_before: u1Before,
-        player2_elo_before: u2Before,
-        player1_elo_after: u1After,
-        player2_elo_after: u2After,
-        result_player1: score1,
-        created_at: match.completed_at,
-      });
-
+      match.status = 'completed';
+      match.winner_id = winnerId;
+      match.completed_at = new Date().toISOString();
       saveDb();
-
-      if (oppSocket && oppSocket.readyState === WebSocket.OPEN) {
-        sendWs(oppSocket, 'match-forfeited-loss', {
-          matchId: match.id,
-          winnerId: user.id,
-          message: 'Äá»‘i thá»§ Ä‘Ã£ yÃªu cáº§u xá»­ tháº¯ng ká»¹ thuáº­t do báº¡n ngáº¯t káº¿t ná»‘i hoáº·c rá»i tráº­n.',
-        });
-      }
-
-      const claimantSocket = liveSockets.get(user.id);
-      if (claimantSocket) {
-        sendWs(claimantSocket, 'match-forfeited-win', {
-          matchId: match.id,
-          winnerId: user.id,
-          message: 'Xá»­ tháº¯ng ká»¹ thuáº­t thÃ nh cÃ´ng! Äá»‘i thá»§ Ä‘Ã£ rá»i bÃ n hoáº·c máº¥t káº¿t ná»‘i.',
-        });
-      }
-
-      res.json({
-        ok: true,
+      const outcome = {
         matchId: match.id,
-        winnerId: user.id,
-        message: 'Xá»­ tháº¯ng ká»¹ thuáº­t thÃ nh cÃ´ng! Äá»‘i thá»§ Ä‘Ã£ rá»i bÃ n hoáº·c máº¥t káº¿t ná»‘i.',
-        elo: {
-          player1: { before: u1Before, after: u1After },
-          player2: { before: u2Before, after: u2After },
-        },
+        claimantId: user.id,
+        resolved: true,
+        winnerId,
+        winnerPlayer: winnerId === match.player1_id ? 1 : 2,
+        offenderPlayer: decision.offenderSeat,
+        stepCount: decision.stepCount,
         eloUpdated,
-        tournamentUpdate,
-      });
+        player1EloAfter: player1After,
+        player2EloAfter: player2After,
+        message: 'Máy chủ xác minh transcript: chữ ký hash của đối thủ không khớp trạng thái bàn cờ.',
+      };
+      for (const playerId of [winnerId, offenderId]) {
+        const playerNumber = playerId === match.player1_id ? 1 : 2;
+        sendWs(liveSockets.get(playerId), 'match-dispute-result', {
+          ...outcome,
+          eloAfter: playerNumber === 1 ? player1After : player2After,
+        });
+      }
+      res.json(outcome);
     } catch (err: any) {
-      res.status(err.status || 500).json({ error: err.message });
+      res.status(err.status || 400).json({ error: err.message || 'Không thể xác minh bằng chứng hash.' });
     }
-  });
-
-  app.post('/api/match/consensus-dispute', (req: Request, res: Response) => {
-    res.json({
-      status: 'adjudicated',
-      message: 'Biên bản tranh chấp đồng thuận đã được máy chủ ghi nhận.',
-    });
   });
 
   // ── WebSocket Server (/ws) ────────────────────────────────────
@@ -1563,7 +1545,6 @@ async function startServer() {
   const humanQueue = new Set<string>();
   const botQueue = new Set<string>();
   const tournamentQueue = new Map<string, Set<string>>();
-  const DISCONNECT_GRACE_MS = 10_000;
 
   const sendWs = (ws: WebSocket | undefined, type: string, data: Record<string, unknown> = {}) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1572,12 +1553,8 @@ async function startServer() {
   };
 
   function resolveDisconnectedMatch(match: MatchRecord, now = Date.now()) {
-    const disconnectedAt = match.disconnected_at ? new Date(match.disconnected_at).getTime() : NaN;
     const disconnectedId = match.disconnected_player_id;
-    if (
-      match.status !== 'active' || !disconnectedId || !Number.isFinite(disconnectedAt) ||
-      now - disconnectedAt < DISCONNECT_GRACE_MS
-    ) return false;
+    if (match.status !== 'active' || !disconnectedId) return false;
 
     const winnerId = disconnectedId === match.player1_id ? match.player2_id : match.player1_id;
     const player1 = db.users.find((entry) => entry.id === match.player1_id);
@@ -1639,25 +1616,15 @@ async function startServer() {
     sendWs(liveSockets.get(winnerId), 'match-forfeited-win', {
       ...common,
       eloAfter: winnerId === match.player1_id ? player1After : player2After,
-      message: 'Bạn thắng kỹ thuật vì đối thủ không quay lại trong 10 giây.',
+      message: 'Bạn thắng kỹ thuật vì đối thủ đã rời trận.',
     });
     sendWs(liveSockets.get(disconnectedId), 'match-forfeited', {
       ...common,
       eloAfter: disconnectedId === match.player1_id ? player1After : player2After,
-      message: 'Bạn bị xử thua vì không quay lại trong 10 giây.',
+      message: 'Bạn bị xử thua vì đã rời trận.',
     });
     return true;
   }
-
-  const disconnectForfeitTimer = setInterval(() => {
-    const now = Date.now();
-    let changed = false;
-    for (const match of db.matches) {
-      if (resolveDisconnectedMatch(match, now)) changed = true;
-    }
-    if (changed) saveDb();
-  }, 1000);
-  disconnectForfeitTimer.unref();
 
   function clearUserQueues(userId: string) {
     humanQueue.delete(userId);
@@ -1941,80 +1908,22 @@ async function startServer() {
           liveSockets.set(user.id, ws);
           if (prev && prev !== ws) prev.close(4001, 'Replaced by newer session');
           sendWs(ws, 'authenticated', { user: publicUser(user) });
-          for (const match of db.matches) {
-            if (
-              match.status !== 'active' || match.disconnected_player_id !== user.id ||
-              !match.disconnected_at || Date.now() - new Date(match.disconnected_at).getTime() >= DISCONNECT_GRACE_MS
-            ) continue;
-            const player1 = db.users.find((entry) => entry.id === match.player1_id);
-            const player2 = db.users.find((entry) => entry.id === match.player2_id);
-            sendWs(ws, 'match-rejoin-available', {
-              match: {
-                id: match.id,
-                seed: match.seed,
-                match_type: match.match_type,
-                tournament_id: match.tournament_id,
-                tournament_phase: match.tournament_phase,
-                player1: { displayName: player1?.display_name || 'Player 1', elo: player1?.elo },
-                player2: { displayName: player2?.display_name || 'Player 2', elo: player2?.elo },
-              },
-              role: match.player1_id === user.id ? 'player1' : 'player2',
-              expiresAt: new Date(new Date(match.disconnected_at).getTime() + DISCONNECT_GRACE_MS).toISOString(),
-            });
-          }
           return;
         }
 
         const user = db.users.find((u) => u.id === ws.userId)!;
 
-        if (packet.type === 'leave-match' || packet.type === 'rejoin-match') {
+        if (packet.type === 'leave-match') {
           const match = db.matches.find((entry) => entry.id === packet.matchId && entry.status === 'active');
           if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
             sendWs(ws, 'error', { message: 'Không tìm thấy trận đấu đang diễn ra.' });
             return;
           }
-
-          if (packet.type === 'leave-match') {
-            match.disconnected_player_id = user.id;
-            match.disconnected_at = new Date().toISOString();
-            saveDb();
-            const opponentId = match.player1_id === user.id ? match.player2_id : match.player1_id;
-            const expiresAt = new Date(Date.now() + DISCONNECT_GRACE_MS).toISOString();
-            sendWs(liveSockets.get(opponentId), 'peer-disconnected', {
-              matchId: match.id,
-              disconnectedPlayerId: user.id,
-              expiresAt,
-            });
-            sendWs(ws, 'match-left', { matchId: match.id, expiresAt });
-          } else {
-            if (
-              match.disconnected_player_id !== user.id || !match.disconnected_at ||
-              Date.now() - new Date(match.disconnected_at).getTime() >= DISCONNECT_GRACE_MS
-            ) {
-              sendWs(ws, 'error', { message: 'Đã hết thời gian quay lại trận đấu.' });
-              return;
-            }
-            match.disconnected_player_id = null;
-            match.disconnected_at = null;
-            saveDb();
-            const player1 = db.users.find((entry) => entry.id === match.player1_id);
-            const player2 = db.users.find((entry) => entry.id === match.player2_id);
-            sendWs(ws, 'match-rejoined', {
-              match: {
-                id: match.id,
-                seed: match.seed,
-                pieceCount: 9,
-                match_type: match.match_type,
-                tournament_id: match.tournament_id,
-                tournament_phase: match.tournament_phase,
-                player1: { displayName: player1?.display_name || 'Player 1', elo: player1?.elo },
-                player2: { displayName: player2?.display_name || 'Player 2', elo: player2?.elo },
-              },
-              role: match.player1_id === user.id ? 'player1' : 'player2',
-              mode: match.match_type,
-            });
-          }
-        } else if (packet.type === 'find-match' || packet.type === 'find-bot-match') {
+          match.disconnected_player_id = user.id;
+          match.disconnected_at = new Date().toISOString();
+          resolveDisconnectedMatch(match);
+          saveDb();
+          sendWs(ws, 'match-left', { matchId: match.id });        } else if (packet.type === 'find-match' || packet.type === 'find-bot-match') {
           clearUserQueues(user.id);
           const mode: 'human' | 'bot' = packet.type === 'find-bot-match' ? 'bot' : 'human';
           const targetQueue = mode === 'bot' ? botQueue : humanQueue;
@@ -2139,7 +2048,10 @@ async function startServer() {
           const peerId = match.player1_id === user.id ? match.player2_id : match.player1_id;
           const peerSocket = liveSockets.get(peerId);
           if (!peerSocket || peerSocket.readyState !== WebSocket.OPEN) {
-            sendWs(ws, 'peer-offline', { matchId: match.id });
+            match.disconnected_player_id = peerId;
+            match.disconnected_at = new Date().toISOString();
+            resolveDisconnectedMatch(match);
+            saveDb();
             return;
           }
           sendWs(peerSocket, packet.type, {
@@ -2147,7 +2059,7 @@ async function startServer() {
             from: user.id,
             payload: packet.payload,
           });
-                } else if (packet.type === 'bot-forfeit' || packet.type === 'bot-setup-failed') {
+        } else if (packet.type === 'bot-forfeit' || packet.type === 'bot-setup-failed') {
           const match = db.matches.find((m) => m.id === packet.matchId && m.status === 'active');
           if (match) {
             const forfeitingUserId = user.id;
@@ -2224,13 +2136,8 @@ async function startServer() {
           for (const match of db.matches) {
             if (match.status !== 'active' || (match.player1_id !== ws.userId && match.player2_id !== ws.userId)) continue;
             match.disconnected_player_id = ws.userId;
-            match.disconnected_at ||= disconnectedAt;
-            const opponentId = match.player1_id === ws.userId ? match.player2_id : match.player1_id;
-            sendWs(liveSockets.get(opponentId), 'peer-disconnected', {
-              matchId: match.id,
-              disconnectedPlayerId: ws.userId,
-              expiresAt: new Date(new Date(match.disconnected_at).getTime() + DISCONNECT_GRACE_MS).toISOString(),
-            });
+            match.disconnected_at = disconnectedAt;
+            resolveDisconnectedMatch(match);
           }
           saveDb();
         }

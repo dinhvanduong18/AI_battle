@@ -36,9 +36,7 @@ const sparringSessions = new Map();
 const SPARRING_BOT_ID = '00000000-0000-4000-8000-000000000001';
 const MAX_BODY = 2 * 1024 * 1024;
 let tournamentLifecycleTimer = null;
-let disconnectForfeitTimer = null;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const DISCONNECT_FORFEIT_MS = 10_000;
 const TOURNAMENT_QUEUE_TIERS = [...TOURNAMENT_RANKS, 'Practice'];
 const DEFAULT_SPRINT_RULES = ['standard', 'center_blockers', 'clipped_corners', 'corridor'];
 const SPRINT_RULE_LAYOUTS = {
@@ -877,7 +875,7 @@ async function submitResult(userId, body) {
   } finally { client.release(); }
 }
 
-async function resolveDisconnectedMatch(matchId, force = false) {
+async function resolveDisconnectedMatch(matchId) {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -885,31 +883,13 @@ async function resolveDisconnectedMatch(matchId, force = false) {
       `SELECT * FROM matches
        WHERE id=$1 AND status='active'
          AND disconnected_player_id IS NOT NULL
-         AND ($2::boolean OR disconnected_at <= clock_timestamp() - ($3 * interval '1 millisecond'))
        FOR UPDATE`,
-      [matchId, force, DISCONNECT_FORFEIT_MS]
+      [matchId]
     );
     const match = found.rows[0];
     if (!match) {
       await client.query('COMMIT');
       return null;
-    }
-
-    if (await areBothMatchPlayersOffline(redis, match.player1_id, match.player2_id)) {
-      await client.query(
-        `UPDATE matches SET status='abandoned',completed_at=now(),
-           disconnected_player_id=NULL,disconnected_at=NULL
-         WHERE id=$1 AND status='active'`,
-        [match.id]
-      );
-      await client.query('COMMIT');
-      return {
-        matchId: match.id,
-        abandoned: true,
-        bothPlayersDisconnected: true,
-        player1Id: match.player1_id,
-        player2Id: match.player2_id
-      };
     }
 
     if (match.tournament_id) {
@@ -984,8 +964,8 @@ async function resolveDisconnectedMatch(matchId, force = false) {
   }
 }
 
-async function processMatchForfeit(matchId, reason = 'disconnect', force = false) {
-  const result = await resolveDisconnectedMatch(matchId, force);
+async function processMatchForfeit(matchId, reason = 'disconnect') {
+  const result = await resolveDisconnectedMatch(matchId);
   if (!result) return;
   const players = [result.player1Id, result.player2Id];
   if (result.abandoned) {
@@ -1004,8 +984,8 @@ async function processMatchForfeit(matchId, reason = 'disconnect', force = false
     const isWinner = playerId === result.winnerId;
     const message = reason === 'bot'
       ? isWinner
-        ? 'Bạn thắng kỹ thuật vì Bot đối thủ không đi trong vòng 5 giây.'
-        : 'Bot của bạn không đi trong vòng 5 giây. Bạn bị xử thua kỹ thuật.'
+        ? 'Bạn thắng kỹ thuật vì Bot đối thủ gặp lỗi hoặc vượt quá thời gian.'
+        : 'Bot của bạn gặp lỗi hoặc vượt quá thời gian. Bạn bị xử thua kỹ thuật.'
       : isWinner
         ? 'Bạn thắng do đối thủ đã rời trận.'
         : 'Bạn thua do đã rời trận.';
@@ -1020,19 +1000,6 @@ async function processMatchForfeit(matchId, reason = 'disconnect', force = false
     });
   }
   return result;
-}
-
-async function processDisconnectedMatches() {
-  const due = await pool.query(
-    `SELECT id FROM matches
-     WHERE status='active' AND disconnected_player_id IS NOT NULL
-       AND disconnected_at <= clock_timestamp() - ($1 * interval '1 millisecond')
-     ORDER BY disconnected_at LIMIT 50`,
-    [DISCONNECT_FORFEIT_MS]
-  );
-  for (const { id } of due.rows) {
-    await processMatchForfeit(id, botForfeitMatchIds.has(id) ? 'bot' : 'disconnect');
-  }
 }
 
 async function submitConsensusDispute(userId, body) {
@@ -1167,6 +1134,7 @@ async function submitConsensusDispute(userId, body) {
     const playerNumber = playerId === outcome.winnerId ? outcome.winnerPlayer : outcome.offenderPlayer;
     await deliverToUser(playerId, 'match-dispute-result', {
       matchId: outcome.matchId,
+      claimantId: userId,
       resolved: outcome.resolved,
       winnerPlayer: outcome.winnerPlayer || null,
       offenderPlayer: outcome.offenderPlayer || null,
@@ -1179,7 +1147,7 @@ async function submitConsensusDispute(userId, body) {
     const match = await pool.query('SELECT player1_id,player2_id FROM matches WHERE id=$1', [outcome.matchId]);
     for (const playerId of [match.rows[0].player1_id, match.rows[0].player2_id]) {
       await deliverToUser(playerId, 'match-dispute-result', {
-        matchId: outcome.matchId, resolved: false, message: outcome.message
+        matchId: outcome.matchId, claimantId: userId, resolved: false, message: outcome.message
       });
     }
   }
@@ -1666,44 +1634,6 @@ const httpServer = createServer(async (req, res) => {
       if (result.rejectedLate) return json(res, 409, { error: result.error, matchStatus: 'abandoned' });
       return json(res, 200, result);
     }
-    if (req.method === 'POST' && url.pathname === '/api/match/claim-disconnect') {
-      const auth = authFromHeader(req);
-      const body = await readBody(req);
-      const matchId = String(body.matchId || '');
-      const found = await pool.query(
-        'SELECT id,status,player1_id,player2_id,disconnected_player_id FROM matches WHERE id=$1',
-        [matchId]
-      );
-      const match = found.rows[0];
-      if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(auth.sub)) {
-        throw Object.assign(new Error('Active match not found for this player'), { status: 404 });
-      }
-      const opponentId = match.player1_id === auth.sub ? match.player2_id : match.player1_id;
-      if (match.disconnected_player_id !== opponentId) {
-        throw Object.assign(new Error('Server has not observed the opponent leave the match'), { status: 409 });
-      }
-      const result = await processMatchForfeit(matchId, 'disconnect', true);
-      if (!result || result.abandoned) {
-        throw Object.assign(new Error('Could not award a technical win for this match'), { status: 409 });
-      }
-      const eloResult = await pool.query(
-        `SELECT player1_elo_before,player2_elo_before,player1_elo_after,player2_elo_after
-         FROM match_results WHERE match_id=$1 ORDER BY created_at DESC LIMIT 1`,
-        [matchId]
-      );
-      const storedElo = eloResult.rows[0];
-      return json(res, 200, {
-        ok: true,
-        matchId,
-        winnerId: result.winnerId,
-        message: 'Xử thắng kỹ thuật thành công! Máy chủ đã xác nhận đối thủ rời trận.',
-        eloUpdated: result.eloUpdated,
-        elo: storedElo ? {
-          player1: { before: storedElo.player1_elo_before, after: storedElo.player1_elo_after },
-          player2: { before: storedElo.player2_elo_before, after: storedElo.player2_elo_after },
-        } : null,
-      });
-    }
     if (req.method === 'POST' && url.pathname === '/api/match/consensus-dispute') {
       const auth = authFromHeader(req);
       const body = await readBody(req);
@@ -1744,30 +1674,7 @@ wss.on('connection', ws => {
         if (previous && previous !== ws) previous.close(4001, 'Replaced by a newer session');
         await cancelQueue(redis, ws.user.id).catch(() => {});
         await redis.set(`ottv2:presence:${ws.user.id}`, instanceId, { EX: 60 });
-        const reconnectable = await pool.query(
-          `SELECT m.id,m.seed,m.player1_id,m.player2_id,m.match_type,m.tournament_id,m.disconnected_at,
-                  p1.display_name AS player1_name,p1.elo AS player1_elo,
-                  p2.display_name AS player2_name,p2.elo AS player2_elo
-           FROM matches m
-           JOIN users p1 ON p1.id=m.player1_id
-           JOIN users p2 ON p2.id=m.player2_id
-           WHERE m.status='active' AND m.disconnected_player_id=$1
-             AND m.disconnected_at > clock_timestamp() - interval '10 seconds'`,
-          [ws.user.id]
-        );
         send(ws, 'authenticated', { user: publicUser(ws.user) });
-        for (const match of reconnectable.rows) {
-          send(ws, 'match-rejoin-available', {
-            match: {
-              id: match.id, seed: match.seed, match_type: match.match_type,
-              tournament_id: match.tournament_id,
-              player1: { displayName: match.player1_name, elo: match.player1_elo },
-              player2: { displayName: match.player2_name, elo: match.player2_elo }
-            },
-            role: match.player1_id === ws.user.id ? 'player1' : 'player2',
-            expiresAt: new Date(new Date(match.disconnected_at).getTime() + DISCONNECT_FORFEIT_MS).toISOString()
-          });
-        }
         return;
       }
       const userId = ws.user.id;
@@ -1847,7 +1754,7 @@ wss.on('connection', ws => {
           ws.tournamentSearch = null;
         }
         send(ws, 'search-cancelled');
-      } else if (packet.type === 'bot-forfeit') {
+      } else if (packet.type === 'bot-forfeit' || packet.type === 'bot-setup-failed') {
         const matchId = String(packet.matchId || '');
         const found = await pool.query(
           'SELECT id,player1_id,player2_id,match_type,status FROM matches WHERE id=$1',
@@ -1872,81 +1779,24 @@ wss.on('connection', ws => {
         } finally {
           botForfeitMatchIds.delete(match.id);
         }
-      } else if (packet.type === 'bot-setup-failed') {
-        const found = await pool.query('SELECT id,player1_id,player2_id,status FROM matches WHERE id=$1', [packet.matchId]);
-        const match = found.rows[0];
-        if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(userId)) throw new Error('Not authorized to abort this match');
-        await pool.query("UPDATE matches SET status='abandoned' WHERE id=$1 AND status='active'", [match.id]);
-        const otherId = match.player1_id === userId ? match.player2_id : match.player1_id;
-        const message = 'Trận đã hủy vì một bot không khởi động được. Hãy kiểm tra mã Python rồi tìm lại trận.';
-        await deliverToUser(otherId, 'match-aborted', { matchId: match.id, message });
-        send(ws, 'match-aborted', { matchId: match.id, message });
-      } else if (packet.type === 'leave-match' || packet.type === 'rejoin-match') {
-        const found = await pool.query(
-          `SELECT m.*,p1.display_name AS player1_name,p1.elo AS player1_elo,
-                  p2.display_name AS player2_name,p2.elo AS player2_elo
-           FROM matches m
-           JOIN users p1 ON p1.id=m.player1_id
-           JOIN users p2 ON p2.id=m.player2_id
-           WHERE m.id=$1 AND m.status='active'`,
-          [packet.matchId]
-        );
+      } else if (packet.type === 'leave-match') {
+        const found = await pool.query("SELECT id,player1_id,player2_id FROM matches WHERE id=$1 AND status='active'", [packet.matchId]);
         const match = found.rows[0];
         if (!match || !canonicalMatchIds(match).includes(userId)) throw new Error('Not authorized for this match');
-        if (packet.type === 'leave-match') {
-          const marked = await pool.query(
-            `UPDATE matches SET disconnected_at=CASE WHEN disconnected_player_id=$1 THEN disconnected_at ELSE now() END,
-               disconnected_player_id=$1
-             WHERE id=$2 AND status='active' RETURNING disconnected_at`,
-            [userId, match.id]
-          );
-          if (marked.rowCount) {
-            const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
-            const disconnectedAt = new Date(marked.rows[0].disconnected_at).getTime();
-            const expiresAt = new Date(disconnectedAt + DISCONNECT_FORFEIT_MS).toISOString();
-            await deliverToUser(peerId, 'peer-disconnected', { matchId: match.id, disconnectedPlayerId: userId, expiresAt });
-            send(ws, 'match-left', { matchId: match.id, expiresAt });
-          }
-        } else {
-          const rejoined = await pool.query(
-            `UPDATE matches SET disconnected_player_id=NULL,disconnected_at=NULL
-             WHERE id=$1 AND status='active' AND disconnected_player_id=$2
-               AND disconnected_at > clock_timestamp() - ($3 * interval '1 millisecond')
-             RETURNING id`,
-            [match.id, userId, DISCONNECT_FORFEIT_MS]
-          );
-          if (!rejoined.rowCount) throw Object.assign(new Error('Thời gian vào lại phòng đã hết.'), { status: 409 });
-          send(ws, 'match-rejoined', {
-            match: {
-              id: match.id, seed: match.seed, match_type: match.match_type,
-              tournament_id: match.tournament_id,
-              player1: { displayName: match.player1_name, elo: match.player1_elo },
-              player2: { displayName: match.player2_name, elo: match.player2_elo }
-            },
-            role: match.player1_id === userId ? 'player1' : 'player2',
-            mode: match.match_type
-          });
+        const marked = await pool.query(
+          `UPDATE matches SET disconnected_player_id=$1,disconnected_at=now()
+           WHERE id=$2 AND status='active' RETURNING id`,
+          [userId, match.id]
+        );
+        if (marked.rowCount) {
+          await processMatchForfeit(match.id);
+          send(ws, 'match-left', { matchId: match.id });
         }
       } else if (packet.type === 'session-key') {
         await registerSessionKey(userId, packet);
         send(ws, 'session-key-accepted', { matchId: packet.matchId });
       } else if (packet.type === 'rtc-disconnected' || packet.type === 'rtc-connected') {
-        const found = await pool.query('SELECT id,player1_id,player2_id,status FROM matches WHERE id=$1', [packet.matchId]);
-        const match = found.rows[0];
-        if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(userId)) throw new Error('Not authorized for this match');
-        if (packet.type === 'rtc-disconnected') {
-          const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
-          const peerPresence = await redis.get(`ottv2:presence:${peerId}`);
-          if (!peerPresence) {
-            await pool.query(
-              `UPDATE matches SET disconnected_at=CASE WHEN disconnected_player_id=$1 THEN disconnected_at ELSE now() END,
-                 disconnected_player_id=$1 WHERE id=$2 AND status='active'`,
-              [peerId, match.id]
-            );
-          }
-        } else {
-          await pool.query('UPDATE matches SET disconnected_player_id=NULL, disconnected_at=NULL WHERE id=$1 AND status=\'active\'', [match.id]);
-        }
+        // Presence loss is adjudicated by the server immediately.
       } else if (packet.type === 'signal' || packet.type === 'match-relay') {
         if (!packet.matchId || !packet.payload) throw new Error('Missing signaling payload');
         const result = await pool.query('SELECT player1_id,player2_id,status FROM matches WHERE id=$1', [packet.matchId]);
@@ -1959,7 +1809,15 @@ wss.on('connection', ws => {
         }
         const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
         const online = await redis.get(`ottv2:presence:${peerId}`);
-        if (!online) return send(ws, 'peer-offline', { matchId: packet.matchId });
+        if (!online) {
+          const marked = await pool.query(
+            `UPDATE matches SET disconnected_player_id=$1,disconnected_at=now()
+             WHERE id=$2 AND status='active' RETURNING id`,
+            [peerId, packet.matchId]
+          );
+          if (marked.rowCount) await processMatchForfeit(packet.matchId);
+          return;
+        }
         await deliverToUser(peerId, packet.type, { matchId: packet.matchId, from: userId, payload: packet.payload });
       } else if (packet.type === 'ping') send(ws, 'pong', { at: Date.now() });
       else send(ws, 'error', { message: 'Unknown message type' });
@@ -2012,13 +1870,10 @@ wss.on('connection', ws => {
       try {
         const marked = await pool.query(
           `UPDATE matches SET disconnected_at=CASE WHEN disconnected_player_id=$1 THEN disconnected_at ELSE now() END,
-             disconnected_player_id=$1 WHERE id=$2 AND status='active' RETURNING id`,
+             disconnected_player_id=$1 WHERE id=$2 AND status='active' RETURNING disconnected_at`,
           [ws.user.id, match.id]
         );
-        if (marked.rowCount) {
-          await deliverToUser(peerId, 'peer-disconnected', { matchId: match.id, disconnectedPlayerId: ws.user.id });
-          await processDisconnectedMatches();
-        }
+        if (marked.rowCount) await processMatchForfeit(match.id);
       } catch (error) {
         console.error(`Could not record disconnect for match ${match.id}:`, error.message);
       }
@@ -2076,16 +1931,11 @@ async function main() {
   tournamentLifecycleTimer = setInterval(() => updateTournamentLifecycle().catch(error => {
     console.error('Tournament lifecycle update failed:', error.message);
   }), 60000);
-  disconnectForfeitTimer = setInterval(() => processDisconnectedMatches().catch(error => {
-    console.error('Disconnected match resolution failed:', error.message);
-  }), 1000);
-  disconnectForfeitTimer.unref();
   httpServer.listen(config.port, () => console.log(`OTTv2 backend listening on :${config.port}`));
 }
 async function shutdown() {
   clearInterval(heartbeat);
   if (tournamentLifecycleTimer) clearInterval(tournamentLifecycleTimer);
-  if (disconnectForfeitTimer) clearInterval(disconnectForfeitTimer);
   for (const ws of wss.clients) ws.close(1001, 'Server shutting down');
   await redis.quit().catch(() => {});
   await redisEvents.quit().catch(() => {});
