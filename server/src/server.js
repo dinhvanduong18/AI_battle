@@ -1426,8 +1426,29 @@ const httpServer = createServer(async (req, res) => {
         'UPDATE users SET display_name=$1,avatar_id=$2,password_hash=$3 WHERE id=$4',
         [nextName, nextAvatarId, passwordHash, auth.sub]
       );
-      const updated = await pool.query('SELECT id,email,display_name,elo,avatar_id,is_admin FROM users WHERE id=$1', [auth.sub]);
-      return json(res, 200, { user: { ...publicUser(updated.rows[0]), email: updated.rows[0].email } });
+      const [updated, stats] = await Promise.all([
+        pool.query('SELECT id,email,display_name,elo,avatar_id,is_admin FROM users WHERE id=$1', [auth.sub]),
+        pool.query(
+          `SELECT count(*)::int AS "matchesPlayed",
+                  count(*) FILTER (WHERE winner_id=$1)::int AS wins,
+                  count(*) FILTER (WHERE winner_id IS NULL)::int AS draws
+           FROM matches WHERE status='completed' AND (player1_id=$1 OR player2_id=$1)`,
+          [auth.sub]
+        )
+      ]);
+      const record = stats.rows[0];
+      return json(res, 200, {
+        user: {
+          ...publicUser(updated.rows[0]),
+          email: updated.rows[0].email,
+          stats: {
+            matchesPlayed: record.matchesPlayed,
+            wins: record.wins,
+            draws: record.draws,
+            losses: record.matchesPlayed - record.wins - record.draws
+          }
+        }
+      });
     }
     if (req.method === 'GET' && url.pathname === '/api/leaderboard') {
       const result = await pool.query('SELECT id,display_name,elo,avatar_id FROM users ORDER BY elo DESC,created_at ASC LIMIT 100');
@@ -1448,7 +1469,7 @@ const httpServer = createServer(async (req, res) => {
         FROM matches m JOIN users u1 ON u1.id=m.player1_id JOIN users u2 ON u2.id=m.player2_id
         LEFT JOIN match_results mr ON mr.match_id=m.id
         WHERE (m.player1_id=$1 OR m.player2_id=$1) AND m.status='completed'
-        ORDER BY m.created_at DESC LIMIT 50`, [auth.sub, replayStorage.enabled]);
+        ORDER BY m.created_at DESC`, [auth.sub, replayStorage.enabled]);
       return json(res, 200, { matches: result.rows });
     }
     if (req.method === 'GET' && /^\/api\/matches\/[0-9a-f-]+\/replay$/i.test(url.pathname)) {
@@ -1790,6 +1811,7 @@ async function main() {
   await pool.query(await readFile(new URL('../migrations/006_tournament_phases_and_standings.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/007_match_disputes.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/008_player_avatar.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/009_legacy_match_modes.sql', import.meta.url), 'utf8'));
   await updateTournamentLifecycle();
   tournamentLifecycleTimer = setInterval(() => updateTournamentLifecycle().catch(error => {
     console.error('Tournament lifecycle update failed:', error.message);

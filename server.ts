@@ -961,9 +961,12 @@ async function startServer() {
     try {
       const user = getAuthUser(req);
       const matches = db.matches
-        .filter((m) => m.player1_id === user.id || m.player2_id === user.id)
+        .filter(
+          (m) =>
+            m.status === 'completed' &&
+            (m.player1_id === user.id || m.player2_id === user.id)
+        )
         .sort((a, b) => b.created_at.localeCompare(a.created_at))
-        .slice(0, 50)
         .map((m) => {
           const u1 = db.users.find((u) => u.id === m.player1_id);
           const u2 = db.users.find((u) => u.id === m.player2_id);
