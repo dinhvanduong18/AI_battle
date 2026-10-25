@@ -975,7 +975,15 @@ async function startServer() {
             id: m.id,
             seed: m.seed,
             status: m.status,
-            match_type: m.match_type,
+            match_type:
+              m.match_type === 'bot' ||
+              Boolean(
+                mr &&
+                  (mr.player1_elo_before !== mr.player1_elo_after ||
+                    mr.player2_elo_before !== mr.player2_elo_after)
+              )
+                ? 'bot'
+                : 'human',
             winner_id: m.winner_id,
             final_state_hash: m.final_state_hash,
             replay_sha256: m.replay_sha256,
@@ -986,12 +994,11 @@ async function startServer() {
             player2: u2?.display_name || 'Player 2',
             player1_id: m.player1_id,
             player2_id: m.player2_id,
-            elo_delta:
-              mr && m.match_type === 'bot'
-                ? m.player1_id === user.id
-                  ? mr.player1_elo_after - mr.player1_elo_before
-                  : mr.player2_elo_after - mr.player2_elo_before
-                : 0,
+            elo_delta: mr
+              ? m.player1_id === user.id
+                ? mr.player1_elo_after - mr.player1_elo_before
+                : mr.player2_elo_after - mr.player2_elo_before
+              : 0,
           };
         });
       res.json({ matches });

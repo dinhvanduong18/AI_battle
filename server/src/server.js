@@ -1461,7 +1461,13 @@ const httpServer = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/matches') {
       const auth = authFromHeader(req);
-      const result = await pool.query(`SELECT m.id,m.seed,m.status,m.match_type,m.winner_id,m.final_state_hash,m.replay_sha256,m.created_at,m.completed_at,
+      const result = await pool.query(`SELECT m.id,m.seed,m.status,
+        CASE WHEN m.match_type='bot'
+                   OR (mr.match_id IS NOT NULL AND
+                       (mr.player1_elo_before <> mr.player1_elo_after
+                        OR mr.player2_elo_before <> mr.player2_elo_after))
+             THEN 'bot' ELSE 'human' END AS match_type,
+        m.winner_id,m.final_state_hash,m.replay_sha256,m.created_at,m.completed_at,
         CASE WHEN m.player1_id=$1 THEN mr.player1_elo_after-mr.player1_elo_before
              ELSE mr.player2_elo_after-mr.player2_elo_before END AS elo_delta,
         (m.replay_json IS NOT NULL OR (m.replay_key IS NOT NULL AND $2::boolean)) AS replay_available,
