@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Peer, { type DataConnection } from 'peerjs';
-import { Copy, Eye, Loader2, LogIn, PlusCircle, Radio, Shuffle, Users } from 'lucide-react';
-import { SPRINT_RULE_PRESETS, buildRulesFromPreset } from '../core/ottEngine';
+import { Copy, Eye, Loader2, LogIn, PlusCircle, Radio, Users } from 'lucide-react';
+import { buildRulesFromPreset } from '../core/ottEngine';
 import type { BackendUser } from '../core/backendClient';
 import type { ActiveMatchSession } from '../components/ActiveMatchArena';
 import { useToast } from '../components/ToastProvider';
@@ -20,14 +20,23 @@ function generateRoomCode(): string {
   return out;
 }
 
+function getParticipantId(userId?: string): string {
+  if (userId) return `user:${userId}`;
+  const storageKey = 'ottv2:p2p-participant-id';
+  let id = window.localStorage.getItem(storageKey);
+  if (!id) {
+    id = `guest:${window.crypto.randomUUID()}`;
+    window.localStorage.setItem(storageKey, id);
+  }
+  return id;
+}
+
 export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunchMatch }) => {
   const { notify } = useToast();
 
   // Host Room Config
   const [hostMode, setHostMode] = useState<'human' | 'bot'>('human');
   const [pieceCount, setPieceCount] = useState<number>(9);
-  const [presetKey, setPresetKey] = useState<string>('standard');
-  const [seed, setSeed] = useState<number>(() => Math.floor(100000 + Math.random() * 8999999));
 
   const [waitingCode, setWaitingCode] = useState<string | null>(null);
   const [creatingRoom, setCreatingRoom] = useState(false);
@@ -52,6 +61,8 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
 
   const handleCreateRoom = () => {
     setCreatingRoom(true);
+    const seed = Math.floor(100000 + Math.random() * 8999999);
+    const ownerId = getParticipantId(user?.id);
     const code = generateRoomCode();
     const peerId = `ottv2-room-${code.toLowerCase()}`;
     const peer = new Peer(peerId);
@@ -60,7 +71,7 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
     const listeners = new Set<(payload: any) => void>();
     const spectators = new Set<DataConnection>();
     let player2Conn: DataConnection | null = null;
-    const rules = buildRulesFromPreset(presetKey, 1);
+    const rules = buildRulesFromPreset('standard', 1);
 
     peer.on('open', () => {
       setCreatingRoom(false);
@@ -79,6 +90,11 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
         if (!raw || typeof raw !== 'object') return;
 
         if (raw.type === 'JOIN_REQUEST') {
+          if (raw.role === 'player' && raw.participantId === ownerId) {
+            conn.send({ type: 'ROOM_REJECT', reason: 'Bạn không thể vào đấu trong phòng do chính mình tạo.' });
+            return;
+          }
+
           if (raw.role === 'player' && player2Conn) {
             conn.send({ type: 'ROOM_REJECT', reason: 'Phòng đã đủ 2 người chơi. Bạn có thể vào xem trực tiếp.' });
             return;
@@ -192,6 +208,7 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
           type: 'JOIN_REQUEST',
           role,
           displayName: myDisplayName,
+          participantId: getParticipantId(user?.id),
         });
       });
 
@@ -266,7 +283,7 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
                 Tạo Phòng Đấu Riêng (Chủ phòng)
               </h2>
               <p className="text-sm text-[var(--text-secondary)] mt-1 leading-relaxed">
-                Tùy chỉnh số lượng quân cờ mỗi bên, chọn địa hình vật cản Sprint và tạo mã phòng 6 ký tự để mời bạn bè đối kháng hoặc cho phép khán giả vào xem trực tiếp.
+                Chọn số lượng quân cờ mỗi bên trên bàn tiêu chuẩn và tạo mã phòng 6 ký tự để mời bạn bè đối kháng hoặc cho phép khán giả vào xem trực tiếp.
               </p>
             </div>
 
@@ -300,43 +317,6 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
                 </select>
               </div>
 
-              <div>
-                <label className="block text-[var(--text-secondary)] mb-1">Bản đồ vật cản</label>
-                <select
-                  disabled={Boolean(waitingCode)}
-                  value={presetKey}
-                  onChange={(e) => setPresetKey(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-                >
-                  {Object.values(SPRINT_RULE_PRESETS).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.title}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-[var(--text-secondary)] mb-1">Seed khởi tạo</label>
-                <div className="flex gap-1.5">
-                  <input
-                    type="number"
-                    disabled={Boolean(waitingCode)}
-                    value={seed}
-                    onChange={(e) => setSeed(Number(e.target.value) || 1)}
-                    className="w-full px-3 py-2 font-mono rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-                  />
-                  <button
-                    type="button"
-                    disabled={Boolean(waitingCode)}
-                    onClick={() => setSeed(Math.floor(100000 + Math.random() * 8999999))}
-                    title="Đổi Seed ngẫu nhiên"
-                    className="px-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-                  >
-                    <Shuffle className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
             </div>
           </div>
 

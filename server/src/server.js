@@ -1579,6 +1579,22 @@ wss.on('connection', ws => {
         const message = 'Trận đã hủy vì một bot không khởi động được. Hãy kiểm tra mã Python rồi tìm lại trận.';
         await deliverToUser(otherId, 'match-aborted', { matchId: match.id, message });
         send(ws, 'match-aborted', { matchId: match.id, message });
+      } else if (packet.type === 'bot-forfeit') {
+        const found = await pool.query(
+          'SELECT id,player1_id,player2_id,status,match_type FROM matches WHERE id=$1',
+          [packet.matchId]
+        );
+        const match = found.rows[0];
+        if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(userId)) {
+          throw new Error('Không tìm thấy trận bot đang diễn ra hoặc bạn không có quyền xử lý trận này.');
+        }
+        if (match.match_type !== 'bot') throw new Error('Chỉ trận Bot vs Bot mới hỗ trợ xử thua do lỗi bot.');
+        const marked = await pool.query(
+          `UPDATE matches SET disconnected_player_id=$1,disconnected_at=clock_timestamp()
+           WHERE id=$2 AND status='active' RETURNING id`,
+          [userId, match.id]
+        );
+        if (marked.rowCount) await processDisconnectedMatches();
       } else if (packet.type === 'session-key') {
         await registerSessionKey(userId, packet);
         send(ws, 'session-key-accepted', { matchId: packet.matchId });

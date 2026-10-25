@@ -397,7 +397,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (!active || !packet) return;
 
       if (packet.type === 'PLAYER_DISCONNECTED' && session.mySeat !== null) {
-        const winner = session.mySeat;
+        if (packet.seat !== 1 && packet.seat !== 2) return;
+        const winner: GameState['winner'] = packet.seat === 1 ? 2 : 1;
         const finalState = { ...stateRef.current, winner };
         stateRef.current = finalState;
         setGameState(finalState);
@@ -408,6 +409,23 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           notify('Bạn đã mất kết nối với đối thủ và bị xử thua.', 'error');
           soundFx.playDefeat();
         }
+        return;
+      }
+
+      if (packet.type === 'BOT_FORFEIT' && session.mySeat !== null) {
+        if (packet.seat !== 1 && packet.seat !== 2) return;
+        const winner: GameState['winner'] = packet.seat === 1 ? 2 : 1;
+        const finalState = { ...stateRef.current, winner };
+        stateRef.current = finalState;
+        setGameState(finalState);
+        notify(
+          packet.seat === session.mySeat
+            ? 'Bot của bạn gặp lỗi và bị xử thua kỹ thuật.'
+            : 'Bot đối thủ gặp lỗi. Bạn thắng kỹ thuật!',
+          winner === session.mySeat ? 'success' : 'error'
+        );
+        if (winner === session.mySeat) soundFx.playVictory();
+        else soundFx.playDefeat();
         return;
       }
 
@@ -673,6 +691,12 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         soundFx.playDefeat();
         if (session.source === 'backend') {
           backendClient.botForfeit(session.matchId, err.message);
+        } else if (session.mySeat !== null) {
+          sendMessageToPeer({ type: 'BOT_FORFEIT', seat: session.mySeat, message: err.message });
+          const winner: GameState['winner'] = session.mySeat === 1 ? 2 : 1;
+          const finalState = { ...stateRef.current, winner };
+          stateRef.current = finalState;
+          setGameState(finalState);
         }
       } finally {
         steppingBotRef.current = false;
@@ -711,7 +735,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         throw new Error('Không tìm thấy mã nguồn Python cho lựa chọn này.');
       }
 
-      const runner = new BotRunner('MatchBot', 1500);
+      const runner = new BotRunner('MatchBot', 10000);
       await runner.loadBot(code, selectedBotSource);
       botRunnerRef.current = runner;
       setMyBotReady(true);
