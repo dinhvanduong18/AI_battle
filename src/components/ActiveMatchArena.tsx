@@ -399,7 +399,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (!active || !packet) return;
 
       if (packet.type === 'PLAYER_DISCONNECTED' && session.mySeat !== null) {
-        const winner = session.mySeat;
+        if (packet.seat !== 1 && packet.seat !== 2) return;
+        const winner: GameState['winner'] = packet.seat === 1 ? 2 : 1;
         const finalState = { ...stateRef.current, winner };
         stateRef.current = finalState;
         setGameState(finalState);
@@ -410,6 +411,23 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           notify('Bạn đã mất kết nối với đối thủ và bị xử thua.', 'error');
           soundFx.playDefeat();
         }
+        return;
+      }
+
+      if (packet.type === 'BOT_FORFEIT' && session.mySeat !== null) {
+        if (packet.seat !== 1 && packet.seat !== 2) return;
+        const winner: GameState['winner'] = packet.seat === 1 ? 2 : 1;
+        const finalState = { ...stateRef.current, winner };
+        stateRef.current = finalState;
+        setGameState(finalState);
+        notify(
+          packet.seat === session.mySeat
+            ? 'Bot của bạn gặp lỗi và bị xử thua kỹ thuật.'
+            : 'Bot đối thủ gặp lỗi. Bạn thắng kỹ thuật!',
+          winner === session.mySeat ? 'success' : 'error'
+        );
+        if (winner === session.mySeat) soundFx.playVictory();
+        else soundFx.playDefeat();
         return;
       }
 
@@ -440,17 +458,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (packet.type === 'BOT_READY') {
         setPeerBotReady(true);
         setPeerOffline(false);
-        return;
-      }
-
-      if (packet.type === 'BOT_FORFEIT' && packet.seat !== session.mySeat) {
-        const winner = session.mySeat;
-        if (winner === null) return;
-        const forfeitedState = { ...stateRef.current, winner, turn: winner };
-        stateRef.current = forfeitedState;
-        setGameState(forfeitedState);
-        notify(packet.message || 'Đối thủ không đi trong thời hạn cho phép. Bạn thắng kỹ thuật!', 'success');
-        soundFx.playVictory();
         return;
       }
 
@@ -693,15 +700,11 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         if (session.source === 'backend') {
           backendClient.botForfeit(session.matchId, err.message);
         } else if (session.mySeat !== null) {
-          const winner: 1 | 2 = session.mySeat === 1 ? 2 : 1;
-          const forfeitedState = { ...stateRef.current, winner, turn: winner };
-          stateRef.current = forfeitedState;
-          setGameState(forfeitedState);
-          sendMessageToPeer({
-            type: 'BOT_FORFEIT',
-            seat: session.mySeat,
-            message: 'Đối thủ không đi trong thời hạn cho phép. Bạn thắng kỹ thuật!',
-          });
+          sendMessageToPeer({ type: 'BOT_FORFEIT', seat: session.mySeat, message: err.message });
+          const winner: GameState['winner'] = session.mySeat === 1 ? 2 : 1;
+          const finalState = { ...stateRef.current, winner };
+          stateRef.current = finalState;
+          setGameState(finalState);
         }
       } finally {
         steppingBotRef.current = false;
