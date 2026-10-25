@@ -161,6 +161,10 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
               listeners.add(cb);
               return () => listeners.delete(cb);
             },
+            onP2PDisconnect: (handler) => {
+              conn.on('close', handler);
+              return () => conn.off('close', handler);
+            },
           };
 
           peerRef.current = null; // Ownership transferred to active match
@@ -240,6 +244,10 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
             subscribePeerData: (cb) => {
               listeners.add(cb);
               return () => listeners.delete(cb);
+            },
+            onP2PDisconnect: (handler) => {
+              conn.on('close', handler);
+              return () => conn.off('close', handler);
             },
           };
           onLaunchMatch(session, () => peer.destroy());

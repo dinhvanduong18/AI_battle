@@ -362,7 +362,7 @@ export class BackendClient {
     ) {
       this.activeMatchId = null;
     }
-    if (packet.type === 'match-found') {
+    if (packet.type === 'match-found' || packet.type === 'match-rejoined') {
       this.activeMatchId = packet.match?.id || null;
       const opponentId = packet.opponent?.id;
       const isSparringMatch =
@@ -376,7 +376,7 @@ export class BackendClient {
           // Fallback to WebSocket match-relay automatically
         });
       }
-      this.emit('match-found', packet);
+      this.emit(packet.type, packet);
       return;
     }
     if (packet.type === 'signal') {
@@ -490,6 +490,19 @@ export class BackendClient {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.sendWs({ type: 'cancel-match' });
     }
+  }
+
+  leaveMatch(matchId: string) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.sendWs({ type: 'leave-match', matchId });
+    }
+    this.activeMatchId = null;
+  }
+
+  async rejoinMatch(matchId: string) {
+    await this.connectWs();
+    this.activeMatchId = matchId;
+    this.sendWs({ type: 'rejoin-match', matchId });
   }
 
   registerSessionKey(matchId: string, publicKey: JsonWebKey) {

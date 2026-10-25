@@ -60,6 +60,7 @@ export interface ActiveMatchSession {
   // For P2P rooms (PeerJS data channel wrapper)
   p2pSend?: (payload: any) => void;
   subscribePeerData?: (cb: (payload: any) => void) => () => void;
+  onP2PDisconnect?: (handler: () => void) => () => void;
   onHostResetRoom?: () => void;
 }
 
@@ -602,6 +603,25 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       session.source === 'backend'
         ? backendClient.on('match-forfeited', handlePeerPacket)
         : () => {};
+    const handleP2PDisconnect = () => {
+      if (!active || session.source !== 'p2p' || stateRef.current.winner) return;
+      if (session.mySeat === null) {
+        notify('Chủ phòng đã rời phòng. Trận đấu đã kết thúc.', 'error');
+        onExit();
+        return;
+      }
+      const winner = session.mySeat === 1 ? 2 : 1;
+      const forfeitedState = { ...stateRef.current, winner, turn: winner };
+      stateRef.current = forfeitedState;
+      setGameState(forfeitedState);
+      setResultSummary({ verified: true });
+      soundFx.playVictory();
+      notify('Đối thủ đã rời phòng, bạn đã thắng!', 'success');
+    };
+    const unsubP2PDisconnect =
+      session.source === 'p2p' && session.onP2PDisconnect
+        ? session.onP2PDisconnect(handleP2PDisconnect)
+        : () => {};
 
     const unsubAborted =
       session.source === 'backend'
@@ -657,6 +677,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       unsub();
       unsubDisconnect();
       unsubForfeited();
+      unsubP2PDisconnect();
       unsubAborted();
       unsubPeerOffline();
       unsubForfeitWin();
