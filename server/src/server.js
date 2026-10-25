@@ -1410,7 +1410,8 @@ const httpServer = createServer(async (req, res) => {
         (m.replay_json IS NOT NULL OR (m.replay_key IS NOT NULL AND $2::boolean)) AS replay_available,
         u1.display_name AS player1,u2.display_name AS player2
         FROM matches m JOIN users u1 ON u1.id=m.player1_id JOIN users u2 ON u2.id=m.player2_id
-        WHERE m.player1_id=$1 OR m.player2_id=$1 ORDER BY m.created_at DESC LIMIT 50`, [auth.sub, replayStorage.enabled]);
+        WHERE (m.player1_id=$1 OR m.player2_id=$1) AND m.status='completed'
+        ORDER BY m.created_at DESC LIMIT 50`, [auth.sub, replayStorage.enabled]);
       return json(res, 200, { matches: result.rows });
     }
     if (req.method === 'GET' && /^\/api\/matches\/[0-9a-f-]+\/replay$/i.test(url.pathname)) {

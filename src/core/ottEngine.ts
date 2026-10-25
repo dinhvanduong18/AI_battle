@@ -7,6 +7,8 @@ export const COLS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] as const;
 export const ROWS = 9;
 export const TOTAL_CELLS = 81;
 export const MAX_MATCH_STEPS = 180; // Trận đấu tự động Hòa nếu chạm 180 lượt
+export const NO_CAPTURE_DRAW_STEPS = 50;
+export const REPETITION_DRAW_COUNT = 3;
 
 export const SPECIAL_A1_INDEX = 72; // row 8, col 0 (Căn cứ P1, mục tiêu chiến thắng của P2)
 export const SPECIAL_I9_INDEX = 8;  // row 0, col 8 (Căn cứ P2, mục tiêu chiến thắng của P1)
@@ -116,6 +118,8 @@ export interface GameState {
   winner: 1 | 2 | 0 | null; // 1: P1 thắng, 2: P2 thắng, 0: Hòa cờ (Draw), null: đang diễn ra
   lastMove: LastMoveInfo | null;
   rules: BoardRules | null;
+  positionHistory: string[];
+  noCaptureCount: number;
 }
 
 export interface ValidMove {
@@ -129,6 +133,10 @@ const DIRECTIONS: ReadonlyArray<[number, number]> = [
   [0, -1],           [0, 1],
   [1, -1],  [1, 0],  [1, 1],
 ];
+
+function positionKey(board: Int8Array, turn: 1 | 2): string {
+  return `${Array.from(board).join('')}:${turn}`;
+}
 
 export function mulberry32(seed: number) {
   let s = seed >>> 0 || 1;
@@ -240,7 +248,7 @@ export class OTTGameEngine {
       board[c * 9 + r] = pType + 3;
     }
 
-    return {
+    const state: GameState = {
       seed,
       pieceCount: actualCount,
       board,
@@ -249,7 +257,11 @@ export class OTTGameEngine {
       winner: null,
       lastMove: null,
       rules: normalizedRules,
+      positionHistory: [],
+      noCaptureCount: 0,
     };
+    state.positionHistory.push(positionKey(board, state.turn));
+    return state;
   }
 
   static canCapture(attackerPiece: number, defenderPiece: number): boolean {
@@ -372,6 +384,7 @@ export class OTTGameEngine {
     nextBoard[move.to] = piece;
     nextBoard[move.from] = PIECE.EMPTY;
     const nextStepCount = state.stepCount + 1;
+    const nextTurnCandidate: 1 | 2 = state.turn === 1 ? 2 : 1;
     const lastMoveInfo: LastMoveInfo = {
       from: move.from,
       to: move.to,
@@ -381,14 +394,34 @@ export class OTTGameEngine {
     };
 
     let winner: GameState['winner'] = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
-    const nextTurnCandidate: 1 | 2 = state.turn === 1 ? 2 : 1;
+    const noCaptureCount = isAttack ? 0 : (state.noCaptureCount || 0) + 1;
+    const positionHistory = [
+      ...(state.positionHistory.length
+        ? state.positionHistory
+        : [positionKey(state.board, state.turn)]),
+      positionKey(nextBoard, nextTurnCandidate),
+    ];
 
     // Draw check 1: Max steps reached
     if (winner === null && nextStepCount >= MAX_MATCH_STEPS) {
       winner = 0; // Hòa cờ (Draw)
     }
 
-    // Draw check 2: Stalemate (Next player has no legal moves)
+    // Draw check 2: Threefold repetition
+    if (
+      winner === null &&
+      positionHistory.filter((key) => key === positionHistory[positionHistory.length - 1]).length >=
+        REPETITION_DRAW_COUNT
+    ) {
+      winner = 0;
+    }
+
+    // Draw check 3: 50 consecutive moves without a capture
+    if (winner === null && noCaptureCount >= NO_CAPTURE_DRAW_STEPS) {
+      winner = 0;
+    }
+
+    // Draw check 4: Stalemate (Next player has no legal moves)
     if (winner === null) {
       const probeState: GameState = {
         seed: state.seed,
@@ -399,6 +432,8 @@ export class OTTGameEngine {
         winner: null,
         lastMove: lastMoveInfo,
         rules: state.rules || null,
+        positionHistory,
+        noCaptureCount,
       };
       if (this.getAllValidMoves(probeState).length === 0) {
         winner = 0; // Hòa cờ do đối thủ hết nước đi (Stalemate)
@@ -416,6 +451,8 @@ export class OTTGameEngine {
       winner,
       lastMove: lastMoveInfo,
       rules: state.rules || null,
+      positionHistory,
+      noCaptureCount,
     };
   }
 
@@ -451,20 +488,31 @@ export class OTTGameEngine {
       winner: state.winner,
       lastMove: state.lastMove,
       rules: state.rules || null,
+      positionHistory: state.positionHistory,
+      noCaptureCount: state.noCaptureCount,
       hash: computeFastHash(state),
     };
   }
 
   static deserialize(obj: any): GameState {
+    const board = new Int8Array(obj.board);
+    const turn = obj.turn;
     return {
       seed: obj.seed,
       pieceCount: obj.pieceCount,
-      board: new Int8Array(obj.board),
-      turn: obj.turn,
+      board,
+      turn,
       stepCount: obj.stepCount,
       winner: obj.winner === undefined ? null : obj.winner,
       lastMove: obj.lastMove || null,
       rules: obj.rules || null,
+      positionHistory: Array.isArray(obj.positionHistory)
+        ? obj.positionHistory.filter((key: unknown): key is string => typeof key === 'string')
+        : [positionKey(board, turn)],
+      noCaptureCount:
+        Number.isInteger(obj.noCaptureCount) && obj.noCaptureCount >= 0
+          ? obj.noCaptureCount
+          : 0,
     };
   }
 

@@ -1081,7 +1081,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                   }`}
                 >
                   {gameState.winner === 0
-                    ? 'Ván cờ Hòa! (Hết nước đi hoặc đạt mốc 180 lượt)'
+                    ? 'Ván cờ Hòa! (Lặp lại 3 lần, 50 nước không ăn quân, hết nước đi hoặc đạt mốc 180 lượt)'
                     : session.mySeat === null
                     ? `${gameState.winner === 1 ? session.player1Name : session.player2Name} giành chiến thắng!`
                     : gameState.winner === session.mySeat
@@ -1230,7 +1230,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
               2. Hoặc tiêu diệt toàn bộ 1 trong 3 hệ linh vật (Bí Ngô - Đấm, Bé Ma - Lá hoặc Dơi - Kéo) của đối phương.
             </p>
             <p>
-              3. Hòa cờ khi đối thủ không còn nước đi hợp lệ hoặc ván đấu chạm mốc 180 lượt.
+              3. Hòa cờ khi một thế cờ lặp lại 3 lần, 50 nước liên tiếp không ăn quân, đối thủ hết nước đi hợp lệ hoặc ván đấu chạm mốc 180 lượt.
             </p>
           </div>
         </div>

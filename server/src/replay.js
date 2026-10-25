@@ -58,7 +58,7 @@ export function verifyReplay(replay, expectedSeed, expectedMatchId, expectedRule
     const stateHash = sha256(statePayload(state));
     if (stateHash !== entry.stateHash) throw new Error(`Replay state hash mismatch at step ${index + 1}`);
   }
-  if (!state.winner) throw new Error('Replay has no completed winning state');
+  if (state.winner === null || state.winner === undefined) throw new Error('Replay has no completed winning state');
   const finalHash = sha256(statePayload(state));
   return { state, finalHash, winner: state.winner, stepCount: state.stepCount };
 }

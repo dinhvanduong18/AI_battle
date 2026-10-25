@@ -23,6 +23,8 @@
     const ROWS = 9;
     const TOTAL_CELLS = 81; // 9x9
     const MAX_MATCH_STEPS = 180; // Trận đấu tự động Hòa nếu vượt quá 180 nước
+    const NO_CAPTURE_DRAW_STEPS = 50;
+    const REPETITION_DRAW_COUNT = 3;
 
     // Piece Encoding (Int8):
     // 0: Empty
@@ -86,6 +88,10 @@
             [a[i], a[j]] = [a[j], a[i]];
         }
         return a;
+    }
+
+    function positionKey(board, turn) {
+        return `${Array.from(board).join('')}:${turn}`;
     }
 
     // ── State Hash Functions ─────────────────────────────────────
@@ -213,7 +219,7 @@
                 board[c * 9 + r] = pType + 3;      // P2: 4..6
             }
 
-            return {
+            const state = {
                 seed: seed,
                 pieceCount: actualCount,
                 board: board,
@@ -222,7 +228,11 @@
                 winner: null,
                 lastMove: null, // { from, to, isAttack, piece, captured }
                 rules: normalizedRules,
+                positionHistory: [],
+                noCaptureCount: 0,
             };
+            state.positionHistory.push(positionKey(board, state.turn));
+            return state;
         }
 
         static createInitialState(seed = 1234567, pieceCountPerSide = 9, rules = null) {
@@ -332,6 +342,7 @@
             nextBoard[move.from] = PIECE.EMPTY;
 
             const nextStepCount = state.stepCount + 1;
+            const nextTurnCandidate = state.turn === 1 ? 2 : 1;
             const lastMoveInfo = {
                 from: move.from,
                 to: move.to,
@@ -342,14 +353,31 @@
 
             // 1. Check Win condition for current mover
             let winner = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
-            const nextTurnCandidate = state.turn === 1 ? 2 : 1;
+            const noCaptureCount = isAttack ? 0 : (state.noCaptureCount || 0) + 1;
+            const positionHistory = [
+                ...(state.positionHistory?.length
+                    ? state.positionHistory
+                    : [positionKey(state.board, state.turn)]),
+                positionKey(nextBoard, nextTurnCandidate),
+            ];
 
             // 2. Draw Check A: Max steps reached
             if (winner === null && nextStepCount >= MAX_MATCH_STEPS) {
                 winner = 0; // 0 = Hòa cờ (Draw)
             }
 
-            // 3. Draw Check B: Stalemate (Next player has no legal moves)
+            // 3. Draw Check B: Threefold repetition
+            if (winner === null &&
+                positionHistory.filter(key => key === positionHistory[positionHistory.length - 1]).length >= REPETITION_DRAW_COUNT) {
+                winner = 0;
+            }
+
+            // 4. Draw Check C: 50 consecutive moves without a capture
+            if (winner === null && noCaptureCount >= NO_CAPTURE_DRAW_STEPS) {
+                winner = 0;
+            }
+
+            // 5. Draw Check D: Stalemate (Next player has no legal moves)
             if (winner === null) {
                 const probeState = {
                     seed: state.seed,
@@ -360,6 +388,8 @@
                     winner: null,
                     lastMove: lastMoveInfo,
                     rules: state.rules || null,
+                    positionHistory,
+                    noCaptureCount,
                 };
                 if (this.getAllValidMoves(probeState).length === 0) {
                     winner = 0; // 0 = Hòa cờ do đối thủ hết nước đi (Stalemate)
@@ -377,6 +407,8 @@
                 winner: winner,
                 lastMove: lastMoveInfo,
                 rules: state.rules || null,
+                positionHistory,
+                noCaptureCount,
             };
         }
 
@@ -464,6 +496,8 @@
                 winner: state.winner,
                 lastMove: state.lastMove,
                 rules: state.rules || null,
+                positionHistory: state.positionHistory,
+                noCaptureCount: state.noCaptureCount,
                 hash: computeFastHash(state)
             };
         }
@@ -569,15 +603,23 @@
         }
 
         static deserialize(obj) {
+            const board = new Int8Array(obj.board);
+            const turn = obj.turn;
             return {
                 seed: obj.seed,
                 pieceCount: obj.pieceCount,
-                board: new Int8Array(obj.board),
-                turn: obj.turn,
+                board: board,
+                turn: turn,
                 stepCount: obj.stepCount,
                 winner: obj.winner === undefined ? null : obj.winner,
                 lastMove: obj.lastMove,
                 rules: obj.rules || null,
+                positionHistory: Array.isArray(obj.positionHistory)
+                    ? obj.positionHistory.filter(key => typeof key === 'string')
+                    : [positionKey(board, turn)],
+                noCaptureCount: Number.isInteger(obj.noCaptureCount) && obj.noCaptureCount >= 0
+                    ? obj.noCaptureCount
+                    : 0,
             };
         }
     }
@@ -588,7 +630,7 @@
         computeFastHash,
         computeStateHashAsync,
         OTT_CONSTANTS: {
-            COLS, ROWS, TOTAL_CELLS, MAX_MATCH_STEPS,
+            COLS, ROWS, TOTAL_CELLS, MAX_MATCH_STEPS, NO_CAPTURE_DRAW_STEPS, REPETITION_DRAW_COUNT,
             PIECE, PIECE_TYPE_NAMES, PIECE_EMOJIS, PIECE_VIET_NAMES,
             SPECIAL_A1_INDEX, SPECIAL_I9_INDEX
         }

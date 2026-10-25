@@ -110,6 +110,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
   };
 
   const filteredMatches = matches.filter((m) => {
+    if (m.status !== 'completed') return false;
     if (filterType !== 'all' && m.match_type !== filterType) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -344,8 +345,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
               <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
                 {filteredMatches.map((m) => {
                   const won = m.winner_id === user.id;
-                  const completed = m.status === 'completed';
-                  const isDraw = completed && m.winner_id === null;
+                  const isDraw = m.winner_id === null;
                   const timeStr = new Date(m.created_at).toLocaleString('vi-VN', {
                     day: '2-digit',
                     month: '2-digit',
@@ -359,18 +359,13 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                         {m.player1} <span className="text-[var(--text-muted)]">vs</span> {m.player2}
                       </td>
                       <td className="py-3 px-3 text-[var(--text-secondary)]">
-                        {m.match_type === 'bot' ? 'Bot Elo' : '1v1 Người'}
+                        {m.match_type === 'bot' ? '1v1 Bot' : '1v1 Người'}
                       </td>
                       <td className="py-3 px-3 font-mono text-[var(--text-muted)]">{m.seed}</td>
                       <td className="py-3 px-3">
-                        {!completed ? (
-                          <span className="text-[var(--text-muted)]">{m.status}</span>
-                        ) : (
-                          <span className={isDraw ? 'text-[var(--text-secondary)]' : won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
-                            {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
-                            {m.elo_delta ? ` (${m.elo_delta > 0 ? '+' : ''}${m.elo_delta} Elo)` : ''}
-                          </span>
-                        )}
+                        <span className={isDraw ? 'text-[var(--text-secondary)]' : won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
+                          {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
+                        </span>
                       </td>
                       <td className="py-3 pl-3 text-right">
                         {m.replay_available ? (
