@@ -566,53 +566,55 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-1 p-1 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)]">
-          {(
-            [
-              { id: 'all', label: 'Tất cả giải' },
-              { id: 'qualifying', label: 'Đang đua hạng' },
-              { id: 'registration', label: 'Mở đăng ký' },
-              { id: 'completed', label: 'Đã kết thúc' },
-            ] as const
-          ).map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              onClick={() => setStatusFilter(tab.id)}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-                statusFilter === tab.id
-                  ? 'bg-[var(--bg-panel)] text-[var(--text-primary)]'
-                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
+      {!showCreateForm && (
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)]">
+            {(
+              [
+                { id: 'all', label: 'Tất cả giải' },
+                { id: 'qualifying', label: 'Đang đua hạng' },
+                { id: 'registration', label: 'Mở đăng ký' },
+                { id: 'completed', label: 'Đã kết thúc' },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setStatusFilter(tab.id)}
+                className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                  statusFilter === tab.id
+                    ? 'bg-[var(--bg-panel)] text-[var(--text-primary)]'
+                    : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
 
-        {user?.isAdmin ? (
-          <button
-            type="button"
-            onClick={() => setShowCreateForm((v) => !v)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap"
-          >
-            <Plus className="w-4 h-4" />
-            {showCreateForm ? 'Đóng biểu mẫu' : 'Tạo giải đấu mới (BTC)'}
-          </button>
-        ) : (
-          user && (
+          {user?.isAdmin ? (
             <button
               type="button"
-              onClick={() => onOpenAuth('profile')}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer whitespace-nowrap"
+              onClick={() => setShowCreateForm((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap"
             >
-              <ShieldCheck className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
-              Cấp quyền BTC thử nghiệm
+              <Plus className="w-4 h-4" />
+              Tạo giải đấu mới (BTC)
             </button>
-          )
-        )}
-      </div>
+          ) : (
+            user && (
+              <button
+                type="button"
+                onClick={() => onOpenAuth('profile')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer whitespace-nowrap"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+                Cấp quyền BTC thử nghiệm
+              </button>
+            )
+          )}
+        </div>
+      )}
 
       {/* Collapsible Admin Create Tournament Panel */}
       {showCreateForm && user?.isAdmin && (
@@ -736,61 +738,63 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       )}
 
       {/* Tournament Cards Grid */}
-      {filteredList.length === 0 ? (
-        <div className="p-12 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-center text-sm text-[var(--text-muted)]">
-          Chưa có giải đấu nào trong mục này.
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
-          {filteredList.map((t) => {
-            const endDate = new Date(t.ends_at).toLocaleDateString('vi-VN');
-            return (
-              <div
-                key={t.id}
-                className="p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-col justify-between space-y-5 hover:border-[var(--border-accent)] transition-colors"
-              >
-                <div className="space-y-2.5">
-                  <div className="text-xs font-medium text-[var(--accent-primary)] tabular-nums">
-                    {t.status === 'qualifying'
-                      ? `Đang Đua Hạng · Sprint ${t.current_week || 1}`
-                      : t.status === 'registration'
-                      ? 'Mở Đăng Ký & Vòng Chạy Đà'
-                      : 'Đã Kết Thúc'}
-                    {' · '}
-                    {t.participant_count || 0}/{t.max_teams} kỳ thủ
+      {!showCreateForm && (
+        filteredList.length === 0 ? (
+          <div className="p-12 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-center text-sm text-[var(--text-muted)]">
+            Chưa có giải đấu nào trong mục này.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
+            {filteredList.map((t) => {
+              const endDate = new Date(t.ends_at).toLocaleDateString('vi-VN');
+              return (
+                <div
+                  key={t.id}
+                  className="p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-col justify-between space-y-5 hover:border-[var(--border-accent)] transition-colors"
+                >
+                  <div className="space-y-2.5">
+                    <div className="text-xs font-medium text-[var(--accent-primary)] tabular-nums">
+                      {t.status === 'qualifying'
+                        ? `Đang Đua Hạng · Sprint ${t.current_week || 1}`
+                        : t.status === 'registration'
+                        ? 'Mở Đăng Ký & Vòng Chạy Đà'
+                        : 'Đã Kết Thúc'}
+                      {' · '}
+                      {t.participant_count || 0}/{t.max_teams} kỳ thủ
+                    </div>
+
+                    <h3 className="text-xl font-bold text-[var(--text-primary)]">{t.name}</h3>
+                    <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3">
+                      {t.description}
+                    </p>
                   </div>
 
-                  <h3 className="text-xl font-bold text-[var(--text-primary)]">{t.name}</h3>
-                  <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3">
-                    {t.description}
-                  </p>
-                </div>
+                  <div className="pt-4 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] tabular-nums">
+                      <Calendar className="w-3.5 h-3.5" />
+                      <span>Kết thúc: {endDate}</span>
+                      {t.rules_json?.title && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>{t.rules_json.title}</span>
+                        </>
+                      )}
+                    </div>
 
-                <div className="pt-4 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] tabular-nums">
-                    <Calendar className="w-3.5 h-3.5" />
-                    <span>Kết thúc: {endDate}</span>
-                    {t.rules_json?.title && (
-                      <>
-                        <span aria-hidden="true">·</span>
-                        <span>{t.rules_json.title}</span>
-                      </>
-                    )}
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(t.id)}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      Xem chi tiết & Thi đấu
+                    </button>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setSelectedId(t.id)}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                  >
-                    <Play className="w-3.5 h-3.5" />
-                    Xem chi tiết & Thi đấu
-                  </button>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )
       )}
     </div>
   );
