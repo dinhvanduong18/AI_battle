@@ -3,9 +3,18 @@
   email: string;
   displayName: string;
   elo: number;
+  avatarId?: PlayerAvatarId;
+  stats?: {
+    matchesPlayed: number;
+    wins: number;
+    draws: number;
+    losses: number;
+  };
   isAdmin?: boolean;
   activeBotVersion?: number;
 }
+
+export type PlayerAvatarId = 'pumpkin' | 'ghost' | 'bat' | 'knight' | 'fox' | 'crown';
 
 export interface MatchSummary {
   id: string;
@@ -198,14 +207,25 @@ export class BackendClient {
     return res.user as BackendUser;
   }
 
-  async updateProfile(changes: { displayName?: string; currentPassword?: string; newPassword?: string }) {
+  async updateProfile(changes: {
+    displayName?: string;
+    avatarId?: BackendUser['avatarId'];
+    currentPassword?: string;
+    newPassword?: string;
+  }) {
     const res = await this.request('/api/me', 'PATCH', changes, true);
     if (res.user) this.updateStoredUser(res.user);
     return res.user as BackendUser;
   }
 
 
-  async getLeaderboard(): Promise<Array<{ id: string; displayName: string; elo: number; isSystemBot?: boolean }>> {
+  async getLeaderboard(): Promise<Array<{
+    id: string;
+    displayName: string;
+    elo: number;
+    avatarId?: PlayerAvatarId;
+    isSystemBot?: boolean;
+  }>> {
     const res = await this.request('/api/leaderboard');
     return Array.isArray(res.players) ? res.players : [];
   }

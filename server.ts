@@ -272,6 +272,7 @@ interface UserRecord {
   password_hash: string;
   display_name: string;
   elo: number;
+  avatar_id?: string;
   is_admin: boolean;
   active_bot_version: number;
   is_system_bot?: boolean;
@@ -614,11 +615,27 @@ async function initDb() {
 function publicUser(u: UserRecord) {
   return {
     id: u.id,
-    email: u.email,
     displayName: u.display_name,
     elo: u.elo,
+    avatarId: u.avatar_id || 'pumpkin',
     isAdmin: Boolean(u.is_admin),
     activeBotVersion: u.active_bot_version || 0,
+  };
+}
+
+function playerStats(userId: string) {
+  const completed = db.matches.filter(
+    (match) =>
+      match.status === 'completed' &&
+      (match.player1_id === userId || match.player2_id === userId)
+  );
+  const wins = completed.filter((match) => match.winner_id === userId).length;
+  const draws = completed.filter((match) => match.winner_id === null).length;
+  return {
+    matchesPlayed: completed.length,
+    wins,
+    draws,
+    losses: completed.length - wins - draws,
   };
 }
 
@@ -775,13 +792,14 @@ async function startServer() {
         password_hash: await hashPassword(password),
         display_name: displayName,
         elo: 1200,
+        avatar_id: 'pumpkin',
         is_admin: false,
         active_bot_version: 0,
         created_at: new Date().toISOString(),
       };
       db.users.push(user);
       saveDb();
-      res.status(201).json({ token: createToken(user), user: publicUser(user) });
+      res.status(201).json({ token: createToken(user), user: { ...publicUser(user), email: user.email } });
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message || 'Lỗi đăng ký tài khoản.' });
     }
@@ -796,7 +814,7 @@ async function startServer() {
         res.status(401).json({ error: 'Email hoặc mật khẩu không chính xác.' });
         return;
       }
-      res.json({ token: createToken(user), user: publicUser(user) });
+      res.json({ token: createToken(user), user: { ...publicUser(user), email: user.email } });
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message || 'Lỗi đăng nhập.' });
     }
@@ -805,7 +823,7 @@ async function startServer() {
   app.get('/api/me', (req: Request, res: Response) => {
     try {
       const user = getAuthUser(req);
-      res.json({ user: publicUser(user) });
+      res.json({ user: { ...publicUser(user), email: user.email, stats: playerStats(user.id) } });
     } catch (err: any) {
       res.status(err.status || 401).json({ error: err.message });
     }
@@ -816,11 +834,16 @@ async function startServer() {
       const user = getAuthUser(req);
       const displayName =
         req.body?.displayName === undefined ? null : String(req.body.displayName).trim().slice(0, 40);
+      const avatarId = req.body?.avatarId === undefined ? null : String(req.body.avatarId);
       const currentPassword = String(req.body?.currentPassword || '');
       const newPassword = String(req.body?.newPassword || '');
 
       if (displayName !== null && !displayName) {
         res.status(400).json({ error: 'Tên hiển thị không được để trống.' });
+        return;
+      }
+      if (avatarId !== null && !['pumpkin', 'ghost', 'bat', 'knight', 'fox', 'crown'].includes(avatarId)) {
+        res.status(400).json({ error: 'Avatar không hợp lệ.' });
         return;
       }
       if (newPassword && newPassword.length < 10) {
@@ -831,14 +854,19 @@ async function startServer() {
         res.status(400).json({ error: 'Cần nhập cả mật khẩu hiện tại và mật khẩu mới.' });
         return;
       }
+      if (displayName === null && avatarId === null && !newPassword) {
+        res.status(400).json({ error: 'Hãy nhập tên mới, avatar mới hoặc mật khẩu mới.' });
+        return;
+      }
       if (newPassword && !(await verifyPassword(currentPassword, user.password_hash))) {
         res.status(400).json({ error: 'Mật khẩu hiện tại không chính xác.' });
         return;
       }
       if (displayName !== null) user.display_name = displayName;
+      if (avatarId !== null) user.avatar_id = avatarId;
       if (newPassword) user.password_hash = await hashPassword(newPassword);
       saveDb();
-      res.json({ user: publicUser(user) });
+      res.json({ user: { ...publicUser(user), email: user.email, stats: playerStats(user.id) } });
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message });
     }
@@ -923,6 +951,7 @@ async function startServer() {
         id: u.id,
         displayName: u.display_name,
         elo: u.elo,
+        avatarId: u.avatar_id || 'pumpkin',
         isSystemBot: Boolean(u.is_system_bot),
       }));
     res.json({ players });

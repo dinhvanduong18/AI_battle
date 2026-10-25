@@ -74,7 +74,13 @@ function isAllowedOrigin(origin) {
     return false;
   }
 }
-const publicUser = user => ({ id: user.id, email: user.email, displayName: user.display_name, elo: user.elo, isAdmin: Boolean(user.is_admin) });
+const publicUser = user => ({
+  id: user.id,
+  displayName: user.display_name,
+  elo: user.elo,
+  avatarId: user.avatar_id || 'pumpkin',
+  isAdmin: Boolean(user.is_admin)
+});
 const readBody = req => new Promise((resolve, reject) => {
   const chunks = [];
   let size = 0;
@@ -1033,17 +1039,17 @@ const httpServer = createServer(async (req, res) => {
       const displayName = String(body.displayName || '').trim().slice(0, 40);
       if (!/^\S+@\S+\.\S+$/.test(email) || password.length < 10 || !displayName) return json(res, 400, { error: 'Provide a valid email, display name and password of at least 10 characters' });
       const passwordHash = await hashPassword(password);
-      const created = await pool.query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,elo', [email, passwordHash, displayName]);
+      const created = await pool.query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,elo,avatar_id', [email, passwordHash, displayName]);
       const user = created.rows[0];
-      return json(res, 201, { token: createToken(user, config.jwtSecret), user: publicUser(user) });
+      return json(res, 201, { token: createToken(user, config.jwtSecret), user: { ...publicUser(user), email: user.email } });
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/login') {
       const body = await readBody(req);
       const email = String(body.email || '').trim().toLowerCase();
-      const result = await pool.query('SELECT id,email,password_hash,display_name,elo,is_admin FROM users WHERE email=$1', [email]);
+      const result = await pool.query('SELECT id,email,password_hash,display_name,elo,avatar_id,is_admin FROM users WHERE email=$1', [email]);
       const user = result.rows[0];
       if (!user || !await verifyPassword(String(body.password || ''), user.password_hash)) return json(res, 401, { error: 'Email or password is incorrect' });
-      return json(res, 200, { token: createToken(user, config.jwtSecret), user: publicUser(user) });
+      return json(res, 200, { token: createToken(user, config.jwtSecret), user: { ...publicUser(user), email: user.email } });
     }
     if (req.method === 'GET' && url.pathname === '/api/tournaments') {
       await updateTournamentLifecycle();
@@ -1369,47 +1375,78 @@ const httpServer = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/me') {
       const auth = authFromHeader(req);
-      const result = await pool.query('SELECT id,email,display_name,elo,is_admin FROM users WHERE id=$1', [auth.sub]);
+      const result = await pool.query('SELECT id,email,display_name,elo,avatar_id,is_admin FROM users WHERE id=$1', [auth.sub]);
       if (!result.rows[0]) return json(res, 401, { error: 'Account not found' });
-      return json(res, 200, { user: publicUser(result.rows[0]) });
+      const stats = await pool.query(
+        `SELECT count(*)::int AS "matchesPlayed",
+                count(*) FILTER (WHERE winner_id=$1)::int AS wins,
+                count(*) FILTER (WHERE winner_id IS NULL)::int AS draws
+         FROM matches WHERE status='completed' AND (player1_id=$1 OR player2_id=$1)`,
+        [auth.sub]
+      );
+      const record = stats.rows[0];
+      return json(res, 200, {
+        user: {
+          ...publicUser(result.rows[0]),
+          email: result.rows[0].email,
+          stats: {
+            matchesPlayed: record.matchesPlayed,
+            wins: record.wins,
+            draws: record.draws,
+            losses: record.matchesPlayed - record.wins - record.draws
+          }
+        }
+      });
     }
     if (req.method === 'PATCH' && url.pathname === '/api/me') {
       const auth = authFromHeader(req);
       const body = await readBody(req);
       const displayName = body.displayName === undefined ? null : String(body.displayName).trim().slice(0, 40);
+      const avatarId = body.avatarId === undefined ? null : String(body.avatarId);
       const currentPassword = String(body.currentPassword || '');
       const newPassword = String(body.newPassword || '');
       if (displayName !== null && !displayName) return json(res, 400, { error: 'Tên hiển thị không được để trống.' });
+      if (avatarId !== null && !['pumpkin', 'ghost', 'bat', 'knight', 'fox', 'crown'].includes(avatarId)) {
+        return json(res, 400, { error: 'Avatar không hợp lệ.' });
+      }
       if (newPassword && newPassword.length < 10) return json(res, 400, { error: 'Mật khẩu mới cần ít nhất 10 ký tự.' });
       if (Boolean(currentPassword) !== Boolean(newPassword)) return json(res, 400, { error: 'Cần nhập cả mật khẩu hiện tại và mật khẩu mới.' });
-      if (displayName === null && !newPassword) return json(res, 400, { error: 'Hãy nhập tên mới hoặc mật khẩu mới.' });
+      if (displayName === null && avatarId === null && !newPassword) return json(res, 400, { error: 'Hãy nhập tên mới, avatar mới hoặc mật khẩu mới.' });
 
-      const found = await pool.query('SELECT id,email,password_hash,display_name,elo,is_admin FROM users WHERE id=$1', [auth.sub]);
+      const found = await pool.query('SELECT id,email,password_hash,display_name,elo,avatar_id,is_admin FROM users WHERE id=$1', [auth.sub]);
       const user = found.rows[0];
       if (!user) return json(res, 401, { error: 'Account not found' });
       if (newPassword && !await verifyPassword(currentPassword, user.password_hash)) {
         return json(res, 400, { error: 'Mật khẩu hiện tại không chính xác.' });
       }
       const nextName = displayName ?? user.display_name;
-      if (newPassword) {
-        const passwordHash = await hashPassword(newPassword);
-        await pool.query('UPDATE users SET display_name=$1,password_hash=$2 WHERE id=$3', [nextName, passwordHash, auth.sub]);
-      } else if (displayName !== null) {
-        await pool.query('UPDATE users SET display_name=$1 WHERE id=$2', [nextName, auth.sub]);
-      }
-      const updated = await pool.query('SELECT id,email,display_name,elo,is_admin FROM users WHERE id=$1', [auth.sub]);
-      return json(res, 200, { user: publicUser(updated.rows[0]) });
+      const nextAvatarId = avatarId ?? user.avatar_id ?? 'pumpkin';
+      const passwordHash = newPassword ? await hashPassword(newPassword) : user.password_hash;
+      await pool.query(
+        'UPDATE users SET display_name=$1,avatar_id=$2,password_hash=$3 WHERE id=$4',
+        [nextName, nextAvatarId, passwordHash, auth.sub]
+      );
+      const updated = await pool.query('SELECT id,email,display_name,elo,avatar_id,is_admin FROM users WHERE id=$1', [auth.sub]);
+      return json(res, 200, { user: { ...publicUser(updated.rows[0]), email: updated.rows[0].email } });
     }
     if (req.method === 'GET' && url.pathname === '/api/leaderboard') {
-      const result = await pool.query('SELECT id,display_name,elo FROM users ORDER BY elo DESC,created_at ASC LIMIT 100');
-      return json(res, 200, { players: result.rows.map(user => ({ id: user.id, displayName: user.display_name, elo: user.elo })) });
+      const result = await pool.query('SELECT id,display_name,elo,avatar_id FROM users ORDER BY elo DESC,created_at ASC LIMIT 100');
+      return json(res, 200, { players: result.rows.map(user => ({
+        id: user.id,
+        displayName: user.display_name,
+        elo: user.elo,
+        avatarId: user.avatar_id || 'pumpkin'
+      })) });
     }
     if (req.method === 'GET' && url.pathname === '/api/matches') {
       const auth = authFromHeader(req);
       const result = await pool.query(`SELECT m.id,m.seed,m.status,m.match_type,m.winner_id,m.final_state_hash,m.replay_sha256,m.created_at,m.completed_at,
+        CASE WHEN m.player1_id=$1 THEN mr.player1_elo_after-mr.player1_elo_before
+             ELSE mr.player2_elo_after-mr.player2_elo_before END AS elo_delta,
         (m.replay_json IS NOT NULL OR (m.replay_key IS NOT NULL AND $2::boolean)) AS replay_available,
         u1.display_name AS player1,u2.display_name AS player2
         FROM matches m JOIN users u1 ON u1.id=m.player1_id JOIN users u2 ON u2.id=m.player2_id
+        LEFT JOIN match_results mr ON mr.match_id=m.id
         WHERE (m.player1_id=$1 OR m.player2_id=$1) AND m.status='completed'
         ORDER BY m.created_at DESC LIMIT 50`, [auth.sub, replayStorage.enabled]);
       return json(res, 200, { matches: result.rows });
@@ -1752,6 +1789,7 @@ async function main() {
   await pool.query(await readFile(new URL('../migrations/005_star_rank_system.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/006_tournament_phases_and_standings.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/007_match_disputes.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/008_player_avatar.sql', import.meta.url), 'utf8'));
   await updateTournamentLifecycle();
   tournamentLifecycleTimer = setInterval(() => updateTournamentLifecycle().catch(error => {
     console.error('Tournament lifecycle update failed:', error.message);

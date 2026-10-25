@@ -23,7 +23,7 @@ import { SAMPLE_BOTS } from './core/sampleBots';
 import { soundFx } from './core/soundFx';
 import { ToastProvider, useToast } from './components/ToastProvider';
 import { HalloweenBackdrop } from './components/HalloweenBackdrop';
-import { AuthSettingsModal, type ModalTab } from './components/AuthSettingsModal';
+import { AuthSettingsModal, PLAYER_AVATARS, type ModalTab } from './components/AuthSettingsModal';
 import { ReplayModal } from './components/ReplayModal';
 import { ActiveMatchArena, type ActiveMatchSession } from './components/ActiveMatchArena';
 import { OverviewView } from './views/OverviewView';
@@ -82,7 +82,7 @@ function AppWorkspace() {
   const [savedBotVersion, setSavedBotVersion] = useState<number>(user?.activeBotVersion || 0);
 
   const [leaderboard, setLeaderboard] = useState<
-    Array<{ id: string; displayName: string; elo: number; isSystemBot?: boolean }>
+    Array<{ id: string; displayName: string; elo: number; avatarId?: BackendUser['avatarId']; isSystemBot?: boolean }>
   >([]);
   const [matches, setMatches] = useState<MatchSummary[]>([]);
   const [tournaments, setTournaments] = useState<TournamentItem[]>([]);
@@ -411,7 +411,13 @@ function AppWorkspace() {
               aria-label={user ? `Tài khoản ${user.displayName}` : 'Đăng nhập'}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0 tabular-nums"
             >
-              <User className="w-3.5 h-3.5" />
+              {user ? (
+                <span className="text-sm leading-none">
+                  {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
+                </span>
+              ) : (
+                <User className="w-3.5 h-3.5" />
+              )}
               <span className="hidden sm:inline">
                 {user ? `${user.displayName} · ${user.elo}` : 'Đăng nhập'}
               </span>
@@ -502,7 +508,9 @@ function AppWorkspace() {
         open={authModalOpen}
         initialTab={authModalTab}
         user={user}
+        matches={matches}
         onClose={() => setAuthModalOpen(false)}
+        onWatchMatchReplay={(match) => handleWatchReplayById(match.id, match.player1, match.player2)}
         onUserUpdated={(nextUser) => {
           setUser(nextUser);
           refreshPublicAndUserData();

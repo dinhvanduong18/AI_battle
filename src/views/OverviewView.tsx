@@ -20,7 +20,7 @@ import type { PieceTypeName } from '../core/ottEngine';
 interface OverviewViewProps {
   user: BackendUser | null;
   botVersion: number;
-  leaderboard: Array<{ id: string; displayName: string; elo: number; isSystemBot?: boolean }>;
+  leaderboard: Array<{ id: string; displayName: string; elo: number; avatarId?: BackendUser['avatarId']; isSystemBot?: boolean }>;
   recentMatches: MatchSummary[];
   tournaments: TournamentItem[];
   loadingData: boolean;
@@ -532,7 +532,12 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                           {String(idx + 1).padStart(2, '0')}
                         </td>
                         <td className="py-2.5 px-2 font-medium text-[var(--text-primary)]">
-                          <span>{player.displayName}</span>
+                          <span className="inline-flex items-center gap-2">
+                            <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-sm">
+                              {player.avatarId === 'ghost' ? '👻' : player.avatarId === 'bat' ? '🦇' : player.avatarId === 'knight' ? '🛡️' : player.avatarId === 'fox' ? '🦊' : player.avatarId === 'crown' ? '👑' : '🎃'}
+                            </span>
+                            {player.displayName}
+                          </span>
                           {isMe && (
                             <span className="text-[var(--accent-primary)] ml-1.5">· Bạn</span>
                           )}
