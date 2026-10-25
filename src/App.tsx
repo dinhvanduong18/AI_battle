@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   Code2,
   Eye,
   Flame,
@@ -68,6 +69,27 @@ function AppWorkspace() {
   // Navigation & Responsive Drawer
   const [activeView, setActiveView] = useState<NavView>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const activeViewRef = useRef<NavView>('overview');
+  const viewHistoryRef = useRef<NavView[]>([]);
+
+  const navigateToView = (nextView: NavView) => {
+    if (activeViewRef.current === nextView) return;
+    viewHistoryRef.current.push(activeViewRef.current);
+    activeViewRef.current = nextView;
+    setActiveView(nextView);
+  };
+
+  const handleGoBack = () => {
+    const previousView = viewHistoryRef.current.pop() || 'overview';
+    activeViewRef.current = previousView;
+    setActiveView(previousView);
+  };
+
+  const handleGoToOverview = () => {
+    viewHistoryRef.current = [];
+    activeViewRef.current = 'overview';
+    setActiveView('overview');
+  };
 
   // User, Bot & Dashboard Data
   const [user, setUser] = useState<BackendUser | null>(() => backendClient.user);
@@ -244,7 +266,7 @@ function AppWorkspace() {
           <button
             type="button"
             onClick={() => {
-              if (!activeMatch) setActiveView('overview');
+              if (!activeMatch) handleGoToOverview();
             }}
             className="flex items-center gap-2.5 text-left cursor-pointer"
           >
@@ -266,7 +288,7 @@ function AppWorkspace() {
                 key={item.id}
                 type="button"
                 disabled={Boolean(activeMatch)}
-                onClick={() => setActiveView(item.id)}
+                onClick={() => navigateToView(item.id)}
                 className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium transition-colors cursor-pointer whitespace-nowrap disabled:opacity-45 ${
                   active
                     ? 'bg-[var(--bg-panel)] text-[var(--text-primary)] border border-[var(--border-accent)]'
@@ -343,7 +365,7 @@ function AppWorkspace() {
                       type="button"
                       disabled={Boolean(activeMatch)}
                       onClick={() => {
-                        setActiveView(item.id);
+                        navigateToView(item.id);
                         setMobileMenuOpen(false);
                       }}
                       className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium ${
@@ -399,6 +421,17 @@ function AppWorkspace() {
             >
               <Menu className="w-5 h-5" />
             </button>
+            {!activeMatch && activeView !== 'overview' && (
+              <button
+                type="button"
+                onClick={handleGoBack}
+                aria-label="Quay lại tính năng trước"
+                className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl border border-[var(--border-subtle)] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                <span className="hidden sm:inline">Quay lại</span>
+              </button>
+            )}
             <h1 className="text-base sm:text-lg font-bold text-[var(--text-primary)] truncate">
               {activeMatch ? 'Bàn Thi Đấu Chiến Thuật 9×9' : VIEW_TITLES[activeView]}
             </h1>
@@ -447,7 +480,7 @@ function AppWorkspace() {
                   recentMatches={matches}
                   tournaments={tournaments}
                   loadingData={loadingData}
-                  onNavigate={(v) => setActiveView(v)}
+                  onNavigate={navigateToView}
                   onOpenAuth={(tab) => handleOpenAuth(tab || 'login')}
                   onWatchMatchReplay={(m) => handleWatchReplayById(m.id, m.player1, m.player2)}
                 />
