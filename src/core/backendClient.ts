@@ -344,9 +344,18 @@ export class BackendClient {
     }
     if (packet.type === 'match-found') {
       this.activeMatchId = packet.match?.id || null;
-      this.setupWebRtcChannel(packet).catch(() => {
-        // Fallback to WebSocket match-relay automatically
-      });
+      const opponentId = packet.opponent?.id;
+      const isSparringMatch =
+        opponentId === '00000000-0000-4000-8000-000000000001' ||
+        packet.match?.player1?.id === '00000000-0000-4000-8000-000000000001' ||
+        packet.match?.player2?.id === '00000000-0000-4000-8000-000000000001';
+      if (isSparringMatch) {
+        this.closePeerChannel();
+      } else {
+        this.setupWebRtcChannel(packet).catch(() => {
+          // Fallback to WebSocket match-relay automatically
+        });
+      }
       this.emit('match-found', packet);
       return;
     }
