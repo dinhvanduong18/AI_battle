@@ -1474,8 +1474,30 @@ wss.on('connection', ws => {
         if (previous && previous !== ws) previous.close(4001, 'Replaced by a newer session');
         await cancelQueue(redis, ws.user.id).catch(() => {});
         await redis.set(`ottv2:presence:${ws.user.id}`, instanceId, { EX: 60 });
-        await pool.query("UPDATE matches SET disconnected_player_id=NULL, disconnected_at=NULL WHERE status='active' AND disconnected_player_id=$1", [ws.user.id]);
+        const reconnectable = await pool.query(
+          `SELECT m.id,m.seed,m.player1_id,m.player2_id,m.match_type,m.tournament_id,m.disconnected_at,
+                  p1.display_name AS player1_name,p1.elo AS player1_elo,
+                  p2.display_name AS player2_name,p2.elo AS player2_elo
+           FROM matches m
+           JOIN users p1 ON p1.id=m.player1_id
+           JOIN users p2 ON p2.id=m.player2_id
+           WHERE m.status='active' AND m.disconnected_player_id=$1
+             AND m.disconnected_at > clock_timestamp() - interval '10 seconds'`,
+          [ws.user.id]
+        );
         send(ws, 'authenticated', { user: publicUser(ws.user) });
+        for (const match of reconnectable.rows) {
+          send(ws, 'match-rejoin-available', {
+            match: {
+              id: match.id, seed: match.seed, match_type: match.match_type,
+              tournament_id: match.tournament_id,
+              player1: { displayName: match.player1_name, elo: match.player1_elo },
+              player2: { displayName: match.player2_name, elo: match.player2_elo }
+            },
+            role: match.player1_id === ws.user.id ? 'player1' : 'player2',
+            expiresAt: new Date(new Date(match.disconnected_at).getTime() + DISCONNECT_FORFEIT_MS).toISOString()
+          });
+        }
         return;
       }
       const userId = ws.user.id;
@@ -1560,6 +1582,52 @@ wss.on('connection', ws => {
         const message = 'Trận đã hủy vì một bot không khởi động được. Hãy kiểm tra mã Python rồi tìm lại trận.';
         await deliverToUser(otherId, 'match-aborted', { matchId: match.id, message });
         send(ws, 'match-aborted', { matchId: match.id, message });
+      } else if (packet.type === 'leave-match' || packet.type === 'rejoin-match') {
+        const found = await pool.query(
+          `SELECT m.*,p1.display_name AS player1_name,p1.elo AS player1_elo,
+                  p2.display_name AS player2_name,p2.elo AS player2_elo
+           FROM matches m
+           JOIN users p1 ON p1.id=m.player1_id
+           JOIN users p2 ON p2.id=m.player2_id
+           WHERE m.id=$1 AND m.status='active'`,
+          [packet.matchId]
+        );
+        const match = found.rows[0];
+        if (!match || !canonicalMatchIds(match).includes(userId)) throw new Error('Not authorized for this match');
+        if (packet.type === 'leave-match') {
+          const marked = await pool.query(
+            `UPDATE matches SET disconnected_at=CASE WHEN disconnected_player_id=$1 THEN disconnected_at ELSE now() END,
+               disconnected_player_id=$1
+             WHERE id=$2 AND status='active' RETURNING disconnected_at`,
+            [userId, match.id]
+          );
+          if (marked.rowCount) {
+            const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
+            const disconnectedAt = new Date(marked.rows[0].disconnected_at).getTime();
+            const expiresAt = new Date(disconnectedAt + DISCONNECT_FORFEIT_MS).toISOString();
+            await deliverToUser(peerId, 'peer-disconnected', { matchId: match.id, disconnectedPlayerId: userId, expiresAt });
+            send(ws, 'match-left', { matchId: match.id, expiresAt });
+          }
+        } else {
+          const rejoined = await pool.query(
+            `UPDATE matches SET disconnected_player_id=NULL,disconnected_at=NULL
+             WHERE id=$1 AND status='active' AND disconnected_player_id=$2
+               AND disconnected_at > clock_timestamp() - ($3 * interval '1 millisecond')
+             RETURNING id`,
+            [match.id, userId, DISCONNECT_FORFEIT_MS]
+          );
+          if (!rejoined.rowCount) throw Object.assign(new Error('Thời gian vào lại phòng đã hết.'), { status: 409 });
+          send(ws, 'match-rejoined', {
+            match: {
+              id: match.id, seed: match.seed, match_type: match.match_type,
+              tournament_id: match.tournament_id,
+              player1: { displayName: match.player1_name, elo: match.player1_elo },
+              player2: { displayName: match.player2_name, elo: match.player2_elo }
+            },
+            role: match.player1_id === userId ? 'player1' : 'player2',
+            mode: match.match_type
+          });
+        }
       } else if (packet.type === 'session-key') {
         await registerSessionKey(userId, packet);
         send(ws, 'session-key-accepted', { matchId: packet.matchId });
