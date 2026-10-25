@@ -190,11 +190,13 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                 />
               </div>
 
-              <div className="p-3 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)]">
-                Tài khoản mẫu sẵn có ở Local:{' '}
-                <code className="text-[var(--text-primary)]">admin@ottv2.local</code> · Mật khẩu:{' '}
-                <code className="text-[var(--text-primary)]">halloween2026</code>
-              </div>
+              {import.meta.env.DEV && (
+                <div className="p-3 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)]">
+                  Tài khoản mẫu sẵn có ở Local:{' '}
+                  <code className="text-[var(--text-primary)]">admin@ottv2.local</code> · Mật khẩu:{' '}
+                  <code className="text-[var(--text-primary)]">halloween2026</code>
+                </div>
+              )}
 
               <button
                 type="submit"

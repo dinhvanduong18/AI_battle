@@ -240,7 +240,12 @@ export class BackendClient {
 
   async getTournaments(): Promise<TournamentItem[]> {
     const res = await this.request('/api/tournaments');
-    return Array.isArray(res.tournaments) ? res.tournaments : [];
+    if (!Array.isArray(res.tournaments)) return [];
+
+    return res.tournaments.map((tournament: TournamentItem & { team_count?: number }) => ({
+      ...tournament,
+      participant_count: tournament.participant_count ?? tournament.team_count ?? 0,
+    }));
   }
 
   async getTournamentDetail(id: string) {

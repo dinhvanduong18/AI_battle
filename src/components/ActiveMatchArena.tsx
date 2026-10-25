@@ -115,6 +115,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const [myBotReady, setMyBotReady] = useState(!isBotMatch);
   const [peerBotReady, setPeerBotReady] = useState(!isBotMatch);
   const [loadingPyodide, setLoadingPyodide] = useState(false);
+  const [botSecondsLeft, setBotSecondsLeft] = useState(BOT_TURN_TIMEOUT_MS / 1000);
+  const [botThinking, setBotThinking] = useState(false);
 
   // Disconnect & Forfeit handling
   const [peerOffline, setPeerOffline] = useState(false);
@@ -671,48 +673,91 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     trySubmitBackendResult,
   ]);
 
-  // Trigger BotRunner automatically when it's our turn in Bot vs Bot mode
+  // Start a visible turn clock for both players, and enforce it on the active bot.
   useEffect(() => {
     if (
       !isBotMatch ||
       !myBotReady ||
       !peerBotReady ||
       !consensusReady ||
-      !botRunnerRef.current?.ready ||
-      gameState.winner !== null ||
-      gameState.turn !== session.mySeat ||
-      steppingBotRef.current
+      gameState.winner !== null
     ) {
+      setBotThinking(false);
       return;
     }
 
-    steppingBotRef.current = true;
-    const timer = setTimeout(async () => {
+    const deadline = Date.now() + BOT_TURN_TIMEOUT_MS;
+    let expired = false;
+    setBotSecondsLeft(BOT_TURN_TIMEOUT_MS / 1000);
+    setBotThinking(true);
+    const countdown = setInterval(() => {
+      setBotSecondsLeft(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    }, 100);
+
+    const forfeit = (message: string) => {
+      if (expired) return;
+      if (stateRef.current.winner !== null || stateRef.current.turn !== session.mySeat) return;
+      expired = true;
       try {
-        const curr = stateRef.current;
-        if (curr.winner !== null || curr.turn !== session.mySeat || !botRunnerRef.current) return;
-        const botState = OTTGameEngine.createBotGameState(curr, session.mySeat);
-        const moveRes = await botRunnerRef.current.getMove(session.mySeat, botState);
-        await proposeMyMove({ from: moveRes.from, to: moveRes.to }, moveRes.elapsedMs);
-      } catch (err: any) {
-        notify(`Bot của bạn gặp lỗi / TLE: ${err.message}. Xử thua kỹ thuật!`, 'error');
-        soundFx.playDefeat();
         if (session.source === 'backend') {
-          backendClient.botForfeit(session.matchId, err.message);
+          backendClient.botForfeit(session.matchId, message);
         } else if (session.mySeat !== null) {
-          sendMessageToPeer({ type: 'BOT_FORFEIT', seat: session.mySeat, message: err.message });
-          const winner: GameState['winner'] = session.mySeat === 1 ? 2 : 1;
-          const finalState = { ...stateRef.current, winner };
-          stateRef.current = finalState;
-          setGameState(finalState);
+          sendMessageToPeer({ type: 'BOT_FORFEIT', seat: session.mySeat, message });
         }
-      } finally {
-        steppingBotRef.current = false;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Lỗi kết nối không xác định.';
+        notify(`Không gửi được kết quả xử thua lên máy chủ: ${detail}`, 'error');
       }
-    }, 180);
+      const winner: GameState['winner'] = session.mySeat === 1 ? 2 : 1;
+      const forfeitedState = { ...stateRef.current, winner };
+      stateRef.current = forfeitedState;
+      setGameState(forfeitedState);
+      setBotThinking(false);
+      notify(`Hết 5 giây: Bot bị xử thua kỹ thuật. ${message}`, 'error');
+      soundFx.playDefeat();
+    };
+
+    let moveTimeout: ReturnType<typeof setTimeout> | undefined;
+    if (gameState.turn === session.mySeat && !steppingBotRef.current) {
+      steppingBotRef.current = true;
+      const timeout = new Promise<never>((_, reject) => {
+        moveTimeout = setTimeout(() => {
+          botRunnerRef.current?.destroy();
+          reject(new Error('Bot vượt quá giới hạn 5 giây.'));
+        }, Math.max(0, deadline - Date.now()));
+      });
+
+      Promise.race([
+        (async () => {
+          const curr = stateRef.current;
+          const runner = botRunnerRef.current;
+          if (
+            curr.winner !== null ||
+            curr.turn !== session.mySeat ||
+            !runner?.ready
+          ) {
+            throw new Error('Bot chưa sẵn sàng khi bắt đầu lượt.');
+          }
+          const botState = OTTGameEngine.createBotGameState(curr, session.mySeat);
+          const moveRes = await runner.getMove(session.mySeat, botState);
+          steppingBotRef.current = false;
+          await proposeMyMove({ from: moveRes.from, to: moveRes.to }, moveRes.elapsedMs);
+          if (stateRef.current.stepCount === curr.stepCount && stateRef.current.winner === null) {
+            throw new Error('Nước đi Bot không được áp dụng trước khi hết lượt.');
+          }
+        })(),
+        timeout,
+      ]).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : 'Bot không trả về nước đi hợp lệ.';
+        forfeit(message);
+      }).finally(() => {
+        if (moveTimeout) clearTimeout(moveTimeout);
+      });
+    }
 
     return () => {
-      clearTimeout(timer);
+      clearInterval(countdown);
+      if (moveTimeout) clearTimeout(moveTimeout);
       steppingBotRef.current = false;
     };
   }, [
@@ -726,6 +771,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     session.matchId,
     session.mySeat,
     session.source,
+    sendMessageToPeer,
   ]);
 
   const handleConfirmBotReady = async () => {
@@ -1097,9 +1143,13 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
               <span className="font-semibold text-[var(--text-primary)]">
                 {session.mySeat === null
                   ? `Đang tới lượt: ${gameState.turn === 1 ? session.player1Name : session.player2Name}`
+                  : isBotMatch && botThinking
+                  ? gameState.turn === session.mySeat
+                    ? `Bot của bạn đang tính toán… còn ${botSecondsLeft} giây`
+                    : `Bot đối thủ đang tính toán… còn ${botSecondsLeft} giây`
                   : isMyTurn
                   ? session.mode === 'bot'
-                    ? 'Bot của bạn đang tính toán nước đi… (tối đa 5 giây)'
+                    ? 'Bot đang chuẩn bị tính toán nước đi…'
                     : 'Lượt của bạn — Hãy chọn quân cờ để di chuyển'
                   : 'Đang chờ nước đi của đối thủ…'}
               </span>

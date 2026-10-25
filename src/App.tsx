@@ -223,7 +223,7 @@ function AppWorkspace() {
     setAuthModalOpen(true);
   };
 
-  const handleExitActiveMatch = () => {
+  const handleExitActiveMatch = useCallback(() => {
     if (p2pCleanupRef.current) {
       p2pCleanupRef.current();
       p2pCleanupRef.current = null;
@@ -231,7 +231,7 @@ function AppWorkspace() {
     backendClient.closePeerChannel();
     setActiveMatch(null);
     refreshPublicAndUserData();
-  };
+  }, [refreshPublicAndUserData]);
 
   return (
     <div className="relative min-h-screen flex text-[var(--text-primary)]">
@@ -408,10 +408,13 @@ function AppWorkspace() {
             <button
               type="button"
               onClick={() => handleOpenAuth(user ? 'profile' : 'login')}
+              aria-label={user ? `Tài khoản ${user.displayName}` : 'Đăng nhập'}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0 tabular-nums"
             >
               <User className="w-3.5 h-3.5" />
-              {user ? `${user.displayName} · ${user.elo}` : 'Đăng nhập'}
+              <span className="hidden sm:inline">
+                {user ? `${user.displayName} · ${user.elo}` : 'Đăng nhập'}
+              </span>
             </button>
           </div>
         </header>
