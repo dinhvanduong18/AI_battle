@@ -70,8 +70,6 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     }
   }, [open, initialTab, user]);
 
-  if (!open) return null;
-
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -163,7 +161,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     const rank = (user?.elo || 0) >= 1600 ? 'Vàng' : (user?.elo || 0) >= 1350 ? 'Bạc' : 'Đồng';
     const nextRankElo = rank === 'Đồng' ? 1350 : rank === 'Bạc' ? 1600 : null;
     const progress = nextRankElo
-      ? Math.min(100, Math.max(0, ((user!.elo - (rank === 'Đồng' ? 1000 : 1350)) / (nextRankElo - (rank === 'Đồng' ? 1000 : 1350))) * 100))
+      ? Math.min(100, Math.max(0, (((user?.elo ?? 0) - (rank === 'Đồng' ? 1000 : 1350)) / (nextRankElo - (rank === 'Đồng' ? 1000 : 1350))) * 100))
       : 100;
     return {
       completed,
@@ -178,6 +176,8 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       progress
     };
   }, [matches, user?.elo, user?.id, user?.stats]);
+
+  if (!open) return null;
 
   return (
     <div
