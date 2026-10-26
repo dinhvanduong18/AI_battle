@@ -519,6 +519,9 @@ function AppWorkspace() {
         user={user}
         matches={matches}
         onClose={() => setAuthModalOpen(false)}
+        onWatchMatchReplay={(match) =>
+          handleWatchReplayById(match.id, match.player1, match.player2)
+        }
         onUserUpdated={(nextUser) => {
           setUser(nextUser);
           refreshPublicAndUserData();

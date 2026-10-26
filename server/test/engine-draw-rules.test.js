@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { verifyReplay } from '../src/replay.js';
+import { getMatchEloLabel } from '../../src/core/backendClient.ts';
 
 const require = createRequire(import.meta.url);
 const { OTTGameEngine, computeFastHash } = require('../../shared/OTTGameEngine.js');
@@ -18,6 +19,27 @@ const canonical = (value) =>
         .join(',')}}`
     : JSON.stringify(value);
 const sha256 = (value) => createHash('sha256').update(canonical(value)).digest('hex');
+
+test('Elo history labels require a server-provided delta and show exact before/after ratings', () => {
+  const match = {
+    match_type: 'bot',
+    tournament_phase: 'ranked',
+    is_sparring: false,
+    winner_id: 'player-1',
+    elo_updated: true,
+    elo_delta: 12,
+    elo_before: 1181,
+    elo_after: 1193,
+  };
+
+  assert.equal(getMatchEloLabel(match, 'player-1'), '+12 Elo (1181 → 1193)');
+  assert.equal(
+    getMatchEloLabel({ ...match, winner_id: 'player-2', elo_delta: -12, elo_after: 1169 }, 'player-1'),
+    '-12 Elo (1181 → 1169)'
+  );
+  assert.equal(getMatchEloLabel({ ...match, elo_delta: undefined }, 'player-1'), null);
+  assert.equal(getMatchEloLabel({ ...match, elo_updated: false }, 'player-1'), null);
+});
 
 function statePayload(state) {
   return {

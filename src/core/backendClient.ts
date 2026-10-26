@@ -30,7 +30,9 @@ export interface MatchSummary {
   player2: string;
   player1_id?: string;
   player2_id?: string;
-  elo_delta?: number;
+  elo_before?: number | null;
+  elo_after?: number | null;
+  elo_delta?: number | null;
   elo_updated?: boolean;
 }
 
@@ -39,17 +41,33 @@ export function getMatchFormatLabel(match: MatchSummary): string {
 }
 
 export function getMatchEloLabel(match: MatchSummary, userId: string): string | null {
-  const eloUpdated =
-    match.elo_updated ??
-    (match.match_type === 'bot' &&
-      match.tournament_phase !== 'practice' &&
-      !match.is_sparring);
-  if (!eloUpdated) return null;
+  if (
+    match.elo_updated !== true ||
+    typeof match.elo_delta !== 'number' ||
+    !Number.isFinite(match.elo_delta)
+  ) {
+    return null;
+  }
 
-  const delta = match.elo_delta ?? 0;
+  const delta = match.elo_delta;
   const signedDelta =
-    delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : match.winner_id === userId ? '+0' : '-0';
-  return `${signedDelta} Elo`;
+    delta > 0
+      ? `+${delta}`
+      : delta < 0
+      ? `${delta}`
+      : match.winner_id === userId
+      ? '+0'
+      : match.winner_id
+      ? '-0'
+      : '0';
+  const ratingChange =
+    typeof match.elo_before === 'number' &&
+    Number.isFinite(match.elo_before) &&
+    typeof match.elo_after === 'number' &&
+    Number.isFinite(match.elo_after)
+      ? ` (${match.elo_before} → ${match.elo_after})`
+      : '';
+  return `${signedDelta} Elo${ratingChange}`;
 }
 
 export interface TournamentItem {
@@ -73,7 +91,7 @@ export interface TournamentItem {
 type EventHandler = (payload: any) => void;
 
 export function resolveDefaultBackendUrl(): string {
-  const envUrl = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.trim();
+  const envUrl = (import.meta.env?.VITE_BACKEND_URL as string | undefined)?.trim();
   if (envUrl) return envUrl.replace(/\/+$/, '');
   if (typeof window !== 'undefined') return window.location.origin;
   return 'http://localhost:3000';

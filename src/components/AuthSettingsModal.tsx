@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import {
   Bot,
   Camera,
+  Film,
   History,
   ImagePlus,
   KeyRound,
@@ -43,6 +44,7 @@ interface AuthSettingsModalProps {
   matches: MatchSummary[];
   onClose: () => void;
   onUserUpdated: (user: BackendUser | null) => void;
+  onWatchMatchReplay: (match: MatchSummary) => void;
 }
 
 export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
@@ -52,6 +54,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   matches,
   onClose,
   onUserUpdated,
+  onWatchMatchReplay,
 }) => {
   const { notify } = useToast();
   const [tab, setTab] = useState<ModalTab>(initialTab);
@@ -603,14 +606,26 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                                           {getMatchFormatLabel(match)} · {new Date(match.created_at).toLocaleDateString('vi-VN')}
                                         </p>
                                       </div>
-                                      <p
-                                        className={`text-xs font-semibold tabular-nums ${
-                                          isDraw ? 'text-amber-300' : won ? 'text-emerald-400' : 'text-red-400'
-                                        }`}
-                                      >
-                                        {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
-                                        {eloLabel ? ` · ${eloLabel}` : ''}
-                                      </p>
+                                      <div className="flex flex-wrap items-center justify-end gap-3">
+                                        <p
+                                          className={`text-xs font-semibold tabular-nums ${
+                                            isDraw ? 'text-amber-300' : won ? 'text-emerald-400' : 'text-red-400'
+                                          }`}
+                                        >
+                                          {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
+                                          {eloLabel ? ` · ${eloLabel}` : ''}
+                                        </p>
+                                        {match.replay_available && (
+                                          <button
+                                            type="button"
+                                            onClick={() => onWatchMatchReplay(match)}
+                                            className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--accent-primary)] hover:underline"
+                                          >
+                                            <Film className="h-3.5 w-3.5" />
+                                            Mở Replay
+                                          </button>
+                                        )}
+                                      </div>
                                     </div>
                                   );
                                 })}

@@ -1869,10 +1869,20 @@ const httpServer = createServer(async (req, res) => {
         u1.display_name AS player1,u2.display_name AS player2,m.player1_id,m.player2_id,
         (r.match_id IS NOT NULL AND m.match_type='bot' AND m.tournament_phase IS DISTINCT FROM 'practice' AND NOT m.is_sparring) AS elo_updated,
         CASE
-          WHEN r.match_id IS NULL OR m.match_type<>'bot' OR m.tournament_phase='practice' OR m.is_sparring THEN 0
+          WHEN r.match_id IS NULL OR m.match_type<>'bot' OR m.tournament_phase='practice' OR m.is_sparring THEN NULL
           WHEN m.player1_id=$1 THEN r.player1_elo_after-r.player1_elo_before
           ELSE r.player2_elo_after-r.player2_elo_before
-        END AS elo_delta
+        END AS elo_delta,
+        CASE
+          WHEN r.match_id IS NULL OR m.match_type<>'bot' OR m.tournament_phase='practice' OR m.is_sparring THEN NULL
+          WHEN m.player1_id=$1 THEN r.player1_elo_before
+          ELSE r.player2_elo_before
+        END AS elo_before,
+        CASE
+          WHEN r.match_id IS NULL OR m.match_type<>'bot' OR m.tournament_phase='practice' OR m.is_sparring THEN NULL
+          WHEN m.player1_id=$1 THEN r.player1_elo_after
+          ELSE r.player2_elo_after
+        END AS elo_after
         FROM matches m JOIN users u1 ON u1.id=m.player1_id JOIN users u2 ON u2.id=m.player2_id
         LEFT JOIN match_results r ON r.match_id=m.id
         WHERE m.player1_id=$1 OR m.player2_id=$1 ORDER BY m.created_at DESC LIMIT 50`, [auth.sub, replayStorage.enabled]);

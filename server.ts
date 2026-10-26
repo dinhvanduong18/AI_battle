@@ -1432,7 +1432,25 @@ export async function startServer(options: ServerStartOptions = {}) {
                 ? m.player1_id === user.id
                   ? mr.player1_elo_after - mr.player1_elo_before
                   : mr.player2_elo_after - mr.player2_elo_before
-                : 0,
+                : null,
+            elo_before:
+              mr &&
+              m.match_type === 'bot' &&
+              m.tournament_phase !== 'practice' &&
+              !m.is_sparring
+                ? m.player1_id === user.id
+                  ? mr.player1_elo_before
+                  : mr.player2_elo_before
+                : null,
+            elo_after:
+              mr &&
+              m.match_type === 'bot' &&
+              m.tournament_phase !== 'practice' &&
+              !m.is_sparring
+                ? m.player1_id === user.id
+                  ? mr.player1_elo_after
+                  : mr.player2_elo_after
+                : null,
           };
         });
       res.json({ matches });

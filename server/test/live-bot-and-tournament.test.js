@@ -613,6 +613,14 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
       recordedWin.elo_delta,
       submitWin.data.elo.player1.after - submitWin.data.elo.player1.before
     );
+    assert.equal(recordedWin.elo_before, submitWin.data.elo.player1.before);
+    assert.equal(recordedWin.elo_after, submitWin.data.elo.player1.after);
+    assert.equal(recordedWin.replay_available, true);
+    const opponentHistory = await h.api('GET', '/api/matches', pairedWin.seat2.user.token);
+    const recordedLoss = opponentHistory.data.matches.find((match) => match.id === pairedWin.matchId);
+    assert.equal(recordedLoss.elo_delta, submitWin.data.elo.player2.after - submitWin.data.elo.player2.before);
+    assert.equal(recordedLoss.elo_before, submitWin.data.elo.player2.before);
+    assert.equal(recordedLoss.elo_after, submitWin.data.elo.player2.after);
     const updatedProfile = await h.api('GET', '/api/me', pairedWin.seat1.user.token);
     assert.equal(
       updatedProfile.data.user.highestElo,
