@@ -1961,7 +1961,7 @@ const httpServer = createServer(async (req, res) => {
       }
 
       const activeTurnSeat = currentStep % 2 === 0 ? 1 : 2;
-      const turnTimeoutMs = match.match_type === 'bot' ? 9000 : 45000;
+      const turnTimeoutMs = match.match_type === 'bot' ? 30000 : 45000;
       if (activeTurnSeat === opponentSeat && cs.lastRevealStep !== currentStep && now - (cs.stepStartedAt || now) >= turnTimeoutMs) {
         const out = await adjudicateMatchForfeit(
           match.id,

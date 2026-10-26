@@ -223,7 +223,7 @@ function AppWorkspace() {
     setAuthModalOpen(true);
   };
 
-  const handleExitActiveMatch = () => {
+  const handleExitActiveMatch = useCallback(() => {
     if (p2pCleanupRef.current) {
       p2pCleanupRef.current();
       p2pCleanupRef.current = null;
@@ -231,7 +231,7 @@ function AppWorkspace() {
     backendClient.closePeerChannel();
     setActiveMatch(null);
     refreshPublicAndUserData();
-  };
+  }, [refreshPublicAndUserData]);
 
   return (
     <div className="relative min-h-screen flex text-[var(--text-primary)]">

@@ -6,7 +6,6 @@ import {
   LogIn,
   Search,
   ShieldCheck,
-  Sparkles,
   Swords,
   UserCheck,
   XCircle,
@@ -93,22 +92,6 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
     }
   };
 
-  const handleSparringMatch = async (mode: 'bot' | 'human') => {
-    if (!user) {
-      onOpenAuth('login');
-      return;
-    }
-    try {
-      await backendClient.findSparringMatch(mode);
-    } catch (err: any) {
-      notify(
-        err.message ||
-          'Máy chủ hiện tại không hỗ trợ chế độ Sparring tức thì (chỉ có trên máy chủ Local tích hợp).',
-        'error'
-      );
-    }
-  };
-
   const handleCancelQueue = () => {
     backendClient.cancelMatch();
     setSearchingMode(null);
@@ -147,14 +130,6 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
           </div>
 
           <div className="flex items-center gap-2.5">
-            <button
-              type="button"
-              onClick={() => handleSparringMatch(searchingMode)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer whitespace-nowrap"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
-              Đấu ngay với Hắc Kỵ Sĩ AI
-            </button>
             <button
               type="button"
               onClick={handleCancelQueue}
@@ -205,15 +180,6 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
               Tìm trận Bot trực tuyến
             </button>
 
-            <button
-              type="button"
-              disabled={searchingMode !== null}
-              onClick={() => handleSparringMatch('bot')}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
-              Đấu xếp hạng với Hắc Kỵ Sĩ AI
-            </button>
           </div>
         </div>
 
@@ -248,15 +214,6 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
               Tìm đối thủ 1v1 trực tuyến
             </button>
 
-            <button
-              type="button"
-              disabled={searchingMode !== null}
-              onClick={() => handleSparringMatch('human')}
-              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-[var(--p2-main)]" />
-              Cầm quân đấu Hắc Kỵ Sĩ AI
-            </button>
           </div>
         </div>
       </section>

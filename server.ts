@@ -637,7 +637,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   const setupTimeoutMs = options.timeouts?.setupTimeoutMs ?? 15000;
   const setupPeerReadyTimeoutMs = options.timeouts?.setupPeerReadyTimeoutMs ?? 10000;
   const ackTimeoutMs = options.timeouts?.ackTimeoutMs ?? 4500;
-  const botTurnTimeoutMs = options.timeouts?.botTurnTimeoutMs ?? 9000;
+  const botTurnTimeoutMs = options.timeouts?.botTurnTimeoutMs ?? 30000;
   const sweepIntervalMs = options.timeouts?.sweepIntervalMs ?? 500;
   const dbPath =
     options.dbPath ||

@@ -2,13 +2,13 @@ import React, { useEffect, useState } from 'react';
 import {
   Bot,
   Camera,
-  Coins,
   History,
   ImagePlus,
   KeyRound,
   LockKeyhole,
   LogOut,
   Palette,
+  Shield,
   Swords,
   Trophy,
   Upload,
@@ -230,10 +230,16 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   };
   const humanStats = getModeStats('human');
   const botStats = getModeStats('bot');
-  const rank =
-    (user?.elo ?? 0) >= 1600 ? 'Vàng' : (user?.elo ?? 0) >= 1350 ? 'Bạc' : 'Đồng';
+  const getRank = (elo: number): 'Đồng' | 'Bạc' | 'Vàng' =>
+    elo >= 1600 ? 'Vàng' : elo >= 1350 ? 'Bạc' : 'Đồng';
+  const rank = getRank(user?.elo ?? 0);
   const highestElo = Math.max(user?.highestElo ?? user?.elo ?? 0, user?.elo ?? 0);
-  const highestRank = highestElo >= 1600 ? 'Vàng' : highestElo >= 1350 ? 'Bạc' : 'Đồng';
+  const highestRank = getRank(highestElo);
+  const rankIconClass: Record<typeof rank, string> = {
+    Đồng: 'text-orange-400 fill-orange-400/20 drop-shadow-[0_0_5px_rgba(251,146,60,0.55)]',
+    Bạc: 'text-slate-200 fill-slate-200/20 drop-shadow-[0_0_5px_rgba(226,232,240,0.55)]',
+    Vàng: 'text-yellow-300 fill-yellow-300/20 drop-shadow-[0_0_5px_rgba(253,224,71,0.6)]',
+  };
   const recentCompletedMatches = completedMatches.slice(0, 5);
 
   return (
@@ -694,7 +700,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                       <div>
                         <p className="text-[9px] uppercase tracking-[0.12em] text-white/65">Elo hiện tại</p>
                         <p className="mt-0.5 flex items-center gap-1.5 text-xl font-black tabular-nums text-white sm:justify-end">
-                          <Coins className="h-5 w-5 text-amber-300 drop-shadow-[0_0_5px_rgba(252,211,77,0.65)]" />
+                          <Shield aria-label={`Hạng ${rank}`} className={`h-5 w-5 ${rankIconClass[rank]}`} />
                           {user.elo}<span className="text-[10px] font-semibold text-amber-200">Elo</span>
                         </p>
                         <p className="text-[10px] text-amber-100">Hạng {rank}</p>
@@ -702,7 +708,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                       <div>
                         <p className="text-[9px] uppercase tracking-[0.12em] text-white/65">Elo cao nhất</p>
                         <p className="mt-0.5 flex items-center gap-1.5 text-xl font-black tabular-nums text-white sm:justify-end">
-                          <Coins className="h-5 w-5 text-amber-300 drop-shadow-[0_0_5px_rgba(252,211,77,0.65)]" />
+                          <Shield aria-label={`Hạng ${highestRank}`} className={`h-5 w-5 ${rankIconClass[highestRank]}`} />
                           {highestElo}<span className="text-[10px] font-semibold text-amber-200">Elo</span>
                         </p>
                         <p className="text-[10px] text-amber-100">Hạng {highestRank}</p>

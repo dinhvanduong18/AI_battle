@@ -39,6 +39,8 @@ import { Board9x9 } from './Board9x9';
 import { MascotCountsInline } from './HalloweenPieces';
 import { useToast } from './ToastProvider';
 
+const BOT_MATCH_TLE_MS = 20_000;
+
 export interface ActiveMatchSession {
   source: 'backend' | 'p2p';
   matchId: string;
@@ -155,6 +157,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const [myBotReady, setMyBotReady] = useState(!isBotMatch);
   const [peerBotReady, setPeerBotReady] = useState(!isBotMatch);
   const [loadingPyodide, setLoadingPyodide] = useState(false);
+  const [botThinking, setBotThinking] = useState(false);
   const [setupRemainingSec, setSetupRemainingSec] = useState(15);
 
   // Consensus Cryptographic State
@@ -177,6 +180,14 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const botRunnerRef = useRef<BotRunner | null>(null);
   const steppingBotRef = useRef(false);
   const packetQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(
+    () => () => {
+      botRunnerRef.current?.destroy();
+      botRunnerRef.current = null;
+    },
+    []
+  );
 
   // Technical resolution (forfeit / disconnect / timeout / hash dispute)
   const [technicalResolution, setTechnicalResolution] = useState<TechnicalResolution | null>(null);
@@ -455,7 +466,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         OTTGameEngine.isGameOver(current) ||
         current.turn !== session.mySeat
       ) {
-        return;
+        return false;
       }
 
       const stepIdx = current.stepCount;
@@ -574,6 +585,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         else if (nextState.winner && nextState.winner !== session.mySeat) soundFx.playDefeat();
         await signAndBroadcastFinalProof(nextState);
       }
+      return true;
     },
     [sendMessageToPeer, session.matchId, session.mySeat, signAndBroadcastFinalProof]
   );
@@ -588,6 +600,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         const id = await generateIdentity();
         if (!active) return;
         identityRef.current = id;
+        if (peerPubKeyRef.current) setConsensusReady(true);
         if (session.source === 'backend') {
           try {
             backendClient.registerSessionKey(session.matchId, id.publicJwk);
@@ -636,7 +649,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (packet.type === 'CONSENSUS_HELLO' && packet.publicKey && packet.seat !== session.mySeat) {
         if (!peerPubKeyRef.current) {
           peerPubKeyRef.current = await importPublicKey(packet.publicKey);
-          setConsensusReady(true);
+          if (identityRef.current) setConsensusReady(true);
           if (identityRef.current && session.mySeat !== null) {
             sendMessageToPeer({
               type: 'CONSENSUS_HELLO',
@@ -914,7 +927,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             if (!peerPubKeyRef.current) {
               try {
                 peerPubKeyRef.current = await importPublicKey(pkt.publicKey);
-                setConsensusReady(true);
+                if (identityRef.current) setConsensusReady(true);
               } catch {
                 // ignore
               }
@@ -987,7 +1000,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       unsubForfeited();
       unsubDisputeResult();
       unsubAborted();
-      botRunnerRef.current?.destroy();
     };
   }, [
     applyTechnicalOutcome,
@@ -1013,7 +1025,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         if (!code) {
           throw new Error('Không tìm thấy mã nguồn Bot đã nộp cho giải đấu.');
         }
-        const runner = new BotRunner('TournamentBot', 7000);
+        const runner = new BotRunner('TournamentBot', BOT_MATCH_TLE_MS);
         await runner.loadBot(
           code,
           session.lockedBotVersion ? `Tournament v${session.lockedBotVersion}` : 'Tournament Bot'
@@ -1177,6 +1189,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       !myBotReady ||
       !peerBotReady ||
       !consensusReady ||
+      !identityRef.current ||
       !botRunnerRef.current?.ready ||
       isMatchFinished ||
       ackedStepCount < gameState.stepCount ||
@@ -1187,7 +1200,10 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     }
 
     steppingBotRef.current = true;
+    let started = false;
     const timer = setTimeout(async () => {
+      started = true;
+      setBotThinking(true);
       try {
         const curr = stateRef.current;
         if (
@@ -1200,7 +1216,13 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         }
         const botState = OTTGameEngine.createBotGameState(curr, session.mySeat);
         const moveRes = await botRunnerRef.current.getMove(session.mySeat, botState);
-        await proposeMyMove({ from: moveRes.from, to: moveRes.to }, moveRes.elapsedMs);
+        const moveAccepted = await proposeMyMove(
+          { from: moveRes.from, to: moveRes.to },
+          moveRes.elapsedMs
+        );
+        if (!moveAccepted) {
+          throw new Error('Nước đi đã tính nhưng phiên đấu chưa sẵn sàng để gửi.');
+        }
       } catch (err: any) {
         const errMsg = err.message || 'Runtime/TLE';
         notify(`Bot của bạn gặp lỗi thực thi/TLE: ${errMsg}`, 'error');
@@ -1220,13 +1242,14 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           );
         }
       } finally {
+        setBotThinking(false);
         steppingBotRef.current = false;
       }
     }, 160);
 
     return () => {
       clearTimeout(timer);
-      steppingBotRef.current = false;
+      if (!started) steppingBotRef.current = false;
     };
   }, [
     ackedStepCount,
@@ -1260,7 +1283,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         throw new Error('Không tìm thấy mã nguồn Python cho lựa chọn này.');
       }
 
-      const runner = new BotRunner('MatchBot', 7000);
+      const runner = new BotRunner('MatchBot', BOT_MATCH_TLE_MS);
       await runner.loadBot(code, selectedBotSource);
       botRunnerRef.current = runner;
       setMyBotReady(true);
@@ -1679,7 +1702,17 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                   ? 'Đang đối chiếu xác nhận mã băm trạng thái (ACK) từ đối thủ…'
                   : isMyTurn
                   ? session.mode === 'bot'
-                    ? 'Bot của bạn đang tính toán nước đi…'
+                    ? !myBotReady
+                      ? 'Đang nạp Bot của bạn…'
+                      : !peerBotReady
+                      ? 'Đang chờ Bot đối thủ sẵn sàng…'
+                      : !consensusReady
+                      ? 'Đang đồng bộ khóa xác minh…'
+                      : ackedStepCount < gameState.stepCount
+                      ? 'Đang xác nhận nước đi trước…'
+                      : botThinking
+                      ? 'Bot của bạn đang tính toán nước đi…'
+                      : 'Bot của bạn đang chuẩn bị nước đi…'
                     : 'Lượt của bạn — Hãy chọn quân cờ để di chuyển'
                   : 'Đang chờ nước đi của đối thủ…'}
               </span>
