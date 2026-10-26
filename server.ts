@@ -654,8 +654,8 @@ export interface ServerStartOptions {
 export async function startServer(options: ServerStartOptions = {}) {
   const port = options.port !== undefined ? options.port : DEFAULT_PORT;
   const disconnectForfeitMs = options.timeouts?.disconnectForfeitMs ?? DISCONNECT_FORFEIT_MS;
-  const setupTimeoutMs = options.timeouts?.setupTimeoutMs ?? 15000;
-  const setupPeerReadyTimeoutMs = options.timeouts?.setupPeerReadyTimeoutMs ?? 10000;
+  const setupTimeoutMs = options.timeouts?.setupTimeoutMs ?? 35000;
+  const setupPeerReadyTimeoutMs = options.timeouts?.setupPeerReadyTimeoutMs ?? 25000;
   const ackTimeoutMs = options.timeouts?.ackTimeoutMs ?? 4500;
   const botAckTimeoutMs = options.timeouts?.botAckTimeoutMs ?? 30000;
   const botTurnTimeoutMs = options.timeouts?.botTurnTimeoutMs ?? 30000;
@@ -2376,8 +2376,8 @@ export async function startServer(options: ServerStartOptions = {}) {
         ? tournament.rules_json || weeklyRules(tournament.current_week || 1, tournament.rules_schedule)
         : null;
 
-    const p1Bot = tournament ? getActiveUserBot(p1.id) : null;
-    const p2Bot = tournament ? getActiveUserBot(p2.id) : null;
+    const p1Bot = matchType === 'bot' ? getActiveUserBot(p1.id) : null;
+    const p2Bot = matchType === 'bot' ? getActiveUserBot(p2.id) : null;
 
     const match: MatchRecord = {
       id: randomUUID(),

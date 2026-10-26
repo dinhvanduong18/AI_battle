@@ -1018,23 +1018,35 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     trySubmitBackendResult,
   ]);
 
-  // Auto-load & Auto-ready submitted Bot in Tournament Bot-vs-Bot matches
+  // Auto-load & Auto-ready submitted Bot in ALL online Bot vs Bot matches (Tournament, Arena, Private Room)
   useEffect(() => {
-    if (!isTournamentBotMatch || myBotReady) return;
+    if (!isBotMatch || myBotReady) return;
     let cancelled = false;
     setLoadingPyodide(true);
 
     (async () => {
       try {
-        const code = (session.lockedBotCode || savedBotCode || '').trim();
+        const code = (
+          session.lockedBotCode ||
+          savedBotCode ||
+          customEditorCode ||
+          SAMPLE_BOTS.phantom_hunter
+        ).trim();
+
         if (!code) {
-          throw new Error('Không tìm thấy mã nguồn Bot đã nộp cho giải đấu.');
+          throw new Error('Không tìm thấy mã nguồn Bot để khởi chạy.');
         }
-        const runner = new BotRunner('TournamentBot', BOT_MATCH_TLE_MS);
-        await runner.loadBot(
-          code,
-          session.lockedBotVersion ? `Tournament v${session.lockedBotVersion}` : 'Tournament Bot'
-        );
+
+        const botLabel = session.tournamentId
+          ? (session.lockedBotVersion ? `Giải đấu v${session.lockedBotVersion}` : 'Bot Giải đấu')
+          : session.lockedBotVersion
+          ? `Bot v${session.lockedBotVersion}`
+          : savedBotCode.trim()
+          ? 'Bot của bạn'
+          : 'Phantom Hunter (Mẫu)';
+
+        const runner = new BotRunner(botLabel, BOT_MATCH_TLE_MS);
+        await runner.loadBot(code, botLabel);
         if (cancelled) {
           runner.destroy();
           return;
@@ -1043,8 +1055,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         setMyBotReady(true);
       } catch (err: any) {
         if (cancelled) return;
-        const msg = err.message || 'Không thể khởi tạo Bot giải đấu.';
-        notify(`Lỗi nạp Bot giải đấu: ${msg}`, 'error');
+        const msg = err.message || 'Không thể khởi tạo Bot Python.';
+        notify(`Lỗi nạp Bot: ${msg}`, 'error');
         if (session.source === 'backend') {
           backendClient.abortBotSetup(session.matchId, msg);
         }
@@ -1057,7 +1069,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       cancelled = true;
     };
   }, [
-    isTournamentBotMatch,
+    customEditorCode,
+    isBotMatch,
     myBotReady,
     notify,
     savedBotCode,
@@ -1065,6 +1078,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     session.lockedBotVersion,
     session.matchId,
     session.source,
+    session.tournamentId,
   ]);
 
   // Broadcast BOT_READY reliably once both our Bot and P-256 session keys are ready
@@ -1447,82 +1461,44 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         </div>
       </div>
 
-      {/* Tournament Auto-Bot Banner OR Regular Bot Ready Selection Banner */}
+      {/* Unified Auto-Bot Readiness Banner for All Bot vs Bot Matches */}
       {isBotMatch && !isMatchFinished && (!myBotReady || !peerBotReady) && (
-        <div className="p-5 rounded-2xl border border-[var(--border-accent)] bg-[var(--bg-panel)] flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          {isTournamentBotMatch ? (
-            <div className="flex items-center gap-3">
-              <Loader2 className="w-5 h-5 text-[var(--accent-primary)] animate-spin shrink-0" />
-              <div>
-                <h3 className="text-sm font-bold text-[var(--text-primary)]">
-                  Đang tự động nạp Bot đã đăng ký giải đấu
-                  {session.lockedBotVersion ? ` (v${session.lockedBotVersion})` : ''}…
-                </h3>
-                <p className="text-xs text-[var(--text-secondary)] mt-0.5 tabular-nums">
-                  {myBotReady
-                    ? 'Bot của bạn đã sẵn sàng. Đang đồng bộ khởi chạy với Bot đối thủ (tự xử thắng nếu đối thủ treo quá 10s)…'
-                    : 'Hệ thống đang khởi chạy Web Worker Pyodide cho Bot đã nộp của bạn…'}
-                </p>
-              </div>
+        <div className="p-5 rounded-2xl border border-[var(--border-accent)] bg-[var(--bg-panel)] flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-5 h-5 text-[var(--accent-primary)] animate-spin shrink-0" />
+            <div>
+              <h3 className="text-sm font-bold text-[var(--text-primary)]">
+                {!myBotReady
+                  ? 'Đang tự động nạp Bot Python vào Web Worker sandbox…'
+                  : 'Bot của bạn đã sẵn sàng! Đang kết nối và đồng bộ với Bot đối thủ…'}
+              </h3>
+              <p className="text-xs text-[var(--text-secondary)] mt-0.5 tabular-nums">
+                {!myBotReady
+                  ? 'Hệ thống đang khởi chạy runtime Pyodide và nạp mã nguồn Bot đã lưu…'
+                  : 'Đang đợi Bot đối thủ hoàn tất nạp để tự động bắt đầu ván đấu.'}
+              </p>
             </div>
-          ) : (
-            <>
-              <div>
-                <h3 className="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
-                  <Bot className="w-5 h-5 text-[var(--accent-primary)]" />
-                  Chọn Bot Python xuất trận
-                </h3>
-                <p className="text-xs text-[var(--text-secondary)] mt-1 tabular-nums">
-                  {myBotReady
-                    ? 'Bot của bạn đã nạp xong. Đang chờ đối thủ sẵn sàng (tự xử thắng nếu đối thủ treo quá 10s)…'
-                    : `Hãy xác nhận Bot trong ${setupRemainingSec}s để tránh bị xử thua do treo phiên.`}
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-                <select
-                  disabled={myBotReady || loadingPyodide}
-                  value={selectedBotSource}
-                  onChange={(e) => setSelectedBotSource(e.target.value)}
-                  aria-label="Chọn Bot xuất trận"
-                  className="px-3.5 py-2.5 text-xs font-medium rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                >
-                  {hasSavedBot && <option value="saved">Bot đã lưu trên tài khoản</option>}
-                  <option value="phantom_hunter">Bot mẫu · Phantom Hunter (Halloween)</option>
-                  <option value="minimax">Bot mẫu · Minimax Tactical</option>
-                  <option value="greedy">Bot mẫu · Greedy AI</option>
-                  <option value="random">Bot mẫu · Random Bot</option>
-                  {customEditorCode.trim() && (
-                    <option value="custom">Code đang mở trong Phòng Lab</option>
-                  )}
-                </select>
-
-                <button
-                  type="button"
-                  disabled={myBotReady || loadingPyodide || !consensusReady}
-                  onClick={handleConfirmBotReady}
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
-                >
-                  {loadingPyodide ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                      Đang nạp Python…
-                    </>
-                  ) : myBotReady ? (
-                    <>
-                      <CheckCircle2 className="w-4 h-4" />
-                      Đã sẵn sàng
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-4 h-4" />
-                      Sẵn sàng khai cuộc
-                    </>
-                  )}
-                </button>
-              </div>
-            </>
-          )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border ${
+                myBotReady
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+              }`}
+            >
+              {myBotReady ? '✓ Bot bạn: Sẵn sàng' : '⏳ Bot bạn: Đang nạp…'}
+            </span>
+            <span
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border ${
+                peerBotReady
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                  : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+              }`}
+            >
+              {peerBotReady ? '✓ Đối thủ: Sẵn sàng' : '⏳ Đối thủ: Đang nạp…'}
+            </span>
+          </div>
         </div>
       )}
 

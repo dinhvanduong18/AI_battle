@@ -81,6 +81,10 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
       onOpenAuth('login');
       return;
     }
+    if (mode === 'bot' && savedBotVersion <= 0) {
+      notify('Bạn cần lưu Bot Python trong Phòng Lab trước khi tìm trận Đấu Trường Bot.', 'error');
+      return;
+    }
     try {
       setSearchingMode(mode);
       setElapsedSec(0);

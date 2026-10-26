@@ -8,6 +8,8 @@ import { useToast } from '../components/ToastProvider';
 
 interface PrivateRoomViewProps {
   user: BackendUser | null;
+  savedBotCode?: string;
+  savedBotVersion?: number;
   onLaunchMatch: (session: ActiveMatchSession, cleanupFn?: () => void) => void;
 }
 
@@ -20,7 +22,12 @@ function generateRoomCode(): string {
   return out;
 }
 
-export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunchMatch }) => {
+export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({
+  user,
+  savedBotCode = '',
+  savedBotVersion = 0,
+  onLaunchMatch,
+}) => {
   const { notify } = useToast();
 
   // Host Room Config
@@ -57,6 +64,7 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
     peerRef.current = peer;
 
     const listeners = new Set<(payload: any) => void>();
+    const bufferedPackets: any[] = [];
     const spectators = new Set<DataConnection>();
     let player2Conn: DataConnection | null = null;
     const rules = buildRulesFromPreset('standard', 1);
@@ -122,6 +130,8 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
             player1Name: myDisplayName,
             player2Name: guestName,
             rules,
+            lockedBotCode: hostMode === 'bot' ? (savedBotCode || null) : null,
+            lockedBotVersion: hostMode === 'bot' ? (savedBotVersion || 0) : 0,
             p2pSend: (payload) => {
               player2Conn?.send(payload);
               for (const spec of spectators) {
@@ -130,6 +140,10 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
             },
             subscribePeerData: (cb) => {
               listeners.add(cb);
+              while (bufferedPackets.length > 0) {
+                const pkt = bufferedPackets.shift();
+                try { cb(pkt); } catch (e) { console.error('P2P buffer dispatch error:', e); }
+              }
               return () => listeners.delete(cb);
             },
           };
@@ -143,7 +157,11 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
         for (const spec of spectators) {
           if (spec.open && spec !== conn) spec.send(raw);
         }
-        for (const fn of listeners) fn(raw);
+        if (listeners.size === 0) {
+          bufferedPackets.push(raw);
+        } else {
+          for (const fn of listeners) fn(raw);
+        }
       });
 
       conn.on('close', () => {
@@ -174,6 +192,7 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
     setJoiningRole(role);
     const peer = new Peer();
     const listeners = new Set<(payload: any) => void>();
+    const bufferedPackets: any[] = [];
 
     peer.on('open', () => {
       const conn = peer.connect(`ottv2-room-${cleaned.toLowerCase()}`, { reliable: true });
@@ -209,16 +228,26 @@ export const PrivateRoomView: React.FC<PrivateRoomViewProps> = ({ user, onLaunch
             player1Name: raw.player1Name || 'Chủ phòng',
             player2Name: raw.player2Name || myDisplayName,
             rules: raw.rules || null,
+            lockedBotCode: raw.mode === 'bot' ? (savedBotCode || null) : null,
+            lockedBotVersion: raw.mode === 'bot' ? (savedBotVersion || 0) : 0,
             p2pSend: (payload) => conn.send(payload),
             subscribePeerData: (cb) => {
               listeners.add(cb);
+              while (bufferedPackets.length > 0) {
+                const pkt = bufferedPackets.shift();
+                try { cb(pkt); } catch (e) { console.error('P2P buffer dispatch error:', e); }
+              }
               return () => listeners.delete(cb);
             },
           };
           onLaunchMatch(session, () => peer.destroy());
           return;
         }
-        for (const fn of listeners) fn(raw);
+        if (listeners.size === 0) {
+          bufferedPackets.push(raw);
+        } else {
+          for (const fn of listeners) fn(raw);
+        }
       });
 
       conn.on('close', () => {

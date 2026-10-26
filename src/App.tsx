@@ -501,6 +501,8 @@ function AppWorkspace() {
               {activeView === 'private-room' && (
                 <PrivateRoomView
                   user={user}
+                  savedBotCode={savedBotCode}
+                  savedBotVersion={savedBotVersion}
                   onLaunchMatch={(session, cleanupFn) => {
                     p2pCleanupRef.current = cleanupFn || null;
                     setActiveMatch(session);
