@@ -149,6 +149,7 @@ interface UserRecord {
   display_name: string;
   avatar_id?: string;
   avatar_url?: string;
+  profile_background_url?: string;
   elo: number;
   elo_peak?: number;
   is_admin: boolean;
@@ -545,6 +546,7 @@ function publicUser(u: UserRecord) {
     elo: u.elo,
     avatarId: u.avatar_id || 'pumpkin',
     avatarUrl: u.avatar_url || null,
+    profileBackgroundUrl: u.profile_background_url || null,
     highestElo,
     isAdmin: Boolean(u.is_admin),
     activeBotVersion: u.active_bot_version || 0,
@@ -1247,6 +1249,18 @@ export async function startServer(options: ServerStartOptions = {}) {
         res.status(400).json({ error: 'Ảnh đại diện cần là PNG, JPEG hoặc WebP và tối đa 1 MB.' });
         return;
       }
+      const profileBackgroundDataUrl =
+        req.body?.profileBackgroundDataUrl === undefined
+          ? undefined
+          : req.body.profileBackgroundDataUrl;
+      if (
+        profileBackgroundDataUrl !== undefined &&
+        profileBackgroundDataUrl !== null &&
+        !isAllowedAvatarDataUrl(profileBackgroundDataUrl)
+      ) {
+        res.status(400).json({ error: 'Ảnh nền cần là PNG, JPEG hoặc WebP và tối đa 1 MB.' });
+        return;
+      }
       if (avatarId !== null && !['pumpkin', 'ghost', 'bat', 'knight', 'fox', 'crown'].includes(avatarId)) {
         res.status(400).json({ error: 'Diện mạo kỳ thủ không hợp lệ.' });
         return;
@@ -1263,7 +1277,13 @@ export async function startServer(options: ServerStartOptions = {}) {
         res.status(400).json({ error: 'Cần nhập cả mật khẩu hiện tại và mật khẩu mới.' });
         return;
       }
-      if (displayName === null && avatarId === null && avatarDataUrl === undefined && !newPassword) {
+      if (
+        displayName === null &&
+        avatarId === null &&
+        avatarDataUrl === undefined &&
+        profileBackgroundDataUrl === undefined &&
+        !newPassword
+      ) {
         res.status(400).json({ error: 'Hãy chọn nội dung cần cập nhật.' });
         return;
       }
@@ -1277,6 +1297,9 @@ export async function startServer(options: ServerStartOptions = {}) {
         user.avatar_url = undefined;
       } else if (avatarDataUrl !== undefined) {
         user.avatar_url = avatarDataUrl || undefined;
+      }
+      if (profileBackgroundDataUrl !== undefined) {
+        user.profile_background_url = profileBackgroundDataUrl || undefined;
       }
       if (newPassword) user.password_hash = await hashPassword(newPassword);
       saveDb();

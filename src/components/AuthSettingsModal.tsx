@@ -2,11 +2,13 @@ import React, { useEffect, useState } from 'react';
 import {
   Bot,
   Camera,
-  ChevronDown,
+  Coins,
   History,
+  ImagePlus,
   KeyRound,
   LockKeyhole,
   LogOut,
+  Palette,
   Swords,
   Trophy,
   Upload,
@@ -61,12 +63,14 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   const [displayName, setDisplayName] = useState('');
 
   // Profile states
-  const [avatarPickerOpen, setAvatarPickerOpen] = useState(false);
-  const [passwordFormOpen, setPasswordFormOpen] = useState(false);
+  const [profileLayer, setProfileLayer] = useState<
+    'avatar' | 'background' | 'history' | 'password' | null
+  >(null);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const avatarFileInputRef = React.useRef<HTMLInputElement>(null);
+  const backgroundFileInputRef = React.useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -74,8 +78,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
-      setAvatarPickerOpen(false);
-      setPasswordFormOpen(false);
+      setProfileLayer(null);
     }
   }, [open, initialTab, user]);
 
@@ -138,7 +141,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       setCurrentPassword('');
       setNewPassword('');
       setConfirmNewPassword('');
-      setPasswordFormOpen(false);
+      setProfileLayer(null);
       notify('Đã đổi mật khẩu thành công.', 'success');
     } catch (err: any) {
       notify(err.message || 'Không thể đổi mật khẩu.', 'error');
@@ -153,7 +156,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     try {
       const updated = await backendClient.updateProfile({ avatarId });
       onUserUpdated(updated);
-      setAvatarPickerOpen(false);
+      setProfileLayer(null);
       notify('Đã cập nhật diện mạo kỳ thủ.', 'success');
     } catch (err: any) {
       notify(err.message || 'Không thể cập nhật diện mạo.', 'error');
@@ -162,16 +165,19 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     }
   };
 
-  const handleAvatarUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleProfileImageUpload = (
+    event: React.ChangeEvent<HTMLInputElement>,
+    kind: 'avatar' | 'background'
+  ) => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return;
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
-      notify('Ảnh đại diện chỉ hỗ trợ PNG, JPEG hoặc WebP.', 'error');
+      notify('Ảnh chỉ hỗ trợ PNG, JPEG hoặc WebP.', 'error');
       return;
     }
     if (file.size > 1024 * 1024) {
-      notify('Ảnh đại diện cần có dung lượng tối đa 1 MB.', 'error');
+      notify('Ảnh cần có dung lượng tối đa 1 MB.', 'error');
       return;
     }
 
@@ -184,12 +190,16 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       }
       setLoading(true);
       try {
-        const updated = await backendClient.updateProfile({ avatarDataUrl: reader.result });
+        const updated = await backendClient.updateProfile(
+          kind === 'avatar'
+            ? { avatarDataUrl: reader.result }
+            : { profileBackgroundDataUrl: reader.result }
+        );
         onUserUpdated(updated);
-        setAvatarPickerOpen(false);
-        notify('Đã tải ảnh đại diện lên thành công.', 'success');
+        setProfileLayer(null);
+        notify(kind === 'avatar' ? 'Đã cập nhật ảnh đại diện.' : 'Đã cập nhật ảnh nền hồ sơ.', 'success');
       } catch (err: any) {
-        notify(err.message || 'Không thể lưu ảnh đại diện.', 'error');
+        notify(err.message || 'Không thể lưu ảnh.', 'error');
       } finally {
         setLoading(false);
       }
@@ -381,16 +391,24 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
             <div className="space-y-5">
               <section className="relative isolate min-h-56 overflow-hidden rounded-2xl border border-white/10 bg-[#171326]">
                 <img
-                  src={profileBackdrop}
+                  src={user.profileBackgroundUrl || profileBackdrop}
                   alt=""
                   className="absolute inset-0 -z-20 h-full w-full object-cover object-center opacity-65"
                 />
                 <div className="absolute inset-0 -z-10 bg-gradient-to-r from-[#100b1b] via-[#100b1b]/85 to-[#100b1b]/30" />
+                <button
+                  type="button"
+                  onClick={() => setProfileLayer('background')}
+                  className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-lg border border-white/20 bg-black/40 px-2.5 py-1.5 text-[10px] font-semibold text-white/90 backdrop-blur hover:bg-black/60"
+                >
+                  <ImagePlus className="h-3.5 w-3.5" />
+                  Đổi ảnh nền
+                </button>
                 <div className="flex h-full min-h-56 flex-col justify-between gap-6 p-5 sm:flex-row sm:items-end sm:p-6">
                   <div className="flex items-center gap-4">
                     <button
                       type="button"
-                      onClick={() => setAvatarPickerOpen((isOpen) => !isOpen)}
+                      onClick={() => setProfileLayer('avatar')}
                       aria-label="Mở lựa chọn ảnh đại diện"
                       title="Đổi ảnh đại diện"
                       className="group relative flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-amber-200/40 bg-black/35 text-5xl shadow-lg backdrop-blur-sm"
@@ -411,7 +429,6 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                       <h3 className="mt-1 break-words text-2xl font-extrabold text-white drop-shadow sm:text-3xl">
                         {user.displayName}
                       </h3>
-                      <p className="mt-1 text-xs text-white/70">Tên đăng nhập: *****</p>
                       <div className="mt-3 flex flex-wrap items-center gap-2">
                         <span className="inline-flex items-center gap-1 rounded-full border border-amber-200/40 bg-amber-300/15 px-2.5 py-1 text-xs font-bold text-amber-100">
                           <Trophy className="h-3.5 w-3.5" />
@@ -424,20 +441,269 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                         )}
                       </div>
                     </div>
+                    {user && profileLayer && (
+                      <div
+                        className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+                        onClick={() => setProfileLayer(null)}
+                      >
+                        <section
+                          role="dialog"
+                          aria-modal="true"
+                          aria-labelledby="profile-layer-title"
+                          className="max-h-[85vh] w-full max-w-xl overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[#110d1b] p-5 shadow-2xl sm:p-6"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <div className="mb-5 flex items-center justify-between border-b border-[var(--border-subtle)] pb-3">
+                            <h3 id="profile-layer-title" className="text-base font-bold text-[var(--text-primary)]">
+                              {profileLayer === 'avatar'
+                                ? 'Chọn ảnh đại diện'
+                                : profileLayer === 'background'
+                                ? 'Chọn ảnh nền hồ sơ'
+                                : profileLayer === 'history'
+                                ? 'Lịch sử thi đấu'
+                                : 'Đổi mật khẩu'}
+                            </h3>
+                            <button
+                              type="button"
+                              onClick={() => setProfileLayer(null)}
+                              aria-label="Đóng lớp hồ sơ"
+                              className="rounded-lg p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+                            >
+                              <X className="h-5 w-5" />
+                            </button>
+                          </div>
+
+                          {profileLayer === 'avatar' && (
+                            <div>
+                              <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+                                {PLAYER_AVATARS.map((avatar) => {
+                                  const selected = !user.avatarUrl && (user.avatarId || 'pumpkin') === avatar.id;
+                                  return (
+                                    <button
+                                      key={avatar.id}
+                                      type="button"
+                                      disabled={loading}
+                                      onClick={() => void handleAvatarChange(avatar.id)}
+                                      aria-label={`Chọn avatar ${avatar.label}`}
+                                      title={avatar.label}
+                                      className={`rounded-xl border p-3 text-3xl transition-colors disabled:opacity-50 ${
+                                        selected
+                                          ? 'border-[var(--accent-primary)] bg-[var(--accent-primary)]/15'
+                                          : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:border-[var(--accent-primary)]'
+                                      }`}
+                                    >
+                                      {avatar.emoji}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                              <input
+                                ref={avatarFileInputRef}
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={(event) => handleProfileImageUpload(event, 'avatar')}
+                                className="hidden"
+                              />
+                              <button
+                                type="button"
+                                disabled={loading}
+                                onClick={() => avatarFileInputRef.current?.click()}
+                                className="mt-4 inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50"
+                              >
+                                <Upload className="h-4 w-4 text-[var(--accent-primary)]" />
+                                Tải avatar từ máy
+                              </button>
+                              <p className="mt-2 text-[10px] text-[var(--text-muted)]">
+                                PNG, JPEG hoặc WebP, tối đa 1 MB.
+                              </p>
+                            </div>
+                          )}
+
+                          {profileLayer === 'background' && (
+                            <div>
+                              <div className="overflow-hidden rounded-xl border border-[var(--border-subtle)]">
+                                <img
+                                  src={user.profileBackgroundUrl || profileBackdrop}
+                                  alt="Ảnh nền hồ sơ hiện tại"
+                                  className="h-40 w-full object-cover"
+                                />
+                              </div>
+                              <input
+                                ref={backgroundFileInputRef}
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={(event) => handleProfileImageUpload(event, 'background')}
+                                className="hidden"
+                              />
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  disabled={loading}
+                                  onClick={() => backgroundFileInputRef.current?.click()}
+                                  className="inline-flex items-center gap-2 rounded-lg bg-[var(--accent-primary)] px-3 py-2 text-xs font-semibold text-white hover:bg-[var(--accent-primary-hover)] disabled:opacity-50"
+                                >
+                                  <ImagePlus className="h-4 w-4" />
+                                  Chọn ảnh nền từ máy
+                                </button>
+                                {user.profileBackgroundUrl && (
+                                  <button
+                                    type="button"
+                                    disabled={loading}
+                                    onClick={async () => {
+                                      setLoading(true);
+                                      try {
+                                        const updated = await backendClient.updateProfile({
+                                          profileBackgroundDataUrl: null,
+                                        });
+                                        onUserUpdated(updated);
+                                        setProfileLayer(null);
+                                        notify('Đã khôi phục ảnh nền mặc định.', 'success');
+                                      } catch (err: any) {
+                                        notify(err.message || 'Không thể khôi phục ảnh nền.', 'error');
+                                      } finally {
+                                        setLoading(false);
+                                      }
+                                    }}
+                                    className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50"
+                                  >
+                                    <Palette className="h-4 w-4" />
+                                    Dùng nền mặc định
+                                  </button>
+                                )}
+                              </div>
+                              <p className="mt-2 text-[10px] text-[var(--text-muted)]">
+                                PNG, JPEG hoặc WebP, tối đa 1 MB.
+                              </p>
+                            </div>
+                          )}
+
+                          {profileLayer === 'history' && (
+                            recentCompletedMatches.length ? (
+                              <div className="space-y-2">
+                                {recentCompletedMatches.map((match) => {
+                                  const isDraw = !match.winner_id;
+                                  const won = match.winner_id === user.id;
+                                  const eloLabel = getMatchEloLabel(match, user.id);
+                                  return (
+                                    <div
+                                      key={match.id}
+                                      className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--bg-canvas)] px-3 py-3"
+                                    >
+                                      <div className="min-w-0">
+                                        <p className="truncate text-xs font-medium text-[var(--text-primary)]">
+                                          {match.player1} <span className="text-[var(--text-muted)]">vs</span> {match.player2}
+                                        </p>
+                                        <p className="mt-1 text-[10px] text-[var(--text-muted)]">
+                                          {getMatchFormatLabel(match)} · {new Date(match.created_at).toLocaleDateString('vi-VN')}
+                                        </p>
+                                      </div>
+                                      <p
+                                        className={`text-xs font-semibold tabular-nums ${
+                                          isDraw ? 'text-amber-300' : won ? 'text-emerald-400' : 'text-red-400'
+                                        }`}
+                                      >
+                                        {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
+                                        {eloLabel ? ` · ${eloLabel}` : ''}
+                                      </p>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <p className="py-8 text-center text-xs text-[var(--text-muted)]">
+                                Chưa có trận xếp hạng nào được ghi nhận.
+                              </p>
+                            )
+                          )}
+
+                          {profileLayer === 'password' && (
+                            <form onSubmit={handlePasswordChange} className="space-y-3">
+                              <div>
+                                <label
+                                  htmlFor="profile-current-password"
+                                  className="mb-1 block text-xs font-medium text-[var(--text-secondary)]"
+                                >
+                                  Mật khẩu hiện tại
+                                </label>
+                                <input
+                                  id="profile-current-password"
+                                  type="password"
+                                  required
+                                  autoComplete="current-password"
+                                  value={currentPassword}
+                                  onChange={(event) => setCurrentPassword(event.target.value)}
+                                  className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3.5 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
+                                />
+                              </div>
+                              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                                <div>
+                                  <label
+                                    htmlFor="profile-new-password"
+                                    className="mb-1 block text-xs font-medium text-[var(--text-secondary)]"
+                                  >
+                                    Mật khẩu mới (ít nhất 10 ký tự)
+                                  </label>
+                                  <input
+                                    id="profile-new-password"
+                                    type="password"
+                                    required
+                                    minLength={10}
+                                    autoComplete="new-password"
+                                    value={newPassword}
+                                    onChange={(event) => setNewPassword(event.target.value)}
+                                    className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3.5 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
+                                  />
+                                </div>
+                                <div>
+                                  <label
+                                    htmlFor="profile-confirm-new-password"
+                                    className="mb-1 block text-xs font-medium text-[var(--text-secondary)]"
+                                  >
+                                    Nhập lại mật khẩu mới
+                                  </label>
+                                  <input
+                                    id="profile-confirm-new-password"
+                                    type="password"
+                                    required
+                                    minLength={10}
+                                    autoComplete="new-password"
+                                    value={confirmNewPassword}
+                                    onChange={(event) => setConfirmNewPassword(event.target.value)}
+                                    className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3.5 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
+                                  />
+                                </div>
+                              </div>
+                              <div className="flex justify-end pt-2">
+                                <button
+                                  type="submit"
+                                  disabled={loading}
+                                  className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--accent-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--accent-primary-hover)] disabled:opacity-50"
+                                >
+                                  <KeyRound className="h-3.5 w-3.5" />
+                                  {loading ? 'Đang đổi mật khẩu…' : 'Xác nhận đổi mật khẩu'}
+                                </button>
+                              </div>
+                            </form>
+                          )}
+                        </section>
+                      </div>
+                    )}
                   </div>
                   <div className="flex shrink-0 items-end justify-between gap-6 sm:flex-col sm:items-end sm:gap-3">
                     <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-left sm:text-right">
                       <div>
                         <p className="text-[9px] uppercase tracking-[0.12em] text-white/65">Elo hiện tại</p>
-                        <p className="mt-0.5 text-xl font-black tabular-nums text-white">
-                          {user.elo}<span className="ml-1 text-[10px] font-semibold text-amber-200">Elo</span>
+                        <p className="mt-0.5 flex items-center gap-1.5 text-xl font-black tabular-nums text-white sm:justify-end">
+                          <Coins className="h-5 w-5 text-amber-300 drop-shadow-[0_0_5px_rgba(252,211,77,0.65)]" />
+                          {user.elo}<span className="text-[10px] font-semibold text-amber-200">Elo</span>
                         </p>
                         <p className="text-[10px] text-amber-100">Hạng {rank}</p>
                       </div>
                       <div>
                         <p className="text-[9px] uppercase tracking-[0.12em] text-white/65">Elo cao nhất</p>
-                        <p className="mt-0.5 text-xl font-black tabular-nums text-white">
-                          {highestElo}<span className="ml-1 text-[10px] font-semibold text-amber-200">Elo</span>
+                        <p className="mt-0.5 flex items-center gap-1.5 text-xl font-black tabular-nums text-white sm:justify-end">
+                          <Coins className="h-5 w-5 text-amber-300 drop-shadow-[0_0_5px_rgba(252,211,77,0.65)]" />
+                          {highestElo}<span className="text-[10px] font-semibold text-amber-200">Elo</span>
                         </p>
                         <p className="text-[10px] text-amber-100">Hạng {highestRank}</p>
                       </div>
@@ -449,58 +715,6 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                   </div>
                 </div>
               </section>
-
-              {avatarPickerOpen && (
-                <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-[var(--text-primary)]">Chọn ảnh đại diện</h3>
-                    <button
-                      type="button"
-                      onClick={() => setAvatarPickerOpen(false)}
-                      className="text-xs text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                    >
-                      Đóng
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-6 gap-2">
-                    {PLAYER_AVATARS.map((avatar) => {
-                      const selected = !user.avatarUrl && (user.avatarId || 'pumpkin') === avatar.id;
-                      return (
-                        <button
-                          key={avatar.id}
-                          type="button"
-                          disabled={loading}
-                          onClick={() => void handleAvatarChange(avatar.id)}
-                          aria-label={`Chọn avatar ${avatar.label}`}
-                          title={avatar.label}
-                          className={`rounded-xl border p-2 text-2xl transition-colors disabled:opacity-50 ${selected ? 'border-[var(--accent-primary)] bg-[var(--accent-primary)]/15' : 'border-[var(--border-subtle)] bg-[var(--bg-panel)] hover:border-[var(--accent-primary)]'}`}
-                        >
-                          {avatar.emoji}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <input
-                    ref={avatarFileInputRef}
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    onChange={handleAvatarUpload}
-                    className="hidden"
-                  />
-                  <button
-                    type="button"
-                    disabled={loading}
-                    onClick={() => avatarFileInputRef.current?.click()}
-                    className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50"
-                  >
-                    <Upload className="h-4 w-4 text-[var(--accent-primary)]" />
-                    Tải ảnh từ máy lên
-                  </button>
-                  <p className="mt-2 text-[10px] text-[var(--text-muted)]">
-                    Chỉ nhận PNG, JPEG hoặc WebP, tối đa 1 MB.
-                  </p>
-                </section>
-              )}
 
               <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 {([
@@ -542,67 +756,25 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                 Thống kê tính trên tối đa 50 trận gần nhất, tách riêng từng thể thức.
               </p>
 
-              <details className="group rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-                  <span className="flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)]">
-                    <History className="h-4 w-4 text-[var(--accent-primary)]" />
-                    Lịch sử thi đấu
-                  </span>
-                  <span className="flex items-center gap-2 text-[10px] text-[var(--text-muted)]">
-                    {recentCompletedMatches.length} trận gần nhất
-                    <ChevronDown className="h-4 w-4 transition-transform group-open:rotate-180" />
-                  </span>
-                </summary>
-                <div className="mt-3">
-                {recentCompletedMatches.length ? (
-                  <div className="space-y-2">
-                    {recentCompletedMatches.map((match) => {
-                      const isDraw = !match.winner_id;
-                      const won = match.winner_id === user.id;
-                      const eloLabel = getMatchEloLabel(match, user.id);
-                      return (
-                        <div
-                          key={match.id}
-                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--bg-panel)] px-3 py-2"
-                        >
-                          <div className="min-w-0">
-                            <p className="truncate text-xs font-medium text-[var(--text-primary)]">
-                              {match.player1} <span className="text-[var(--text-muted)]">vs</span> {match.player2}
-                            </p>
-                            <p className="mt-0.5 text-[10px] text-[var(--text-muted)]">
-                              {getMatchFormatLabel(match)} ·{' '}
-                              {new Date(match.created_at).toLocaleDateString('vi-VN')}
-                            </p>
-                          </div>
-                          <p
-                            className={`text-xs font-semibold tabular-nums ${
-                              isDraw
-                                ? 'text-amber-300'
-                                : won
-                                ? 'text-emerald-400'
-                                : 'text-red-400'
-                            }`}
-                          >
-                            {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
-                            {eloLabel ? ` · ${eloLabel}` : ''}
-                          </p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <p className="py-3 text-center text-xs text-[var(--text-muted)]">
-                    Chưa có trận xếp hạng nào được ghi nhận.
-                  </p>
-                )}
-                </div>
-              </details>
-
-              <div className="flex items-center justify-between p-4 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)]">
-                <div>
-                  <p className="text-sm font-semibold text-[var(--text-primary)]">Tài khoản đăng nhập</p>
-                  <p className="mt-0.5 text-xs text-[var(--text-muted)]">*****</p>
-                </div>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setProfileLayer('history')}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3 py-3 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent-primary)]"
+                >
+                  <History className="h-4 w-4 text-[var(--accent-primary)]" />
+                  Lịch sử đấu
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProfileLayer('password')}
+                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3 py-3 text-xs font-semibold text-[var(--text-primary)] transition-colors hover:border-[var(--accent-primary)]"
+                >
+                  <LockKeyhole className="h-4 w-4 text-[var(--accent-primary)]" />
+                  Đổi mật khẩu
+                </button>
+              </div>
+              <div className="flex justify-end">
                 <button
                   type="button"
                   onClick={() => {
@@ -611,96 +783,12 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                     notify('Đã đăng xuất tài khoản.', 'info');
                     onClose();
                   }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-red-300 hover:bg-red-500/15 transition-colors cursor-pointer"
+                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-red-300 transition-colors hover:bg-red-500/15"
                 >
-                  <LogOut className="w-3.5 h-3.5" />
+                  <LogOut className="h-3.5 w-3.5" />
                   Đăng xuất
                 </button>
               </div>
-
-              <section className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)]">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (passwordFormOpen) {
-                      setCurrentPassword('');
-                      setNewPassword('');
-                      setConfirmNewPassword('');
-                    }
-                    setPasswordFormOpen(!passwordFormOpen);
-                  }}
-                  aria-expanded={passwordFormOpen}
-                  className="flex w-full items-center justify-between gap-3 p-4 text-left"
-                >
-                  <span className="flex items-center gap-2 text-sm font-semibold text-[var(--text-primary)]">
-                    <LockKeyhole className="h-4 w-4 text-[var(--accent-primary)]" />
-                    Đổi mật khẩu
-                  </span>
-                  <ChevronDown
-                    className={`h-4 w-4 text-[var(--text-muted)] transition-transform ${passwordFormOpen ? 'rotate-180' : ''}`}
-                  />
-                </button>
-                {passwordFormOpen && (
-                  <form onSubmit={handlePasswordChange} className="space-y-3 border-t border-[var(--border-subtle)] p-4">
-                    <div>
-                      <label htmlFor="profile-current-password" className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">
-                        Mật khẩu hiện tại
-                      </label>
-                      <input
-                        id="profile-current-password"
-                        type="password"
-                        required
-                        autoComplete="current-password"
-                        value={currentPassword}
-                        onChange={(e) => setCurrentPassword(e.target.value)}
-                        className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3.5 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
-                      />
-                    </div>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <div>
-                        <label htmlFor="profile-new-password" className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">
-                          Mật khẩu mới (ít nhất 10 ký tự)
-                        </label>
-                        <input
-                          id="profile-new-password"
-                          type="password"
-                          required
-                          minLength={10}
-                          autoComplete="new-password"
-                          value={newPassword}
-                          onChange={(e) => setNewPassword(e.target.value)}
-                          className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3.5 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
-                        />
-                      </div>
-                      <div>
-                        <label htmlFor="profile-confirm-new-password" className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">
-                          Nhập lại mật khẩu mới
-                        </label>
-                        <input
-                          id="profile-confirm-new-password"
-                          type="password"
-                          required
-                          minLength={10}
-                          autoComplete="new-password"
-                          value={confirmNewPassword}
-                          onChange={(e) => setConfirmNewPassword(e.target.value)}
-                          className="w-full rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] px-3.5 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--accent-primary)] focus:outline-none"
-                        />
-                      </div>
-                    </div>
-                    <div className="flex justify-end pt-1">
-                      <button
-                        type="submit"
-                        disabled={loading}
-                        className="inline-flex items-center gap-1.5 rounded-xl bg-[var(--accent-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--accent-primary-hover)] disabled:opacity-50"
-                      >
-                        <KeyRound className="w-3.5 h-3.5" />
-                        {loading ? 'Đang đổi mật khẩu…' : 'Xác nhận đổi mật khẩu'}
-                      </button>
-                    </div>
-                  </form>
-                )}
-              </section>
             </div>
           )}
         </div>

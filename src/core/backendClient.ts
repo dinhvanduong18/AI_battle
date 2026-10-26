@@ -6,6 +6,7 @@ export interface BackendUser {
   highestElo?: number;
   avatarId?: PlayerAvatarId;
   avatarUrl?: string | null;
+  profileBackgroundUrl?: string | null;
   isAdmin?: boolean;
   activeBotVersion?: number;
 }
@@ -228,6 +229,7 @@ export class BackendClient {
     displayName?: string;
     avatarId?: PlayerAvatarId;
     avatarDataUrl?: string | null;
+    profileBackgroundDataUrl?: string | null;
     currentPassword?: string;
     newPassword?: string;
     confirmNewPassword?: string;

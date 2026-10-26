@@ -249,6 +249,13 @@ test('Profile settings: store uploaded avatar and require matching password conf
     assert.equal(avatarUpdate.data.user.avatarUrl, pngDataUrl);
     const persistedProfile = await h.api('GET', '/api/me', player.token);
     assert.equal(persistedProfile.data.user.avatarUrl, pngDataUrl);
+    const backgroundUpdate = await h.api('PATCH', '/api/me', player.token, {
+      profileBackgroundDataUrl: pngDataUrl,
+    });
+    assert.equal(backgroundUpdate.status, 200, JSON.stringify(backgroundUpdate.data));
+    assert.equal(backgroundUpdate.data.user.profileBackgroundUrl, pngDataUrl);
+    const persistedBackground = await h.api('GET', '/api/me', player.token);
+    assert.equal(persistedBackground.data.user.profileBackgroundUrl, pngDataUrl);
 
     const invalidAvatar = await h.api('PATCH', '/api/me', player.token, {
       avatarDataUrl: 'data:image/png;base64,SGVsbG8=',
