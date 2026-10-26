@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { KeyRound, LogOut, X } from 'lucide-react';
+import { Bot, KeyRound, LogOut, Swords, Trophy, X } from 'lucide-react';
+import profileBackdrop from '../assets/images/halloween_castle_pumpkins_bg_1792817506446.jpg';
 import {
   backendClient,
   getMatchEloLabel,
@@ -144,12 +145,21 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
           match.tournament_phase !== 'practice'
       )
     : [];
-  const wins = completedMatches.filter((match) => match.winner_id === user?.id).length;
-  const draws = completedMatches.filter((match) => !match.winner_id).length;
-  const losses = completedMatches.length - wins - draws;
-  const winRate = completedMatches.length
-    ? Math.round((wins / completedMatches.length) * 100)
-    : 0;
+  const getModeStats = (matchType: 'human' | 'bot') => {
+    const modeMatches = completedMatches.filter((match) => match.match_type === matchType);
+    const wins = modeMatches.filter((match) => match.winner_id === user?.id).length;
+    const draws = modeMatches.filter((match) => !match.winner_id).length;
+    const losses = modeMatches.length - wins - draws;
+    return {
+      total: modeMatches.length,
+      wins,
+      losses,
+      draws,
+      winRate: modeMatches.length ? Math.round((wins / modeMatches.length) * 100) : 0,
+    };
+  };
+  const humanStats = getModeStats('human');
+  const botStats = getModeStats('bot');
   const rank =
     (user?.elo ?? 0) >= 1600 ? 'Vàng' : (user?.elo ?? 0) >= 1350 ? 'Bạc' : 'Đồng';
   const recentCompletedMatches = completedMatches.slice(0, 5);
@@ -160,7 +170,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-6 shadow-2xl"
+        className="w-full max-w-3xl max-h-[92vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[#110d1b] p-5 shadow-2xl sm:p-6"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between pb-4 border-b border-[var(--border-subtle)]">
@@ -307,35 +317,93 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
 
           {user && (
             <div className="space-y-5">
-              <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <p className="text-xs text-[var(--text-secondary)]">Hạng kỳ thủ</p>
-                    <p className="mt-1 text-lg font-bold text-[var(--text-primary)]">
-                      {rank} <span className="text-sm font-medium text-[var(--text-muted)]">· {user.elo} Elo</span>
-                    </p>
-                    <p className="mt-1 text-[10px] text-[var(--text-muted)]">
-                      Thống kê dựa trên tối đa 50 trận gần nhất
-                    </p>
-                  </div>
-                  <span className="rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-3 py-1 text-xs font-semibold text-[var(--accent-primary)]">
-                    Tỷ lệ thắng {winRate}%
-                  </span>
-                </div>
-                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                  {[
-                    ['Số trận', completedMatches.length],
-                    ['Thắng', wins],
-                    ['Thua', losses],
-                    ['Hòa', draws],
-                  ].map(([label, value]) => (
-                    <div key={label} className="rounded-lg bg-[var(--bg-panel)] px-3 py-2 text-center">
-                      <p className="text-[10px] text-[var(--text-muted)]">{label}</p>
-                      <p className="mt-0.5 text-sm font-bold tabular-nums text-[var(--text-primary)]">{value}</p>
+              <section className="relative isolate min-h-56 overflow-hidden rounded-2xl border border-white/10 bg-[#171326]">
+                <img
+                  src={profileBackdrop}
+                  alt=""
+                  className="absolute inset-0 -z-20 h-full w-full object-cover object-center opacity-65"
+                />
+                <div className="absolute inset-0 -z-10 bg-gradient-to-r from-[#100b1b] via-[#100b1b]/85 to-[#100b1b]/30" />
+                <div className="flex h-full min-h-56 flex-col justify-between gap-6 p-5 sm:flex-row sm:items-end sm:p-6">
+                  <div className="flex items-center gap-4">
+                    <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl border border-amber-200/40 bg-black/35 text-5xl shadow-lg backdrop-blur-sm">
+                      {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
                     </div>
-                  ))}
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-200/80">
+                        Kỳ thủ OTTv2
+                      </p>
+                      <h3 className="mt-1 break-words text-2xl font-extrabold text-white drop-shadow sm:text-3xl">
+                        {user.displayName}
+                      </h3>
+                      <p className="mt-1 truncate text-xs text-white/70">{user.email}</p>
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <span className="inline-flex items-center gap-1 rounded-full border border-amber-200/40 bg-amber-300/15 px-2.5 py-1 text-xs font-bold text-amber-100">
+                          <Trophy className="h-3.5 w-3.5" />
+                          Hạng {rank}
+                        </span>
+                        {user.isAdmin && (
+                          <span className="rounded-full border border-white/20 bg-black/30 px-2.5 py-1 text-[10px] font-semibold text-white/80">
+                            Ban tổ chức
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-end justify-between gap-6 sm:flex-col sm:items-end sm:gap-3">
+                    <div className="text-left sm:text-right">
+                      <p className="text-[10px] uppercase tracking-[0.18em] text-white/65">Điểm xếp hạng</p>
+                      <p className="mt-0.5 text-3xl font-black tabular-nums text-white">
+                        {user.elo}<span className="ml-1 text-sm font-semibold text-amber-200">Elo</span>
+                      </p>
+                    </div>
+                    <div className="text-left sm:text-right">
+                      <p className="text-[10px] text-white/65">Trận đã ghi nhận</p>
+                      <p className="text-lg font-bold tabular-nums text-white">{completedMatches.length}</p>
+                    </div>
+                  </div>
                 </div>
               </section>
+
+              <section className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                {([
+                  { label: 'Người VS Người', icon: Swords, stats: humanStats, accent: 'text-sky-300', border: 'border-sky-300/25', fill: 'bg-sky-300/10' },
+                  { label: 'Bot VS Bot', icon: Bot, stats: botStats, accent: 'text-violet-300', border: 'border-violet-300/25', fill: 'bg-violet-300/10' },
+                ] as const).map(({ label, icon: ModeIcon, stats, accent, border, fill }) => (
+                  <div key={label} className={`rounded-xl border ${border} ${fill} p-4`}>
+                    <div className="flex items-center justify-between gap-3">
+                      <h3 className="flex items-center gap-2 text-xs font-bold text-[var(--text-primary)]">
+                        <ModeIcon className={`h-4 w-4 ${accent}`} />
+                        {label}
+                      </h3>
+                      <span className="text-[10px] text-[var(--text-muted)]">{stats.total} trận</span>
+                    </div>
+                    <div className="mt-3 flex items-end justify-between gap-4">
+                      <div>
+                        <p className={`text-3xl font-black tabular-nums ${accent}`}>{stats.winRate}%</p>
+                        <p className="text-[10px] text-[var(--text-muted)]">Tỷ lệ thắng</p>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 text-right">
+                        <div>
+                          <p className="text-sm font-bold tabular-nums text-emerald-400">{stats.wins}</p>
+                          <p className="text-[9px] text-[var(--text-muted)]">Thắng</p>
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold tabular-nums text-red-400">{stats.losses}</p>
+                          <p className="text-[9px] text-[var(--text-muted)]">Thua</p>
+                        </div>
+                        <div>
+                          <p className="text-sm font-bold tabular-nums text-amber-300">{stats.draws}</p>
+                          <p className="text-[9px] text-[var(--text-muted)]">Hòa</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </section>
+              <p className="-mt-3 text-right text-[10px] text-[var(--text-muted)]">
+                Thống kê tính trên tối đa 50 trận gần nhất, tách riêng từng thể thức.
+              </p>
 
               <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
                 <div className="mb-3 flex items-center justify-between">
@@ -386,19 +454,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
               </section>
 
               <div className="flex items-center justify-between p-4 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)]">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-[var(--p1-bg)] border border-[var(--p1-border)] flex items-center justify-center text-2xl">
-                    {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
-                  </div>
-                  <div>
-                    <div className="font-semibold text-sm text-[var(--text-primary)]">
-                      {user.displayName}
-                    </div>
-                    <div className="text-xs text-[var(--text-secondary)] tabular-nums">
-                      {user.email} · Elo {user.elo} {user.isAdmin ? '· Quyền BTC' : ''}
-                    </div>
-                  </div>
-                </div>
+                <p className="text-sm font-semibold text-[var(--text-primary)]">Tài khoản & diện mạo</p>
                 <button
                   type="button"
                   onClick={() => {
