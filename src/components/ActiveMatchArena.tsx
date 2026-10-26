@@ -1782,7 +1782,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
           <div className="p-4 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-2 text-xs text-[var(--text-secondary)]">
             <h4 className="font-bold text-[var(--text-primary)]">Quy tắc thắng & bảo vệ công bằng</h4>
-            <p>1. Chiếm một trong hai ô đích góc bàn cờ (a1 hoặc i9) hoặc diệt sạch 1 trong 3 hệ linh vật của đối phương.</p>
+            <p>1. Phe Cam thắng khi chiếm ô i9; phe Tím thắng khi chiếm ô a1. Hoặc diệt sạch 1 trong 3 hệ linh vật của đối phương.</p>
             <p>
               2. Hòa cờ khi lặp thế cờ 3 lần, 50 nước không ăn quân hoặc bên tới lượt hết nước đi hợp lệ.
             </p>

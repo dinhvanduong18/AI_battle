@@ -206,7 +206,7 @@ function HalloweenHeroVisual() {
 
       <div className="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
         <span>Di chuyển 1 ô (8 hướng)</span>
-        <span>Chiếm ô góc a1 / i9 hoặc diệt 1 hệ quân để thắng</span>
+        <span>Cam đến i9, Tím đến a1 hoặc diệt 1 hệ quân để thắng</span>
       </div>
     </div>
   );

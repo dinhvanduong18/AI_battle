@@ -361,7 +361,7 @@ export const MascotRulesLegend: React.FC<{ compact?: boolean }> = ({ compact = f
         <div className="pt-2 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
           <span className="inline-flex items-center gap-1.5">
             <HalloweenShrineGlyph kind="a1" isMini />
-            <span>Ô đích a1 / i9: Đưa quân vào thắng ngay</span>
+            <span>Ô đích riêng: Cam đến i9 · Tím đến a1</span>
           </span>
           <span className="inline-flex items-center gap-1.5">
             <HalloweenObstacleGlyph isMini />
@@ -372,4 +372,3 @@ export const MascotRulesLegend: React.FC<{ compact?: boolean }> = ({ compact = f
     </div>
   );
 };
-

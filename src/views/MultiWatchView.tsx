@@ -75,13 +75,15 @@ function pickFastExhibitionMove(state: GameState) {
   if (!moves.length) return null;
   let best = moves[0];
   let bestScore = -Infinity;
+  const targetRow = state.turn === 1 ? 0 : 8;
+  const targetCol = state.turn === 1 ? 8 : 0;
 
   for (const m of moves) {
-    if (m.to === 8 || m.to === 72) return { from: m.from, to: m.to };
+    if ((state.turn === 1 && m.to === 8) || (state.turn === 2 && m.to === 72)) {
+      return { from: m.from, to: m.to };
+    }
     let score = m.isAttack ? 145 : 0;
-    const distA1 = Math.abs(m.toRow - 8) + Math.abs(m.toCol - 0);
-    const distI9 = Math.abs(m.toRow - 0) + Math.abs(m.toCol - 8);
-    score -= Math.min(distA1, distI9) * 10;
+    score -= (Math.abs(m.toRow - targetRow) + Math.abs(m.toCol - targetCol)) * 10;
     score -= (Math.abs(m.toRow - 4) + Math.abs(m.toCol - 4)) * 2;
     score += (Math.random() - 0.5) * 18;
     if (score > bestScore) {

@@ -302,7 +302,7 @@ const DEFAULT_MINIMAX_PYTHON = `def get_next_move(my_player_id, game_state):
     valid_moves = game_state.get('validMoves', [])
     if not valid_moves:
         return None
-    goal_row, goal_col = (0, 0) if my_player_id == 1 else (8, 8)
+    goal_row, goal_col = (0, 8) if my_player_id == 1 else (8, 0)
     best_move = valid_moves[0]
     best_score = float('-inf')
     for move in valid_moves:
@@ -574,14 +574,14 @@ function pickTacticalBotMove(state: any, botSeat: 1 | 2) {
   if (!validMoves.length) return null;
   let best = validMoves[0];
   let bestScore = -Infinity;
+  const targetRow = botSeat === 1 ? 0 : 8;
+  const targetCol = botSeat === 1 ? 8 : 0;
   for (const m of validMoves) {
-    if (m.to === 8 || m.to === 72) {
+    if ((botSeat === 1 && m.to === 8) || (botSeat === 2 && m.to === 72)) {
       return { from: m.from, to: m.to };
     }
     let score = m.isAttack ? 145 : 0;
-    const distA1 = Math.abs(m.toRow - 8) + Math.abs(m.toCol - 0);
-    const distI9 = Math.abs(m.toRow - 0) + Math.abs(m.toCol - 8);
-    score -= Math.min(distA1, distI9) * 12;
+    score -= (Math.abs(m.toRow - targetRow) + Math.abs(m.toCol - targetCol)) * 12;
     score -= (Math.abs(m.toRow - 4) + absColDelta(m.toCol)) * 2;
     score += (Math.random() - 0.5) * 10;
     if (score > bestScore) {

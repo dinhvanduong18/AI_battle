@@ -7,8 +7,8 @@ export const COLS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] as const;
 export const ROWS = 9;
 export const TOTAL_CELLS = 81;
 
-export const SPECIAL_A1_INDEX = 72; // row 8, col 0 (P2 target / bottom-left shrine)
-export const SPECIAL_I9_INDEX = 8;  // row 0, col 8 (P1 target / top-right shrine)
+export const SPECIAL_A1_INDEX = 72; // row 8, col 0 (P2 purple target / bottom-left shrine)
+export const SPECIAL_I9_INDEX = 8;  // row 0, col 8 (P1 orange target / top-right shrine)
 
 export const PIECE = {
   EMPTY: 0,
@@ -339,7 +339,11 @@ export class OTTGameEngine {
   }
 
   static checkWinCondition(board: Int8Array, lastMove: LastMoveInfo | null, movingPlayer: 1 | 2): 1 | 2 | null {
-    if (lastMove && (lastMove.to === SPECIAL_A1_INDEX || lastMove.to === SPECIAL_I9_INDEX)) {
+    if (
+      lastMove &&
+      ((movingPlayer === 1 && lastMove.to === SPECIAL_I9_INDEX) ||
+        (movingPlayer === 2 && lastMove.to === SPECIAL_A1_INDEX))
+    ) {
       return movingPlayer;
     }
     const opponent = movingPlayer === 1 ? 2 : 1;
@@ -589,8 +593,8 @@ export class OTTGameEngine {
       specialCells: {
         a1: SPECIAL_A1_INDEX,
         i9: SPECIAL_I9_INDEX,
-        myWinIndex: myId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
-        opponentWinIndex: oppId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
+        myWinIndex: myId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
+        opponentWinIndex: oppId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
       },
       rules: state.rules || null,
       blockedCells: blockedArr,

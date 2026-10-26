@@ -236,12 +236,13 @@ function pickSparringMove(state, botSeat) {
   if (!validMoves.length) return null;
   let best = validMoves[0];
   let bestScore = -Infinity;
+  const targetRow = botSeat === 1 ? 0 : 8;
+  const targetCol = botSeat === 1 ? 8 : 0;
   for (const move of validMoves) {
     const winningCell = botSeat === 1 ? 8 : 72;
     if (move.to === winningCell) return { from: move.from, to: move.to };
-    const distanceToA1 = Math.abs(move.toRow - 8) + Math.abs(move.toCol);
-    const distanceToI9 = Math.abs(move.toRow) + Math.abs(move.toCol - 8);
-    const score = (move.isAttack ? 145 : 0) - Math.min(distanceToA1, distanceToI9) * 12 -
+    const targetDistance = Math.abs(move.toRow - targetRow) + Math.abs(move.toCol - targetCol);
+    const score = (move.isAttack ? 145 : 0) - targetDistance * 12 -
       (Math.abs(move.toRow - 4) + Math.abs(move.toCol - 4)) * 2 + Math.random() * 10;
     if (score > bestScore) {
       bestScore = score;

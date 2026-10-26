@@ -98,7 +98,7 @@ def get_next_move(my_player_id, game_state):
     best_score = float('-inf')
 
     for move in valid_moves:
-        if (move['toRow'], move['toCol']) in [(0, 8), (8, 0)]:
+        if (move['toRow'], move['toCol']) == ((0, 8) if my_player_id == 1 else (8, 0)):
             return move
 
         score = 160 if move.get('isAttack') else 0
@@ -142,7 +142,7 @@ def get_next_move(my_player_id, game_state):
     best_score = float('-inf')
 
     for move in valid_moves:
-        if move.get('to') in [8, 72]:
+        if move.get('to') == (8 if my_player_id == 1 else 72):
             return move
 
         score = 0

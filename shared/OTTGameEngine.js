@@ -54,6 +54,7 @@
     };
 
     // Special win cells
+    // a1: purple (Player 2) target; i9: orange (Player 1) target
     // a1: col 0, row 8 -> index 8*9 + 0 = 72
     // i9: col 8, row 0 -> index 0*9 + 8 = 8
     const SPECIAL_A1_INDEX = 72;
@@ -413,12 +414,16 @@
 
         /**
          * Check win condition after a move is made
-         * 1. Occupation of Special Win Square: a1 (72) or i9 (8)
+         * 1. Orange (Player 1) reaches i9 (8), or purple (Player 2) reaches a1 (72)
          * 2. Total elimination of any 1 piece type of the opponent (rock, paper, or scissors)
          */
         static checkWinCondition(board, lastMove, movingPlayer) {
             // Rule 1: Special Win Square reached on this move
-            if (lastMove && (lastMove.to === SPECIAL_A1_INDEX || lastMove.to === SPECIAL_I9_INDEX)) {
+            if (
+                lastMove &&
+                ((movingPlayer === 1 && lastMove.to === SPECIAL_I9_INDEX) ||
+                    (movingPlayer === 2 && lastMove.to === SPECIAL_A1_INDEX))
+            ) {
                 return movingPlayer;
             }
 
@@ -603,8 +608,8 @@
                 specialCells: {
                     a1: SPECIAL_A1_INDEX,
                     i9: SPECIAL_I9_INDEX,
-                    myWinIndex: myId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
-                    opponentWinIndex: oppId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX
+                    myWinIndex: myId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
+                    opponentWinIndex: oppId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX
                 },
                 rules: state.rules || null,
                 blockedCells: state.rules?.blockedCells || []

@@ -437,7 +437,7 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
     assert.equal(submit.data.drawReason, 'threefold-repetition');
     assert.equal(submit.data.eloUpdated, true);
 
-    // Now play a second Bot-vs-Bot match to a decisive win (seat 1 marches to goal cell 72) and verify Elo updates + replay retrieval
+    // Now play a second Bot-vs-Bot match to a decisive win (seat 1 marches to goal cell 8) and verify Elo updates + replay retrieval
     const pairedWin = await h.pairBotMatch(u1, u2);
     await h.markBothBotsReady(pairedWin);
 
@@ -445,21 +445,27 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
     const winInitialSerialized = OTTGameEngine.serialize(winState);
     const winReplayMoves = [];
 
-    for (let step = 0; step < 30 && !OTTGameEngine.isGameOver(winState); step++) {
+    for (let step = 0; step < 80 && !OTTGameEngine.isGameOver(winState); step++) {
       const legal = OTTGameEngine.getAllValidMoves(winState);
       let chosen;
       if (winState.turn === 1) {
-        // Seat 1 marches toward goal square 72 (row 8, col 0)
+        // Seat 1 marches toward its goal square 8 (row 0, col 8)
         chosen = legal
           .slice()
           .sort((a, b) => {
-            const da = Math.abs(Math.floor(a.to / 9) - 8) + (a.to % 9);
-            const db = Math.abs(Math.floor(b.to / 9) - 8) + (b.to % 9);
+            const da = Math.floor(a.to / 9) + Math.abs((a.to % 9) - 8);
+            const db = Math.floor(b.to / 9) + Math.abs((b.to % 9) - 8);
             return da - db;
           })[0];
       } else {
-        // Seat 2 makes a safe non-goal move so Seat 1 reaches goal cleanly
-        chosen = legal.find((m) => m.to !== 8 && m.to !== 72) || legal[0];
+        // Seat 2 makes a safe non-goal move so Seat 1 reaches its goal cleanly
+        chosen = legal
+          .filter((m) => !m.isAttack && m.to !== 8 && m.to !== 72)
+          .sort((a, b) => {
+            const da = Math.floor(a.to / 9) + Math.abs((a.to % 9) - 8);
+            const db = Math.floor(b.to / 9) + Math.abs((b.to % 9) - 8);
+            return db - da;
+          })[0] || legal[0];
       }
       const move = { from: chosen.from, to: chosen.to };
       const activeSeat = winState.turn === 1 ? pairedWin.seat1 : pairedWin.seat2;

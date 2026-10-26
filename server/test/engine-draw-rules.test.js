@@ -6,6 +6,7 @@ import { verifyReplay } from '../src/replay.js';
 
 const require = createRequire(import.meta.url);
 const { OTTGameEngine, computeFastHash } = require('../../shared/OTTGameEngine.js');
+const { OTTGameEngine: BrowserGameEngine } = await import('../../src/core/ottEngine.ts');
 
 const canonical = (value) =>
   Array.isArray(value)
@@ -37,6 +38,40 @@ test('isGameOver distinguishes ongoing null winner from draw (0) and wins (1, 2)
   assert.equal(OTTGameEngine.isGameOver({ ...game, winner: 0 }), true);
   assert.equal(OTTGameEngine.isGameOver({ ...game, winner: 1 }), true);
   assert.equal(OTTGameEngine.isGameOver({ ...game, winner: 2 }), true);
+});
+
+test('each team only wins by reaching its own shrine in both deterministic engines', () => {
+  const cases = [
+    { player: 1, from: 7, to: 8, expectedWinner: 1 },
+    { player: 1, from: 63, to: 72, expectedWinner: null },
+    { player: 2, from: 63, to: 72, expectedWinner: 2 },
+    { player: 2, from: 7, to: 8, expectedWinner: null },
+  ];
+
+  for (const engine of [OTTGameEngine, BrowserGameEngine]) {
+    const state = engine.createGame(12345, 9);
+    assert.equal(engine.createBotGameState(state, 1).specialCells.myWinIndex, 8);
+    assert.equal(engine.createBotGameState(state, 2).specialCells.myWinIndex, 72);
+    assert.equal(engine.createBotGameState(state, 1).specialCells.opponentWinIndex, 72);
+    assert.equal(engine.createBotGameState(state, 2).specialCells.opponentWinIndex, 8);
+
+    for (const { player, from, to, expectedWinner } of cases) {
+      const position = engine.createGame(12345, 9);
+      position.board = new Int8Array(81);
+      position.board[from] = player === 1 ? 1 : 4;
+      position.board[player === 1 ? 40 : 20] = player === 1 ? 2 : 5;
+      position.board[player === 1 ? 41 : 21] = player === 1 ? 3 : 6;
+      position.board[player === 1 ? 20 : 40] = player === 1 ? 4 : 1;
+      position.board[player === 1 ? 21 : 41] = player === 1 ? 5 : 2;
+      position.board[player === 1 ? 22 : 42] = player === 1 ? 6 : 3;
+      position.turn = player;
+      position.positionCounts = {};
+      position.noCapturePlies = 0;
+
+      const next = engine.applyMove(position, { from, to });
+      assert.equal(next.winner, expectedWinner, `player ${player}, ${from} to ${to}`);
+    }
+  }
 });
 
 test('threefold-repetition ends game with winner === 0 and passes verifyReplay', () => {
