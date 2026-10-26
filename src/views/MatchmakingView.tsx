@@ -33,7 +33,6 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
 }) => {
   const { notify } = useToast();
   const [searchingMode, setSearchingMode] = useState<'bot' | 'human' | null>(null);
-  const [startingSparring, setStartingSparring] = useState(false);
   const [elapsedSec, setElapsedSec] = useState(0);
   const [filterType, setFilterType] = useState<'all' | 'bot' | 'human'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -51,12 +50,10 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
     });
     const offFound = backendClient.on('match-found', () => {
       setSearchingMode(null);
-      setStartingSparring(false);
       setElapsedSec(0);
     });
     const offErr = backendClient.on('error', (pkt) => {
       setSearchingMode(null);
-      setStartingSparring(false);
       if (pkt?.message) notify(pkt.message, 'error');
     });
 
@@ -90,29 +87,32 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
     }
   };
 
+  const handleSparringMatch = async (mode: 'bot' | 'human') => {
+    if (!user) {
+      onOpenAuth('login');
+      return;
+    }
+    try {
+      await backendClient.findSparringMatch(mode);
+    } catch (err: any) {
+      notify(
+        err.message ||
+          'Máy chủ hiện tại không hỗ trợ chế độ Sparring tức thì (chỉ có trên máy chủ Local tích hợp).',
+        'error'
+      );
+    }
+  };
+
   const handleCancelQueue = () => {
     backendClient.cancelMatch();
     setSearchingMode(null);
     setElapsedSec(0);
   };
 
-  const handleSparring = async (mode: 'human' | 'bot') => {
-    if (!user) {
-      onOpenAuth('login');
-      return;
-    }
-    try {
-      setStartingSparring(true);
-      await backendClient.findSparringMatch(mode);
-      notify('Đang kết nối với Hắc Kỵ Sĩ AI…', 'info');
-    } catch (err: any) {
-      setStartingSparring(false);
-      notify(err.message || 'Không thể bắt đầu trận với Hắc Kỵ Sĩ AI.', 'error');
-    }
-  };
+  // Expanding Elo window visualization matching server/src/matchmaking.js
+  const eloWindow = Math.min(400, 100 + Math.floor(elapsedSec / 10) * 50);
 
   const filteredMatches = matches.filter((m) => {
-    if (m.status !== 'completed') return false;
     if (filterType !== 'all' && m.match_type !== filterType) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -133,12 +133,21 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                 Đang tìm đối thủ {searchingMode === 'bot' ? 'Bot vs Bot (Xếp hạng Elo)' : '1v1 Người vs Người'}…
               </h3>
               <p className="text-xs text-[var(--text-secondary)] mt-0.5 tabular-nums">
-                Thời gian chờ: {elapsedSec}s
+                Thời gian chờ: {elapsedSec}s · Biên độ ghép Elo hiện tại: ±{eloWindow} quanh mức{' '}
+                {user?.elo || 1200}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => handleSparringMatch(searchingMode)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer whitespace-nowrap"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
+              Đấu ngay với Hắc Kỵ Sĩ AI
+            </button>
             <button
               type="button"
               onClick={handleCancelQueue}
@@ -188,13 +197,14 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
               <Swords className="w-4 h-4" />
               Tìm trận Bot trực tuyến
             </button>
+
             <button
               type="button"
-              disabled={searchingMode !== null || startingSparring}
-              onClick={() => handleSparring('bot')}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold text-[var(--accent-primary)] border border-[var(--accent-primary)]/60 hover:bg-[var(--accent-primary)]/10 disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              disabled={searchingMode !== null}
+              onClick={() => handleSparringMatch('bot')}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              {startingSparring ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              <Sparkles className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
               Đấu xếp hạng với Hắc Kỵ Sĩ AI
             </button>
           </div>
@@ -230,13 +240,14 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
               <UserCheck className="w-4 h-4" />
               Tìm đối thủ 1v1 trực tuyến
             </button>
+
             <button
               type="button"
-              disabled={searchingMode !== null || startingSparring}
-              onClick={() => handleSparring('human')}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold text-[var(--p2-main)] border border-[var(--border-subtle)] hover:bg-[var(--p2-main)]/10 disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              disabled={searchingMode !== null}
+              onClick={() => handleSparringMatch('human')}
+              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              {startingSparring ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+              <Sparkles className="w-3.5 h-3.5 text-[var(--p2-main)]" />
               Cầm quân đấu Hắc Kỵ Sĩ AI
             </button>
           </div>
@@ -336,9 +347,9 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
                 {filteredMatches.map((m) => {
-                  const won = m.winner_id === user.id;
-                  const isDraw = m.winner_id === null;
-                  const eloDelta = m.elo_delta ?? 0;
+                  const completed = m.status === 'completed';
+                  const isDraw = completed && !m.winner_id;
+                  const won = completed && m.winner_id === user.id;
                   const timeStr = new Date(m.created_at).toLocaleString('vi-VN', {
                     day: '2-digit',
                     month: '2-digit',
@@ -352,18 +363,26 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                         {m.player1} <span className="text-[var(--text-muted)]">vs</span> {m.player2}
                       </td>
                       <td className="py-3 px-3 text-[var(--text-secondary)]">
-                        {m.match_type === 'bot' ? 'Bot vs Bot' : 'Người vs Người'}
+                        {m.match_type === 'bot' ? 'Bot Elo' : '1v1 Người'}
                       </td>
                       <td className="py-3 px-3 font-mono text-[var(--text-muted)]">{m.seed}</td>
                       <td className="py-3 px-3">
-                        <div>
-                          <span className={isDraw ? 'text-[var(--text-secondary)]' : won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
+                        {!completed ? (
+                          <span className="text-[var(--text-muted)]">{m.status}</span>
+                        ) : (
+                          <span
+                            className={
+                              isDraw
+                                ? 'text-amber-300 font-semibold'
+                                : won
+                                ? 'text-emerald-400 font-semibold'
+                                : 'text-red-400'
+                            }
+                          >
                             {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
+                            {m.elo_delta ? ` (${m.elo_delta > 0 ? '+' : ''}${m.elo_delta} Elo)` : ''}
                           </span>
-                          <div className={`mt-0.5 text-[10px] font-medium ${eloDelta > 0 ? 'text-emerald-400' : eloDelta < 0 ? 'text-red-400' : 'text-[var(--text-muted)]'}`}>
-                            {eloDelta >= 0 ? '+' : ''}{eloDelta} Elo
-                          </div>
-                        </div>
+                        )}
                       </td>
                       <td className="py-3 pl-3 text-right">
                         {m.replay_available ? (
@@ -376,12 +395,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                             Mở Replay
                           </button>
                         ) : (
-                          <span
-                            className="text-[var(--text-muted)]"
-                            title="Máy chủ không có dữ liệu Replay cho trận này."
-                          >
-                            Chưa lưu
-                          </span>
+                          <span className="text-[var(--text-muted)]">—</span>
                         )}
                       </td>
                     </tr>

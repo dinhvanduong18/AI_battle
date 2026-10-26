@@ -5,48 +5,43 @@ import { createRequire } from 'node:module';
 import {
   createHash,
   createHmac,
-  createPublicKey,
   randomBytes,
   randomInt,
   randomUUID,
   scrypt as scryptCb,
   timingSafeEqual,
-  verify as verifySignature,
   webcrypto,
 } from 'node:crypto';
 import { promisify } from 'node:util';
 import express from 'express';
 import type { Request, Response } from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
-import { verifyConsensusDispute } from './server/src/replay.js';
+import {
+  TOURNAMENT_RANKS,
+  applySprintRankReset,
+  applyTournamentResult,
+  buildTournamentMotivation,
+  rankTier,
+  tournamentRanks,
+} from './server/src/tournament-ranks.js';
+import {
+  hashCanonical,
+  verifyConsensusDispute,
+  verifyReplay,
+  verifySessionProof,
+} from './server/src/replay.js';
 
 const require = createRequire(import.meta.url);
 const { OTTGameEngine } = require('./shared/OTTGameEngine.js');
 
 const scrypt = promisify(scryptCb);
-const PORT = Number(process.env.PORT) || 3000;
+const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'ottv2-local-dev-secret-key-minimum-32-chars';
 const FIDE_K = Number(process.env.FIDE_K_FACTOR) || 20;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+const DISCONNECT_FORFEIT_MS = Number(process.env.DISCONNECT_FORFEIT_MS) || 5000;
 
-const TOURNAMENT_RANKS = ['Bronze', 'Silver', 'Gold', 'Master', 'Challenger'] as const;
-type RankTier = (typeof TOURNAMENT_RANKS)[number];
-
-const RANK_LABELS: Record<RankTier, string> = {
-  Bronze: 'Đồng',
-  Silver: 'Bạc',
-  Gold: 'Vàng',
-  Master: 'Cao Thủ',
-  Challenger: 'Thách Đấu',
-};
-
-const RANK_PROMOTION_STARS: Record<RankTier, number> = {
-  Bronze: 10,
-  Silver: 20,
-  Gold: 30,
-  Master: 40,
-  Challenger: 40,
-};
+type RankTier = 'Bronze' | 'Silver' | 'Gold' | 'Master' | 'Challenger';
 
 const SPRINT_RULE_LAYOUTS: Record<string, { title: string; blockedCells: number[] }> = {
   standard: { title: 'Bàn chuẩn', blockedCells: [] },
@@ -70,42 +65,6 @@ function weeklyRules(week: number, schedule: string[] = DEFAULT_SPRINT_RULES) {
     cols: 9,
     blockedCells: [...layout.blockedCells],
   };
-}
-
-function rankTierFromElo(elo: number): RankTier {
-  if (elo >= 1600) return 'Gold';
-  if (elo >= 1350) return 'Silver';
-  return 'Bronze';
-}
-
-function applyTournamentResult(tier: RankTier, stars: number, seasonPoints: number, score: number) {
-  const rankIndex = TOURNAMENT_RANKS.indexOf(tier);
-  let nextTier: RankTier = tier;
-  let nextStars = stars;
-  let nextPoints = seasonPoints;
-
-  if (score === 1) {
-    if (tier === 'Challenger') {
-      nextStars = Math.min(RANK_PROMOTION_STARS.Challenger, stars + 1);
-      nextPoints += 1;
-    } else if (stars + 1 >= RANK_PROMOTION_STARS[tier]) {
-      nextTier = TOURNAMENT_RANKS[rankIndex + 1];
-      nextStars = 0;
-      if (nextTier === 'Challenger') nextPoints = 0;
-    } else {
-      nextStars += 1;
-    }
-  } else if (score === 0) {
-    if (stars > 0) {
-      nextStars -= 1;
-      if (tier === 'Challenger') nextPoints = Math.max(0, seasonPoints - 1);
-    } else if (rankIndex > 0) {
-      nextTier = TOURNAMENT_RANKS[rankIndex - 1];
-      nextStars = RANK_PROMOTION_STARS[nextTier] - 1;
-      if (tier === 'Challenger') nextPoints = 0;
-    }
-  }
-  return { tier: nextTier, stars: nextStars, seasonPoints: nextPoints };
 }
 
 function calculateElo(rating: number, opponentRating: number, score: number, kFactor = FIDE_K) {
@@ -169,37 +128,12 @@ function canonical(value: unknown): string {
 
 const sha256Canonical = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
 
-function webCryptoSignatureToDer(raw: string) {
-  const bytes = Buffer.from(raw, 'hex');
-  if (bytes.length !== 64) throw new Error('ECDSA P-256 signature must be 64 bytes');
-  const integer = (part: Buffer) => {
-    let val = Buffer.from(part);
-    while (val.length > 1 && val[0] === 0) val = val.subarray(1);
-    if (val[0] & 0x80) val = Buffer.concat([Buffer.from([0]), val]);
-    return Buffer.concat([Buffer.from([0x02, val.length]), val]);
-  };
-  const r = integer(bytes.subarray(0, 32));
-  const s = integer(bytes.subarray(32));
-  const body = Buffer.concat([r, s]);
-  return Buffer.concat([Buffer.from([0x30, body.length]), body]);
-}
-
-function verifySessionProof(jwk: Record<string, unknown> | null, proof: unknown, signature: string) {
-  if (!jwk || jwk.kty !== 'EC' || jwk.crv !== 'P-256' || !proof || typeof signature !== 'string') return false;
-  try {
-    const key = createPublicKey({ key: jwk as any, format: 'jwk' });
-    return verifySignature('sha256', Buffer.from(canonical(proof)), key, webCryptoSignatureToDer(signature));
-  } catch {
-    return false;
-  }
-}
-
 function statePayload(current: any) {
   return {
     board: Array.from(current.board),
     turn: current.turn,
     stepCount: current.stepCount,
-    winner: current.winner || null,
+    winner: current.winner === 0 ? 0 : current.winner || null,
     seed: current.seed,
     pieceCount: current.pieceCount,
     lastMove: current.lastMove || null,
@@ -207,73 +141,14 @@ function statePayload(current: any) {
   };
 }
 
-function verifyReplay(replay: any, expectedSeed: number, expectedMatchId: string, expectedRules: any = null) {
-  if (
-    !replay ||
-    replay.format !== 'ottv2-replay-v1' ||
-    replay.matchId !== expectedMatchId ||
-    replay.seed !== expectedSeed ||
-    !Array.isArray(replay.moves)
-  ) {
-    throw new Error('Metadata của Replay không khớp với trận đấu đã đăng ký.');
-  }
-  let state = OTTGameEngine.deserialize(replay.initialState);
-  if (state.seed !== expectedSeed || state.stepCount !== 0 || state.winner) {
-    throw new Error('Trạng thái khởi tạo của Replay không hợp lệ.');
-  }
-  const generated = OTTGameEngine.createGame(expectedSeed, state.pieceCount, expectedRules);
-  if (canonical(state.rules || null) !== canonical(generated.rules || null)) {
-    throw new Error('Luật bàn cờ trong Replay không khớp với luật của trận đấu.');
-  }
-  if (sha256Canonical(statePayload(state)) !== sha256Canonical(statePayload(generated))) {
-    throw new Error('Bàn cờ ban đầu không khớp với Seed tất định.');
-  }
-  for (let i = 0; i < replay.moves.length; i++) {
-    const entry = replay.moves[i];
-    if (
-      !entry ||
-      entry.stepCount !== i + 1 ||
-      ![1, 2].includes(entry.player) ||
-      entry.player !== state.turn ||
-      !entry.move ||
-      !Number.isInteger(entry.move.from) ||
-      !Number.isInteger(entry.move.to) ||
-      typeof entry.nonce !== 'string'
-    ) {
-      throw new Error(`Nước đi thứ ${i + 1} có dữ liệu không hợp lệ.`);
-    }
-    const expectedCommit = sha256Canonical({
-      matchId: expectedMatchId,
-      stepCount: i,
-      player: entry.player,
-      move: entry.move,
-      nonce: entry.nonce,
-    });
-    if (entry.commit && entry.commit !== expectedCommit) {
-      throw new Error(`Mã cam kết nước đi thứ ${i + 1} không khớp.`);
-    }
-    state = OTTGameEngine.applyMove(state, { from: entry.move.from, to: entry.move.to });
-    const currentHash = sha256Canonical(statePayload(state));
-    if (entry.stateHash && entry.stateHash !== currentHash) {
-      throw new Error(`Mã băm trạng thái lượt ${i + 1} không khớp.`);
-    }
-  }
-  if (state.winner === null || state.winner === undefined) throw new Error('Replay chưa đi đến trạng thái phân định thắng thua.');
-  return {
-    winner: state.winner as 1 | 2 | 0,
-    stepCount: state.stepCount as number,
-    finalHash: sha256Canonical(statePayload(state)),
-  };
-}
-
-// ── Persistent Local Dev Store ────────────────────────────────
+// ── Persistent Store Types ────────────────────────────────────
 interface UserRecord {
   id: string;
   email: string;
   password_hash: string;
   display_name: string;
-  elo: number;
   avatar_id?: string;
+  elo: number;
   is_admin: boolean;
   active_bot_version: number;
   is_system_bot?: boolean;
@@ -298,6 +173,7 @@ interface TournamentRecord {
   ends_at: string;
   max_teams: number;
   current_week: number;
+  last_reset_week?: number;
   week_started_at: string | null;
   rules_json: any;
   rules_schedule: string[];
@@ -320,19 +196,34 @@ interface TournamentEntryRecord {
   registered_at: string;
 }
 
+interface ConsensusTrackState {
+  createdAtMs: number;
+  p1ReadyAt: number | null;
+  p2ReadyAt: number | null;
+  bothReadyAt: number | null;
+  currentStep: number;
+  stepStartedAt: number | null;
+  lastRevealStep: number | null;
+  lastRevealSeat: 1 | 2 | null;
+  lastRevealAt: number | null;
+  lastRevealCommit: string | null;
+  acksForPendingStep: Record<number, string>;
+  finalProofs: Record<number, { proof: any; signature: string }>;
+  finalProofAt: Record<number, number>;
+  lastActivityAt: number;
+}
+
 interface MatchRecord {
   id: string;
   seed: number;
   player1_id: string;
   player2_id: string;
   match_type: 'human' | 'bot';
-  is_sparring?: boolean;
   status: 'pending' | 'active' | 'completed' | 'disputed' | 'abandoned';
   tournament_id: string | null;
   tournament_phase: 'practice' | 'ranked' | null;
   tournament_rules: any | null;
-  disconnected_player_id?: string | null;
-  disconnected_at?: string | null;
+  is_sparring?: boolean;
   player1_bot_version?: number;
   player2_bot_version?: number;
   player1_bot_code?: string;
@@ -345,6 +236,9 @@ interface MatchRecord {
   replay_json: any | null;
   player1_proof: any | null;
   player2_proof: any | null;
+  disconnected_player_id?: string | null;
+  disconnected_at?: string | null;
+  consensus_state?: ConsensusTrackState | null;
   created_at: string;
   completed_at: string | null;
 }
@@ -359,6 +253,18 @@ interface MatchResultRecord {
   created_at: string;
 }
 
+interface MatchDisputeRecord {
+  match_id: string;
+  claimant_id: string;
+  offender_id: string | null;
+  status: 'adjudicated' | 'needs_review';
+  reason: string;
+  winner_id: string | null;
+  step_count: number;
+  expected_state_hash: string;
+  created_at: string;
+}
+
 interface DatabaseSchema {
   users: UserRecord[];
   botVersions: BotVersionRecord[];
@@ -366,10 +272,28 @@ interface DatabaseSchema {
   tournamentEntries: TournamentEntryRecord[];
   matches: MatchRecord[];
   matchResults: MatchResultRecord[];
+  matchDisputes: MatchDisputeRecord[];
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'local-db.json');
+function createInitialConsensusState(matchType: 'human' | 'bot'): ConsensusTrackState {
+  const now = Date.now();
+  return {
+    createdAtMs: now,
+    p1ReadyAt: matchType === 'human' ? now : null,
+    p2ReadyAt: matchType === 'human' ? now : null,
+    bothReadyAt: matchType === 'human' ? now : null,
+    currentStep: 0,
+    stepStartedAt: matchType === 'human' ? now : null,
+    lastRevealStep: null,
+    lastRevealSeat: null,
+    lastRevealAt: null,
+    lastRevealCommit: null,
+    acksForPendingStep: {},
+    finalProofs: {},
+    finalProofAt: {},
+    lastActivityAt: now,
+  };
+}
 
 const DEFAULT_MINIMAX_PYTHON = `def get_next_move(my_player_id, game_state):
     valid_moves = game_state.get('validMoves', [])
@@ -397,7 +321,7 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
   const now = Date.now();
   const pwHash = await hashPassword('halloween2026');
   const systemBotId = '00000000-0000-4000-8000-000000000001';
-  const adminId = '00000000-0000-4000-8000-000000000002';
+  const demoPlayerId = '00000000-0000-4000-8000-000000000002';
   const p2Id = '00000000-0000-4000-8000-000000000003';
   const p3Id = '00000000-0000-4000-8000-000000000004';
   const p4Id = '00000000-0000-4000-8000-000000000005';
@@ -415,12 +339,12 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
       created_at: new Date(now - 14 * 86400000).toISOString(),
     },
     {
-      id: adminId,
+      id: demoPlayerId,
       email: 'admin@ottv2.local',
       password_hash: pwHash,
-      display_name: 'Minh Quân · BTC',
+      display_name: 'Minh Quân',
       elo: 1685,
-      is_admin: true,
+      is_admin: false,
       active_bot_version: 2,
       created_at: new Date(now - 12 * 86400000).toISOString(),
     },
@@ -475,12 +399,13 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
       name: 'Halloween Blood Moon Cup 2026',
       format: 'ranked_weekly',
       description:
-        'Giải đấu sự kiện Halloween chính thức của OTTv2. Bàn cờ hiện đang ở Sprint 2 (Chướng ngại trung tâm) — tích lũy Sao để thăng hạng lên Thách Đấu trước đêm 31/10!',
+        'Giải đấu sự kiện Halloween chính thức của OTTv2 chia 2 giai đoạn. Hiện đang ở Giai đoạn Thực chiến — Sprint 2 (Chướng ngại trung tâm). Bảng xếp hạng Thách Đấu được bảo mật cho đến khi giải khép lại!',
       status: 'qualifying',
       registration_closes_at: new Date(now - 8 * 86400000).toISOString(),
       ends_at: new Date(now + 20 * 86400000).toISOString(),
       max_teams: 64,
       current_week: 2,
+      last_reset_week: 2,
       week_started_at: new Date(now - 8 * 86400000).toISOString(),
       rules_json: sprint2Rules,
       rules_schedule: ['standard', 'center_blockers', 'clipped_corners', 'corridor'],
@@ -491,12 +416,13 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
       name: 'OTTv2 Open Sprint — Mùa Thu Đông',
       format: 'ranked_weekly',
       description:
-        'Mùa giải mở rộng dành cho mọi lập trình viên AI. Hiện đang mở đăng ký và Vòng Chạy Đà — người chơi có thể vào thi đấu luyện tập bằng Bot mẫu hoặc Bot Python cá nhân.',
+        'Mùa giải cá nhân mở rộng dành cho mọi lập trình viên AI. Hiện đang mở cổng đăng ký và Vòng Chạy Đà — Bot đã nộp sẽ tự động ra sân thử nghiệm chiến thuật ngẫu nhiên (không cộng/trừ Sao).',
       status: 'registration',
       registration_closes_at: new Date(now + 5 * 86400000).toISOString(),
       ends_at: new Date(now + 33 * 86400000).toISOString(),
       max_teams: 128,
       current_week: 0,
+      last_reset_week: 0,
       week_started_at: null,
       rules_json: {},
       rules_schedule: ['standard', 'clipped_corners', 'center_blockers', 'corridor'],
@@ -507,32 +433,17 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
   const tournamentEntries: TournamentEntryRecord[] = [
     {
       tournament_id: t1Id,
-      player_id: systemBotId,
-      bot_version: 1,
-      matches_played: 8,
-      wins: 4,
-      draws: 0,
-      losses: 4,
-      points: 4,
-      tournament_elo: 1320,
-      tier: 'Bronze',
-      rank_stars: 4,
-      season_points: 0,
-      registered_at: new Date(now - 10 * 86400000).toISOString(),
-    },
-    {
-      tournament_id: t1Id,
       player_id: adminId,
       bot_version: 2,
-      matches_played: 18,
-      wins: 14,
-      draws: 0,
-      losses: 4,
-      points: 14,
+      matches_played: 32,
+      wins: 28,
+      draws: 1,
+      losses: 3,
+      points: 28,
       tournament_elo: 1685,
-      tier: 'Master',
-      rank_stars: 12,
-      season_points: 0,
+      tier: 'Challenger',
+      rank_stars: 0,
+      season_points: 12,
       registered_at: new Date(now - 11 * 86400000).toISOString(),
     },
     {
@@ -541,26 +452,56 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
       bot_version: 3,
       matches_played: 14,
       wins: 10,
-      draws: 0,
-      losses: 4,
+      draws: 1,
+      losses: 3,
       points: 10,
       tournament_elo: 1560,
       tier: 'Gold',
-      rank_stars: 8,
+      rank_stars: 7,
       season_points: 0,
       registered_at: new Date(now - 10 * 86400000).toISOString(),
     },
     {
-      tournament_id: t2Id,
-      player_id: systemBotId,
+      tournament_id: t1Id,
+      player_id: p3Id,
       bot_version: 1,
+      matches_played: 10,
+      wins: 6,
+      draws: 1,
+      losses: 3,
+      points: 6,
+      tournament_elo: 1435,
+      tier: 'Silver',
+      rank_stars: 5,
+      season_points: 0,
+      registered_at: new Date(now - 9 * 86400000).toISOString(),
+    },
+    {
+      tournament_id: t1Id,
+      player_id: p4Id,
+      bot_version: 1,
+      matches_played: 8,
+      wins: 4,
+      draws: 1,
+      losses: 3,
+      points: 4,
+      tournament_elo: 1290,
+      tier: 'Bronze',
+      rank_stars: 3,
+      season_points: 0,
+      registered_at: new Date(now - 9 * 86400000).toISOString(),
+    },
+    {
+      tournament_id: t2Id,
+      player_id: p2Id,
+      bot_version: 3,
       matches_played: 2,
       wins: 1,
       draws: 0,
       losses: 1,
       points: 0,
-      tournament_elo: 1320,
-      tier: 'Bronze',
+      tournament_elo: 1560,
+      tier: 'Silver',
       rank_stars: 0,
       season_points: 0,
       registered_at: new Date(now - 86400000).toISOString(),
@@ -589,36 +530,14 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
     tournamentEntries,
     matches: [],
     matchResults: [],
+    matchDisputes: [],
   };
-}
-
-let db: DatabaseSchema;
-
-function saveDb() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.error('Could not persist local DB:', err);
-  }
-}
-
-async function initDb() {
-  try {
-    if (fs.existsSync(DB_PATH)) {
-      db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
-      return;
-    }
-  } catch {
-    // Recreate on corrupt JSON
-  }
-  db = await createSeedDatabase();
-  saveDb();
 }
 
 function publicUser(u: UserRecord) {
   return {
     id: u.id,
+    email: u.email,
     displayName: u.display_name,
     elo: u.elo,
     avatarId: u.avatar_id || 'pumpkin',
@@ -627,78 +546,40 @@ function publicUser(u: UserRecord) {
   };
 }
 
-function playerStats(userId: string) {
-  const completed = db.matches.filter(
-    (match) =>
-      match.status === 'completed' &&
-      (match.player1_id === userId || match.player2_id === userId)
-  );
-  const wins = completed.filter((match) => match.winner_id === userId).length;
-  const draws = completed.filter((match) => match.winner_id === null).length;
-  return {
-    matchesPlayed: completed.length,
-    wins,
-    draws,
-    losses: completed.length - wins - draws,
-  };
-}
-
-function updateTournamentLifecycle() {
-  const now = Date.now();
-  let dirty = false;
-  for (const t of db.tournaments) {
-    const endMs = new Date(t.ends_at).getTime();
-    const regCloseMs = new Date(t.registration_closes_at).getTime();
-    const entryCount = db.tournamentEntries.filter((e) => e.tournament_id === t.id).length;
-
-    if (t.status !== 'completed' && now >= endMs) {
-      t.status = 'completed';
-      dirty = true;
-    } else if (t.status === 'registration' && (now >= regCloseMs || entryCount >= t.max_teams)) {
-      t.status = 'qualifying';
-      t.current_week = 1;
-      t.week_started_at = new Date(now).toISOString();
-      t.rules_json = weeklyRules(1, t.rules_schedule);
-      for (const entry of db.tournamentEntries.filter((e) => e.tournament_id === t.id)) {
-        const u = db.users.find((usr) => usr.id === entry.player_id);
-        entry.tier = rankTierFromElo(u?.elo || 1200);
-        entry.rank_stars = 0;
-        entry.season_points = 0;
-      }
-      dirty = true;
-    } else if (t.status === 'qualifying' && t.week_started_at) {
-      const startMs = new Date(t.week_started_at).getTime();
-      const computedWeek = Math.max(1, Math.floor((now - startMs) / WEEK_MS) + 1);
-      if (computedWeek !== t.current_week) {
-        t.current_week = computedWeek;
-        t.rules_json = weeklyRules(computedWeek, t.rules_schedule);
-        dirty = true;
-      }
+function pickTacticalBotMove(state: any, botSeat: 1 | 2) {
+  const botState = OTTGameEngine.createBotGameState(state, botSeat);
+  const validMoves = botState.validMoves || [];
+  if (!validMoves.length) return null;
+  let best = validMoves[0];
+  let bestScore = -Infinity;
+  for (const m of validMoves) {
+    if (m.to === 8 || m.to === 72) {
+      return { from: m.from, to: m.to };
+    }
+    let score = m.isAttack ? 145 : 0;
+    const distA1 = Math.abs(m.toRow - 8) + Math.abs(m.toCol - 0);
+    const distI9 = Math.abs(m.toRow - 0) + Math.abs(m.toCol - 8);
+    score -= Math.min(distA1, distI9) * 12;
+    score -= (Math.abs(m.toRow - 4) + absColDelta(m.toCol)) * 2;
+    score += (Math.random() - 0.5) * 10;
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
     }
   }
-  if (dirty) saveDb();
+  return { from: best.from, to: best.to };
 }
 
-function getAuthUser(req: Request): UserRecord {
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Bearer ')) {
-    throw Object.assign(new Error('Vui lòng đăng nhập để thực hiện thao tác này.'), { status: 401 });
-  }
-  const payload = verifyToken(header.slice(7));
-  const user = db.users.find((u) => u.id === payload.sub);
-  if (!user) throw Object.assign(new Error('Không tìm thấy tài khoản.'), { status: 401 });
-  return user;
+function absColDelta(col: number) {
+  return Math.abs(col - 4);
 }
 
-function getOptionalAuthUser(req: Request): UserRecord | null {
-  try {
-    return getAuthUser(req);
-  } catch {
-    return null;
-  }
+async function signWithWebCrypto(privateKey: CryptoKey, payload: unknown): Promise<string> {
+  const encoded = new TextEncoder().encode(canonical(payload));
+  const sig = await webcrypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, encoded);
+  return Buffer.from(sig).toString('hex');
 }
 
-// ── Server-Side Sparring Bot Controller (For 1-Tab Solo Ranked Testing) ──
 interface SparringSession {
   matchId: string;
   humanSeat: 1 | 2;
@@ -711,49 +592,489 @@ interface SparringSession {
   destroyed: boolean;
 }
 
-const sparringSessions = new Map<string, SparringSession>();
+export interface ServerTimeoutOptions {
+  disconnectForfeitMs?: number;
+  setupTimeoutMs?: number;
+  setupPeerReadyTimeoutMs?: number;
+  ackTimeoutMs?: number;
+  botTurnTimeoutMs?: number;
+  sweepIntervalMs?: number;
+}
 
-function pickTacticalBotMove(state: any, botSeat: 1 | 2) {
-  const botState = OTTGameEngine.createBotGameState(state, botSeat);
-  const validMoves = botState.validMoves || [];
-  if (!validMoves.length) return null;
-  let best = validMoves[0];
-  let bestScore = -Infinity;
-  for (const m of validMoves) {
-    const targetWin = botSeat === 1 ? 8 : 72;
-    if (m.to === targetWin) {
-      return { from: m.from, to: m.to };
-    }
-    let score = m.isAttack ? 145 : 0;
-    const distA1 = Math.abs(m.toRow - 8) + Math.abs(m.toCol - 0);
-    const distI9 = Math.abs(m.toRow - 0) + Math.abs(m.toCol - 8);
-    score -= Math.min(distA1, distI9) * 12;
-    score -= (Math.abs(m.toRow - 4) + Math.abs(m.toCol - 4)) * 2;
-    score += (Math.random() - 0.5) * 10;
-    if (score > bestScore) {
-      bestScore = score;
-      best = m;
+export interface ServerStartOptions {
+  port?: number;
+  dbPath?: string;
+  skipVite?: boolean;
+  timeouts?: ServerTimeoutOptions;
+}
+
+export async function startServer(options: ServerStartOptions = {}) {
+  const port = options.port !== undefined ? options.port : DEFAULT_PORT;
+  const disconnectForfeitMs = options.timeouts?.disconnectForfeitMs ?? DISCONNECT_FORFEIT_MS;
+  const setupTimeoutMs = options.timeouts?.setupTimeoutMs ?? 15000;
+  const setupPeerReadyTimeoutMs = options.timeouts?.setupPeerReadyTimeoutMs ?? 10000;
+  const ackTimeoutMs = options.timeouts?.ackTimeoutMs ?? 4500;
+  const botTurnTimeoutMs = options.timeouts?.botTurnTimeoutMs ?? 9000;
+  const sweepIntervalMs = options.timeouts?.sweepIntervalMs ?? 500;
+  const dbPath =
+    options.dbPath ||
+    process.env.OTTV2_DB_PATH ||
+    path.join(path.resolve(process.cwd(), 'data'), 'local-db.json');
+  const dataDir = path.dirname(dbPath);
+
+  let db: DatabaseSchema;
+
+  function saveDb() {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf8');
+    } catch (err) {
+      console.error('Could not persist local DB:', err);
     }
   }
-  return { from: best.from, to: best.to };
-}
 
-async function signWithWebCrypto(privateKey: CryptoKey, payload: unknown): Promise<string> {
-  const encoded = new TextEncoder().encode(canonical(payload));
-  const sig = await webcrypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privateKey, encoded);
-  return Buffer.from(sig).toString('hex');
-}
+  async function initDb() {
+    try {
+      if (fs.existsSync(dbPath)) {
+        const parsed = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+        if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.tournaments)) {
+          db = parsed;
+          db.matchDisputes = Array.isArray(db.matchDisputes) ? db.matchDisputes : [];
+          for (const t of db.tournaments) {
+            if (t.last_reset_week === undefined) {
+              t.last_reset_week = t.status === 'qualifying' ? Math.max(1, t.current_week || 1) : 0;
+            }
+          }
+          for (const e of db.tournamentEntries) {
+            if (e.draws === undefined) e.draws = 0;
+            if (e.tier === 'Challenger') e.rank_stars = 0;
+          }
+          // Ensure demo accounts p3/p4 are registered in t1Id if t1Id exists so demo testing works seamlessly
+          const t1 = db.tournaments.find((t) => t.id === '11111111-2222-4333-8444-555555555501');
+          if (t1 && t1.status === 'qualifying') {
+            for (const uid of [
+              '00000000-0000-4000-8000-000000000004',
+              '00000000-0000-4000-8000-000000000005',
+            ]) {
+              const usr = db.users.find((u) => u.id === uid);
+              if (
+                usr &&
+                !db.tournamentEntries.some(
+                  (en) => en.tournament_id === t1.id && en.player_id === usr.id
+                )
+              ) {
+                db.tournamentEntries.push({
+                  tournament_id: t1.id,
+                  player_id: usr.id,
+                  bot_version: usr.active_bot_version || 1,
+                  matches_played: 0,
+                  wins: 0,
+                  draws: 0,
+                  losses: 0,
+                  points: 0,
+                  tournament_elo: usr.elo,
+                  tier: 'Bronze',
+                  rank_stars: 0,
+                  season_points: 0,
+                  registered_at: new Date().toISOString(),
+                });
+              }
+            }
+          }
+          return;
+        }
+      }
+    } catch {
+      // Recreate on corrupt JSON
+    }
+    db = await createSeedDatabase();
+    saveDb();
+  }
 
-// ── Start Full-Stack Server ───────────────────────────────────
-async function startServer() {
   await initDb();
 
+  // ── Live Sockets & Queues ────────────────────────────────────
+  interface AuthedSocket extends WebSocket {
+    authenticated?: boolean;
+    userId?: string;
+    queueMode?: 'human' | 'bot' | 'tournament' | null;
+    tournamentId?: string | null;
+    searchStartedAt?: number;
+  }
+
+  const liveSockets = new Map<string, AuthedSocket>();
+  const humanQueue = new Set<string>();
+  const botQueue = new Set<string>();
+  const tournamentQueue = new Map<string, Set<string>>();
+  const sparringSessions = new Map<string, SparringSession>();
+
+  const sendWs = (ws: WebSocket | undefined, type: string, data: Record<string, unknown> = {}) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type, ...data }));
+    }
+  };
+
+  function clearUserQueues(userId: string) {
+    humanQueue.delete(userId);
+    botQueue.delete(userId);
+    for (const set of tournamentQueue.values()) {
+      set.delete(userId);
+    }
+  }
+
+  function clearTournamentWaiters(tournamentId: string) {
+    const q = tournamentQueue.get(tournamentId);
+    if (q) q.clear();
+  }
+
+  function abandonActiveTournamentMatches(tournamentId: string, reasonMessage: string) {
+    for (const m of db.matches) {
+      if (m.tournament_id === tournamentId && m.status === 'active') {
+        m.status = 'abandoned';
+        m.completed_at = new Date().toISOString();
+        sparringSessions.delete(m.id);
+        sendWs(liveSockets.get(m.player1_id), 'match-aborted', {
+          matchId: m.id,
+          message: reasonMessage,
+        });
+        sendWs(liveSockets.get(m.player2_id), 'match-aborted', {
+          matchId: m.id,
+          message: reasonMessage,
+        });
+      }
+    }
+  }
+
+  function initializeStageBEntries(tournamentId: string) {
+    for (const entry of db.tournamentEntries.filter((e) => e.tournament_id === tournamentId)) {
+      const u = db.users.find((usr) => usr.id === entry.player_id);
+      const startElo = u?.elo ?? entry.tournament_elo ?? 1200;
+      entry.tournament_elo = startElo;
+      entry.tier = rankTier(startElo) as RankTier;
+      entry.rank_stars = 0;
+      entry.season_points = 0;
+      entry.matches_played = 0;
+      entry.wins = 0;
+      entry.draws = 0;
+      entry.losses = 0;
+      entry.points = 0;
+    }
+  }
+
+  function applySprintResetsToEntries(tournament: TournamentRecord, targetWeek: number) {
+    const startResetWeek = Math.max(1, tournament.last_reset_week || tournament.current_week || 1);
+    const steps = Math.max(0, targetWeek - startResetWeek);
+    if (steps <= 0) return;
+    for (const entry of db.tournamentEntries.filter((e) => e.tournament_id === tournament.id)) {
+      let tier: RankTier = entry.tier;
+      let stars = entry.rank_stars;
+      let seasonPoints = entry.season_points;
+      for (let s = 0; s < steps; s++) {
+        const res = applySprintRankReset(tier, stars, seasonPoints);
+        tier = res.tier as RankTier;
+        stars = res.stars;
+        seasonPoints = res.seasonPoints;
+      }
+      entry.tier = tier;
+      entry.rank_stars = stars;
+      entry.season_points = seasonPoints;
+    }
+    tournament.last_reset_week = targetWeek;
+  }
+
+  function updateTournamentLifecycle() {
+    const now = Date.now();
+    let dirty = false;
+    for (const t of db.tournaments) {
+      const endMs = new Date(t.ends_at).getTime();
+      const regCloseMs = new Date(t.registration_closes_at).getTime();
+      const entryCount = db.tournamentEntries.filter(
+        (e) => e.tournament_id === t.id && !db.users.find((u) => u.id === e.player_id)?.is_system_bot
+      ).length;
+
+      if (t.status !== 'completed' && now >= endMs) {
+        t.status = 'completed';
+        clearTournamentWaiters(t.id);
+        abandonActiveTournamentMatches(
+          t.id,
+          'Giải đấu đã khép lại trước khi ván đấu hoàn tất; trận được hủy không tính kết quả.'
+        );
+        dirty = true;
+      } else if (t.status === 'registration' && (now >= regCloseMs || entryCount >= t.max_teams)) {
+        t.status = 'qualifying';
+        t.current_week = 1;
+        t.last_reset_week = 1;
+        t.week_started_at = new Date(now).toISOString();
+        t.rules_json = weeklyRules(1, t.rules_schedule);
+        initializeStageBEntries(t.id);
+        clearTournamentWaiters(t.id);
+        abandonActiveTournamentMatches(
+          t.id,
+          'Vòng Chạy Đà đã kết thúc để chuyển sang Thực chiến Sprint 1; ván đấu luyện tập đã được đóng.'
+        );
+        dirty = true;
+      } else if (t.status === 'qualifying' && t.week_started_at) {
+        const startMs = new Date(t.week_started_at).getTime();
+        const computedWeek = Math.max(1, Math.floor((now - startMs) / WEEK_MS) + 1);
+        if (computedWeek > t.current_week) {
+          applySprintResetsToEntries(t, computedWeek);
+          t.current_week = computedWeek;
+          t.rules_json = weeklyRules(computedWeek, t.rules_schedule);
+          clearTournamentWaiters(t.id);
+          abandonActiveTournamentMatches(
+            t.id,
+            `Giải đấu đã bước sang Sprint ${computedWeek} và xét lại hạng (×2/3); ván đấu thuộc Sprint cũ bị hủy.`
+          );
+          dirty = true;
+        }
+      }
+    }
+    if (dirty) saveDb();
+  }
+
+  function applyTournamentScoreForMatch(match: MatchRecord, score1: number) {
+    const updates = new Map<
+      string,
+      { tier: RankTier; stars: number; seasonPoints: number; phase: 'practice' | 'ranked' | null }
+    >();
+    if (!match.tournament_id || match.is_sparring) return updates;
+
+    const e1 = db.tournamentEntries.find(
+      (e) => e.tournament_id === match.tournament_id && e.player_id === match.player1_id
+    );
+    const e2 = db.tournamentEntries.find(
+      (e) => e.tournament_id === match.tournament_id && e.player_id === match.player2_id
+    );
+
+    for (const [entry, sc] of [
+      [e1, score1],
+      [e2, 1 - score1],
+    ] as const) {
+      if (!entry) continue;
+      entry.matches_played += 1;
+      if (sc === 1) entry.wins += 1;
+      else if (sc === 0.5) entry.draws = (entry.draws || 0) + 1;
+      else entry.losses += 1;
+
+      if (match.tournament_phase === 'ranked') {
+        const prog = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, sc);
+        entry.tier = prog.tier as RankTier;
+        entry.rank_stars = prog.stars;
+        entry.season_points = prog.seasonPoints;
+        entry.points = entry.wins;
+      }
+      updates.set(entry.player_id, {
+        tier: entry.tier,
+        stars: entry.rank_stars,
+        seasonPoints: entry.season_points,
+        phase: match.tournament_phase,
+      });
+    }
+    return updates;
+  }
+
+  function adjudicateMatchForfeit(
+    matchId: string,
+    offenderId: string,
+    reasonCode: string,
+    winnerMessage: string,
+    loserMessage: string
+  ) {
+    const match = db.matches.find((m) => m.id === matchId && m.status === 'active');
+    if (!match || (match.player1_id !== offenderId && match.player2_id !== offenderId)) {
+      return null;
+    }
+
+    const u1 = db.users.find((u) => u.id === match.player1_id);
+    const u2 = db.users.find((u) => u.id === match.player2_id);
+    if (!u1 || !u2) return null;
+
+    const winnerId = offenderId === match.player1_id ? match.player2_id : match.player1_id;
+    const score1 = winnerId === match.player1_id ? 1 : 0;
+    const eloUpdated =
+      match.match_type === 'bot' &&
+      match.tournament_phase !== 'practice' &&
+      !match.is_sparring;
+
+    const p1Before = u1.elo;
+    const p2Before = u2.elo;
+    const p1After = eloUpdated ? calculateElo(p1Before, p2Before, score1) : p1Before;
+    const p2After = eloUpdated ? calculateElo(p2Before, p1Before, 1 - score1) : p2Before;
+
+    if (eloUpdated) {
+      u1.elo = p1After;
+      u2.elo = p2After;
+    }
+
+    const tournamentUpdates = applyTournamentScoreForMatch(match, score1);
+
+    match.status = 'completed';
+    match.winner_id = winnerId;
+    match.disconnected_player_id = null;
+    match.disconnected_at = null;
+    match.completed_at = new Date().toISOString();
+
+    if (!db.matchResults.some((r) => r.match_id === match.id)) {
+      db.matchResults.push({
+        match_id: match.id,
+        player1_elo_before: p1Before,
+        player2_elo_before: p2Before,
+        player1_elo_after: p1After,
+        player2_elo_after: p2After,
+        result_player1: score1,
+        created_at: match.completed_at,
+      });
+    }
+
+    const spar = sparringSessions.get(match.id);
+    if (spar) {
+      spar.destroyed = true;
+      sparringSessions.delete(match.id);
+    }
+    saveDb();
+
+    const winnerPlayer: 1 | 2 = winnerId === match.player1_id ? 1 : 2;
+    const offenderPlayer: 1 | 2 = offenderId === match.player1_id ? 1 : 2;
+
+    for (const pid of [match.player1_id, match.player2_id]) {
+      const isP1 = pid === match.player1_id;
+      const isWinner = pid === winnerId;
+      sendWs(liveSockets.get(pid), 'match-forfeited', {
+        matchId: match.id,
+        winnerId,
+        winnerPlayer,
+        offenderId,
+        offenderPlayer,
+        reason: reasonCode,
+        message: isWinner ? winnerMessage : loserMessage,
+        eloUpdated,
+        eloBefore: isP1 ? p1Before : p2Before,
+        eloAfter: isP1 ? p1After : p2After,
+        tournamentUpdate: tournamentUpdates.get(pid) || null,
+      });
+    }
+
+    return {
+      matchId: match.id,
+      winnerId,
+      winnerPlayer,
+      offenderId,
+      offenderPlayer,
+      reason: reasonCode,
+      eloUpdated,
+      p1Before,
+      p1After,
+      p2Before,
+      p2After,
+      tournamentUpdates,
+    };
+  }
+
+  function processDisconnectedMatches() {
+    const now = Date.now();
+    for (const match of db.matches) {
+      if (
+        match.status !== 'active' ||
+        !match.disconnected_player_id ||
+        !match.disconnected_at ||
+        match.is_sparring
+      ) {
+        continue;
+      }
+      const discMs = new Date(match.disconnected_at).getTime();
+      if (now - discMs < disconnectForfeitMs) continue;
+
+      const p1Online = liveSockets.get(match.player1_id)?.readyState === WebSocket.OPEN;
+      const p2Online = liveSockets.get(match.player2_id)?.readyState === WebSocket.OPEN;
+      if (!p1Online && !p2Online) {
+        match.status = 'abandoned';
+        match.completed_at = new Date().toISOString();
+        match.disconnected_player_id = null;
+        match.disconnected_at = null;
+        saveDb();
+        continue;
+      }
+
+      if (liveSockets.get(match.disconnected_player_id)?.readyState === WebSocket.OPEN) {
+        match.disconnected_player_id = null;
+        match.disconnected_at = null;
+        saveDb();
+        continue;
+      }
+
+      adjudicateMatchForfeit(
+        match.id,
+        match.disconnected_player_id,
+        'disconnect-timeout',
+        'Đối thủ đã mất kết nối hoặc thoát trận — Bạn được xử thắng kỹ thuật ngay lập tức!',
+        'Bạn đã ngắt kết nối quá thời gian quy định nên bị xử thua kỹ thuật.'
+      );
+    }
+  }
+
+  function getAuthUser(req: Request): UserRecord {
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Bearer ')) {
+      throw Object.assign(new Error('Vui lòng đăng nhập để thực hiện thao tác này.'), { status: 401 });
+    }
+    const payload = verifyToken(header.slice(7));
+    const user = db.users.find((u) => u.id === payload.sub);
+    if (!user) throw Object.assign(new Error('Không tìm thấy tài khoản.'), { status: 401 });
+    return user;
+  }
+
+  function getOptionalAuthUser(req: Request): UserRecord | null {
+    try {
+      return getAuthUser(req);
+    } catch {
+      return null;
+    }
+  }
+
+  function getActiveUserBot(userId: string): { version: number; code: string } | null {
+    const usr = db.users.find((u) => u.id === userId);
+    if (!usr || !usr.active_bot_version) return null;
+    const rec = db.botVersions.find(
+      (b) => b.user_id === userId && b.version === usr.active_bot_version
+    );
+    if (!rec || !rec.code.trim()) return null;
+    return { version: rec.version, code: rec.code };
+  }
+
+  function computeChallengerStandings(tournamentId: string) {
+    return db.tournamentEntries
+      .filter((e) => e.tournament_id === tournamentId && e.tier === 'Challenger')
+      .map((e) => {
+        const u = db.users.find((usr) => usr.id === e.player_id);
+        return {
+          player_id: e.player_id,
+          display_name: u?.display_name || 'Kỳ thủ',
+          tier: e.tier,
+          rank_stars: 0,
+          season_points: e.season_points,
+          matches_played: e.matches_played,
+          wins: e.wins,
+          draws: e.draws || 0,
+          losses: e.losses,
+          elo: u?.elo ?? e.tournament_elo,
+          registered_at: e.registered_at,
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.season_points - a.season_points ||
+          b.elo - a.elo ||
+          b.wins - a.wins ||
+          a.registered_at.localeCompare(b.registered_at)
+      );
+  }
+
+  // ── Express HTTP App ──────────────────────────────────────────
   const app = express();
   const httpServer = http.createServer(app);
 
   app.use(express.json({ limit: '2mb' }));
 
-  // CORS for local or cross-origin testing
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
@@ -795,15 +1116,15 @@ async function startServer() {
         email,
         password_hash: await hashPassword(password),
         display_name: displayName,
-        elo: 1200,
         avatar_id: 'pumpkin',
+        elo: 1200,
         is_admin: false,
         active_bot_version: 0,
         created_at: new Date().toISOString(),
       };
       db.users.push(user);
       saveDb();
-      res.status(201).json({ token: createToken(user), user: { ...publicUser(user), email: user.email } });
+      res.status(201).json({ token: createToken(user), user: publicUser(user) });
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message || 'Lỗi đăng ký tài khoản.' });
     }
@@ -818,7 +1139,7 @@ async function startServer() {
         res.status(401).json({ error: 'Email hoặc mật khẩu không chính xác.' });
         return;
       }
-      res.json({ token: createToken(user), user: { ...publicUser(user), email: user.email } });
+      res.json({ token: createToken(user), user: publicUser(user) });
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message || 'Lỗi đăng nhập.' });
     }
@@ -827,7 +1148,7 @@ async function startServer() {
   app.get('/api/me', (req: Request, res: Response) => {
     try {
       const user = getAuthUser(req);
-      res.json({ user: { ...publicUser(user), email: user.email, stats: playerStats(user.id) } });
+      res.json({ user: publicUser(user) });
     } catch (err: any) {
       res.status(err.status || 401).json({ error: err.message });
     }
@@ -847,7 +1168,7 @@ async function startServer() {
         return;
       }
       if (avatarId !== null && !['pumpkin', 'ghost', 'bat', 'knight', 'fox', 'crown'].includes(avatarId)) {
-        res.status(400).json({ error: 'Avatar không hợp lệ.' });
+        res.status(400).json({ error: 'Diện mạo kỳ thủ không hợp lệ.' });
         return;
       }
       if (newPassword && newPassword.length < 10) {
@@ -859,7 +1180,7 @@ async function startServer() {
         return;
       }
       if (displayName === null && avatarId === null && !newPassword) {
-        res.status(400).json({ error: 'Hãy nhập tên mới, avatar mới hoặc mật khẩu mới.' });
+        res.status(400).json({ error: 'Hãy chọn nội dung cần cập nhật.' });
         return;
       }
       if (newPassword && !(await verifyPassword(currentPassword, user.password_hash))) {
@@ -869,18 +1190,6 @@ async function startServer() {
       if (displayName !== null) user.display_name = displayName;
       if (avatarId !== null) user.avatar_id = avatarId;
       if (newPassword) user.password_hash = await hashPassword(newPassword);
-      saveDb();
-      res.json({ user: { ...publicUser(user), email: user.email, stats: playerStats(user.id) } });
-    } catch (err: any) {
-      res.status(err.status || 500).json({ error: err.message });
-    }
-  });
-
-  // Convenient Local Dev helper: Toggle BTC Organizer role without running manual SQL
-  app.post('/api/dev/toggle-admin', (req: Request, res: Response) => {
-    try {
-      const user = getAuthUser(req);
-      user.is_admin = !user.is_admin;
       saveDb();
       res.json({ user: publicUser(user) });
     } catch (err: any) {
@@ -940,6 +1249,14 @@ async function startServer() {
           entry.bot_version = version;
         }
       }
+      const sock = liveSockets.get(user.id);
+      if (sock?.queueMode === 'tournament') {
+        clearUserQueues(user.id);
+        sock.queueMode = null;
+        sendWs(sock, 'search-cancelled', {
+          message: 'Bot đã cập nhật. Hãy bấm Tìm trận lại để xuất chiến phiên bản mới.',
+        });
+      }
       saveDb();
       res.status(201).json({ version, sha256 });
     } catch (err: any) {
@@ -965,12 +1282,9 @@ async function startServer() {
     try {
       const user = getAuthUser(req);
       const matches = db.matches
-        .filter(
-          (m) =>
-            m.status === 'completed' &&
-            (m.player1_id === user.id || m.player2_id === user.id)
-        )
+        .filter((m) => m.player1_id === user.id || m.player2_id === user.id)
         .sort((a, b) => b.created_at.localeCompare(a.created_at))
+        .slice(0, 50)
         .map((m) => {
           const u1 = db.users.find((u) => u.id === m.player1_id);
           const u2 = db.users.find((u) => u.id === m.player2_id);
@@ -979,15 +1293,8 @@ async function startServer() {
             id: m.id,
             seed: m.seed,
             status: m.status,
-            match_type:
-              m.match_type === 'bot' ||
-              Boolean(
-                mr &&
-                  (mr.player1_elo_before !== mr.player1_elo_after ||
-                    mr.player2_elo_before !== mr.player2_elo_after)
-              )
-                ? 'bot'
-                : 'human',
+            match_type: m.match_type,
+            tournament_phase: m.tournament_phase,
             winner_id: m.winner_id,
             final_state_hash: m.final_state_hash,
             replay_sha256: m.replay_sha256,
@@ -999,7 +1306,7 @@ async function startServer() {
             player1_id: m.player1_id,
             player2_id: m.player2_id,
             elo_delta:
-              mr && m.match_type === 'bot' && !m.is_sparring
+              mr && m.match_type === 'bot' && m.tournament_phase !== 'practice'
                 ? m.player1_id === user.id
                   ? mr.player1_elo_after - mr.player1_elo_before
                   : mr.player2_elo_after - mr.player2_elo_before
@@ -1021,7 +1328,10 @@ async function startServer() {
         return;
       }
       if (!match.replay_json) {
-        res.status(404).json({ error: 'Trận đấu này không có dữ liệu replay.', code: 'REPLAY_UNAVAILABLE' });
+        res.status(404).json({
+          error: 'Trận đấu này kết thúc bằng xử thắng kỹ thuật nên không có bản ghi nước đi đầy đủ.',
+          code: 'REPLAY_UNAVAILABLE',
+        });
         return;
       }
       res.json({ replay: match.replay_json });
@@ -1033,7 +1343,10 @@ async function startServer() {
   app.get('/api/tournaments', (_req: Request, res: Response) => {
     updateTournamentLifecycle();
     const list = [...db.tournaments]
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      .sort((a, b) => {
+        const order = (s: string) => (s === 'registration' ? 0 : s === 'qualifying' ? 1 : 2);
+        return order(a.status) - order(b.status) || b.created_at.localeCompare(a.created_at);
+      })
       .map((t) => ({
         ...t,
         participant_count: db.tournamentEntries.filter((e) => e.tournament_id === t.id).length,
@@ -1050,7 +1363,7 @@ async function startServer() {
     }
     const authUser = getOptionalAuthUser(req);
     const entries = db.tournamentEntries.filter((e) => e.tournament_id === t.id);
-    const own = authUser ? entries.find((e) => e.player_id === authUser.id) : null;
+    const ownEntry = authUser ? entries.find((e) => e.player_id === authUser.id) || null : null;
 
     const myMatches = authUser
       ? db.matches
@@ -1067,6 +1380,7 @@ async function startServer() {
               id: m.id,
               status: m.status,
               tournament_phase: m.tournament_phase,
+              is_sparring: Boolean(m.is_sparring),
               winner_id: m.winner_id,
               created_at: m.created_at,
               completed_at: m.completed_at,
@@ -1077,44 +1391,31 @@ async function startServer() {
           })
       : [];
 
-    const rankOrder = (tier: RankTier) => TOURNAMENT_RANKS.indexOf(tier);
-    const sortedStandings = [...entries]
-      .map((e) => {
-        const u = db.users.find((usr) => usr.id === e.player_id);
-        return {
-          player_id: e.player_id,
-          display_name: u?.display_name || 'Kỳ thủ',
-          tier: e.tier,
-          rank_stars: e.rank_stars,
-          season_points: e.season_points,
-          matches_played: e.matches_played,
-          wins: e.wins,
-          draws: e.draws,
-          losses: e.losses,
-          elo: u?.elo || e.tournament_elo,
-        };
-      })
-      .sort(
-        (a, b) =>
-          rankOrder(b.tier) - rankOrder(a.tier) ||
-          b.season_points - a.season_points ||
-          b.rank_stars - a.rank_stars ||
-          b.wins - a.wins
-      );
+    const challengerStandings = computeChallengerStandings(t.id);
+    let privateChallengerRank: number | null = null;
+    if (ownEntry && ownEntry.tier === 'Challenger') {
+      const idx = challengerStandings.findIndex((row) => row.player_id === ownEntry.player_id);
+      privateChallengerRank = idx >= 0 ? idx + 1 : challengerStandings.length + 1;
+    }
+
+    const motivationBanner = buildTournamentMotivation(ownEntry, privateChallengerRank);
+    const isCompleted = t.status === 'completed';
 
     res.json({
       tournament: t,
       participantCount: entries.length,
-      ranks: TOURNAMENT_RANKS.map((tier, index) => ({
-        tier,
-        label: RANK_LABELS[tier],
-        index,
-        starsToPromote: RANK_PROMOTION_STARS[tier],
-      })),
-      myEntry: own || null,
+      ranks: tournamentRanks(),
+      myEntry: ownEntry
+        ? {
+            ...ownEntry,
+            elo: authUser?.elo ?? ownEntry.tournament_elo,
+          }
+        : null,
+      motivationBanner,
+      leaderboardHidden: !isCompleted,
       matches: myMatches,
-      standings: sortedStandings,
-      finalStandings: t.status === 'completed' ? sortedStandings : null,
+      standings: isCompleted ? challengerStandings : [],
+      finalStandings: isCompleted ? challengerStandings : null,
     });
   });
 
@@ -1161,6 +1462,7 @@ async function startServer() {
         ends_at: endsAt.toISOString(),
         max_teams: maxTeams,
         current_week: 0,
+        last_reset_week: 0,
         week_started_at: null,
         rules_json: {},
         rules_schedule: sprintRules,
@@ -1178,24 +1480,83 @@ async function startServer() {
     try {
       const user = getAuthUser(req);
       if (!user.is_admin) {
-        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để bắt đầu vòng thi đấu.' });
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để bắt đầu vòng Thực chiến.' });
         return;
       }
       const t = db.tournaments.find((tour) => tour.id === req.params.id);
       if (!t || t.status !== 'registration') {
-        res.status(409).json({ error: 'Giải đấu không ở trạng thái đăng ký.' });
+        res.status(409).json({ error: 'Giải đấu không ở giai đoạn Mở đăng ký / Chạy đà.' });
         return;
       }
       t.status = 'qualifying';
       t.current_week = 1;
+      t.last_reset_week = 1;
       t.week_started_at = new Date().toISOString();
       t.rules_json = weeklyRules(1, t.rules_schedule);
-      for (const entry of db.tournamentEntries.filter((e) => e.tournament_id === t.id)) {
-        const u = db.users.find((usr) => usr.id === entry.player_id);
-        entry.tier = rankTierFromElo(u?.elo || 1200);
-        entry.rank_stars = 0;
-        entry.season_points = 0;
+      initializeStageBEntries(t.id);
+      clearTournamentWaiters(t.id);
+      abandonActiveTournamentMatches(
+        t.id,
+        'Ban Tổ Chức đã mở Vòng Thực Chiến Sprint 1; các trận Chạy Đà đang dở được đóng lại.'
+      );
+      saveDb();
+      res.json({ tournament: t });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/advance-sprint', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để chuyển Sprint.' });
+        return;
       }
+      const t = db.tournaments.find((tour) => tour.id === req.params.id);
+      if (!t || t.status !== 'qualifying') {
+        res.status(409).json({ error: 'Giải đấu không ở giai đoạn Thực chiến.' });
+        return;
+      }
+      const nextWeek = Math.max(1, t.current_week || 1) + 1;
+      applySprintResetsToEntries(t, nextWeek);
+      t.current_week = nextWeek;
+      t.week_started_at = new Date(Date.now() - (nextWeek - 1) * WEEK_MS).toISOString();
+      t.rules_json = weeklyRules(nextWeek, t.rules_schedule);
+      clearTournamentWaiters(t.id);
+      abandonActiveTournamentMatches(
+        t.id,
+        `Ban Tổ Chức đã chuyển sang Sprint ${nextWeek} và áp dụng xét hạng ×2/3; trận thuộc Sprint cũ bị hủy.`
+      );
+      saveDb();
+      res.json({ tournament: t });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/complete', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để kết thúc giải và công bố BXH.' });
+        return;
+      }
+      const t = db.tournaments.find((tour) => tour.id === req.params.id);
+      if (!t || t.status === 'completed') {
+        res.status(409).json({ error: 'Giải đấu đã kết thúc hoặc không tồn tại.' });
+        return;
+      }
+      t.status = 'completed';
+      const nowIso = new Date().toISOString();
+      if (new Date(t.ends_at) > new Date()) {
+        t.ends_at = nowIso;
+      }
+      clearTournamentWaiters(t.id);
+      abandonActiveTournamentMatches(
+        t.id,
+        'Giải đấu đã kết thúc để công bố Bảng Xếp Hạng Thách Đấu chung cuộc.'
+      );
       saveDb();
       res.json({ tournament: t });
     } catch (err: any) {
@@ -1212,15 +1573,18 @@ async function startServer() {
         res.status(404).json({ error: 'Không tìm thấy giải đấu.' });
         return;
       }
-      if (t.status !== 'registration' || new Date(t.registration_closes_at).getTime() <= Date.now()) {
-        res.status(409).json({ error: 'Giải đấu đã đóng đăng ký; Sprint đã bắt đầu hoặc hết hạn đăng ký.' });
-        return;
-      }
       const existing = db.tournamentEntries.find(
         (e) => e.tournament_id === t.id && e.player_id === user.id
       );
       if (existing) {
         res.json({ entry: existing, alreadyRegistered: true });
+        return;
+      }
+      if (t.status !== 'registration' || new Date(t.registration_closes_at) <= new Date()) {
+        res.status(409).json({
+          error:
+            'Giải đấu đã đóng cổng đăng ký (đang ở Giai đoạn Thực chiến hoặc đã kết thúc). Hãy chọn giải đang Mở đăng ký!',
+        });
         return;
       }
       const count = db.tournamentEntries.filter((e) => e.tournament_id === t.id).length;
@@ -1238,12 +1602,14 @@ async function startServer() {
         losses: 0,
         points: 0,
         tournament_elo: user.elo,
-        tier: rankTierFromElo(user.elo),
+        // Placeholder only during registration; Elo determines the starting rank at closure.
+        tier: 'Bronze',
         rank_stars: 0,
         season_points: 0,
         registered_at: new Date().toISOString(),
       };
       db.tournamentEntries.push(entry);
+      updateTournamentLifecycle();
       saveDb();
       res.status(201).json({ entry });
     } catch (err: any) {
@@ -1254,6 +1620,7 @@ async function startServer() {
   app.post('/api/match/submit-result', (req: Request, res: Response) => {
     try {
       const user = getAuthUser(req);
+      updateTournamentLifecycle();
       const body = req.body || {};
       const match = db.matches.find((m) => m.id === body.matchId);
       if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
@@ -1262,6 +1629,11 @@ async function startServer() {
       }
       if (match.status === 'completed') {
         const mr = db.matchResults.find((r) => r.match_id === match.id);
+        const ownEntry = match.tournament_id
+          ? db.tournamentEntries.find(
+              (e) => e.tournament_id === match.tournament_id && e.player_id === user.id
+            )
+          : null;
         res.json({
           alreadySubmitted: true,
           matchId: match.id,
@@ -1273,7 +1645,18 @@ async function startServer() {
                 player2: { before: mr.player2_elo_before, after: mr.player2_elo_after },
               }
             : null,
-          eloUpdated: match.match_type === 'bot' && !match.is_sparring,
+          eloUpdated:
+            match.match_type === 'bot' &&
+            match.tournament_phase !== 'practice' &&
+            !match.is_sparring,
+          tournamentUpdate: ownEntry
+            ? {
+                tier: ownEntry.tier,
+                stars: ownEntry.rank_stars,
+                seasonPoints: ownEntry.season_points,
+                phase: match.tournament_phase,
+              }
+            : null,
           replaySha256: match.replay_sha256,
         });
         return;
@@ -1281,6 +1664,29 @@ async function startServer() {
       if (match.status !== 'active') {
         res.status(409).json({ error: 'Trận đấu không còn ở trạng thái đang diễn ra.' });
         return;
+      }
+
+      if (match.tournament_id && !match.is_sparring) {
+        const t = db.tournaments.find((tour) => tour.id === match.tournament_id);
+        const practiceOpen =
+          match.tournament_phase === 'practice' &&
+          t?.status === 'registration' &&
+          new Date(t.registration_closes_at) > new Date();
+        const rankedOpen =
+          match.tournament_phase === 'ranked' &&
+          t?.status === 'qualifying' &&
+          new Date(t.ends_at) > new Date() &&
+          Number(match.tournament_rules?.week) === Number(t.current_week);
+        if (!practiceOpen && !rankedOpen) {
+          match.status = 'abandoned';
+          saveDb();
+          res.status(409).json({
+            error:
+              'Giai đoạn hoặc Sprint của giải đấu đã kết thúc trước khi nộp kết quả; trận bị hủy và không tính điểm.',
+            matchStatus: 'abandoned',
+          });
+          return;
+        }
       }
 
       const p1 = body.proofs?.player1;
@@ -1293,6 +1699,27 @@ async function startServer() {
         res.status(409).json({ error: 'Khóa phiên P-256 chưa được đăng ký đầy đủ.' });
         return;
       }
+
+      const validProofShape = (pr: any) =>
+        pr &&
+        pr.matchId === match.id &&
+        pr.roomId === match.id &&
+        Number.isInteger(pr.stepCount) &&
+        pr.stepCount >= 1 &&
+        /^[0-9a-f]{64}$/i.test(pr.stateHash || '') &&
+        [0, 1, 2].includes(pr.winner);
+
+      if (
+        !validProofShape(p1.proof) ||
+        !validProofShape(p2.proof) ||
+        p1.proof.winner !== p2.proof.winner ||
+        p1.proof.stepCount !== p2.proof.stepCount ||
+        p1.proof.stateHash !== p2.proof.stateHash
+      ) {
+        res.status(409).json({ error: 'Bằng chứng kết thúc ván giữa hai người chơi mâu thuẫn nhau.' });
+        return;
+      }
+
       if (
         !verifySessionProof(match.player1_key, p1.proof, p1.signature) ||
         !verifySessionProof(match.player2_key, p2.proof, p2.signature)
@@ -1319,7 +1746,10 @@ async function startServer() {
       const u1 = db.users.find((u) => u.id === match.player1_id)!;
       const u2 = db.users.find((u) => u.id === match.player2_id)!;
       const score1 = replayResult.winner === 1 ? 1 : replayResult.winner === 2 ? 0 : 0.5;
-      const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
+      const eloUpdated =
+        match.match_type === 'bot' &&
+        match.tournament_phase !== 'practice' &&
+        !match.is_sparring;
       const u1Before = u1.elo;
       const u2Before = u2.elo;
       const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
@@ -1330,44 +1760,11 @@ async function startServer() {
         u2.elo = u2After;
       }
 
-      let tournamentUpdate: any = null;
-      if (match.tournament_id) {
-        const e1 = db.tournamentEntries.find(
-          (e) => e.tournament_id === match.tournament_id && e.player_id === u1.id
-        );
-        const e2 = db.tournamentEntries.find(
-          (e) => e.tournament_id === match.tournament_id && e.player_id === u2.id
-        );
-        for (const [entry, sc] of [
-          [e1, score1],
-          [e2, 1 - score1],
-        ] as const) {
-          if (!entry) continue;
-          entry.matches_played += 1;
-          if (sc === 1) entry.wins += 1;
-          else if (sc === 0) entry.losses += 1;
-          else entry.draws += 1;
-          if (match.tournament_phase === 'ranked') {
-            const prog = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, sc);
-            entry.tier = prog.tier;
-            entry.rank_stars = prog.stars;
-            entry.season_points = prog.seasonPoints;
-            entry.points = entry.wins;
-          }
-          if (entry.player_id === user.id) {
-            tournamentUpdate = {
-              tier: entry.tier,
-              stars: entry.rank_stars,
-              seasonPoints: entry.season_points,
-              phase: match.tournament_phase,
-            };
-          }
-        }
-      }
-
+      const tournamentUpdates = applyTournamentScoreForMatch(match, score1);
       const replayChecksum = sha256Canonical(body.replay);
       match.status = 'completed';
-      match.winner_id = replayResult.winner === 1 ? u1.id : replayResult.winner === 2 ? u2.id : null;
+      match.winner_id =
+        replayResult.winner === 1 ? u1.id : replayResult.winner === 2 ? u2.id : null;
       match.final_state_hash = replayResult.finalHash;
       match.replay_sha256 = replayChecksum;
       match.replay_json = body.replay;
@@ -1385,20 +1782,183 @@ async function startServer() {
         created_at: match.completed_at,
       });
 
-      sparringSessions.delete(match.id);
+      const spar = sparringSessions.get(match.id);
+      if (spar) {
+        spar.destroyed = true;
+        sparringSessions.delete(match.id);
+      }
       saveDb();
 
       res.json({
         matchId: match.id,
         winnerId: match.winner_id,
+        winner: replayResult.winner,
+        drawReason: replayResult.drawReason || null,
         finalStateHash: match.final_state_hash,
         elo: {
           player1: { before: u1Before, after: u1After },
           player2: { before: u2Before, after: u2After },
         },
         eloUpdated,
-        tournamentUpdate,
+        tournamentUpdate: tournamentUpdates.get(user.id) || null,
         replaySha256: replayChecksum,
+      });
+    } catch (err: any) {
+      res.status(err.status || 400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/match/forfeit', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      const matchId = String(req.body?.matchId || '');
+      const outcome = adjudicateMatchForfeit(
+        matchId,
+        user.id,
+        'player-left-match',
+        'Đối thủ đã thoát khỏi bàn đấu — Bạn được xử thắng kỹ thuật ngay lập tức!',
+        'Bạn đã rời bàn khi trận đấu chưa kết thúc và bị xử thua kỹ thuật.'
+      );
+      if (!outcome) {
+        res.status(404).json({ error: 'Không tìm thấy trận đấu đang diễn ra.' });
+        return;
+      }
+      res.json({ forfeited: true, matchId: outcome.matchId, winnerId: outcome.winnerId });
+    } catch (err: any) {
+      res.status(err.status || 400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/match/claim-timeout', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      const matchId = String(req.body?.matchId || '');
+      const match = db.matches.find((m) => m.id === matchId && m.status === 'active');
+      if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
+        res.status(404).json({ error: 'Không tìm thấy trận đấu đang diễn ra.' });
+        return;
+      }
+      const claimantSeat: 1 | 2 = match.player1_id === user.id ? 1 : 2;
+      const opponentSeat: 1 | 2 = claimantSeat === 1 ? 2 : 1;
+      const opponentId = opponentSeat === 1 ? match.player1_id : match.player2_id;
+      const cs = match.consensus_state || createInitialConsensusState(match.match_type);
+      const now = Date.now();
+
+      // 1. Setup / Readiness timeout
+      if (!cs.bothReadyAt) {
+        const oppReady = opponentSeat === 1 ? cs.p1ReadyAt : cs.p2ReadyAt;
+        const myReady = claimantSeat === 1 ? cs.p1ReadyAt : cs.p2ReadyAt;
+        if (!oppReady && (now - cs.createdAtMs >= setupTimeoutMs || (myReady && now - myReady >= setupPeerReadyTimeoutMs))) {
+          const out = adjudicateMatchForfeit(
+            match.id,
+            opponentId,
+            'setup-timeout',
+            'Đối thủ không nạp Bot hoặc không xác nhận sẵn sàng đúng hạn — Bạn được xử thắng kỹ thuật!',
+            'Bạn không nạp Bot hoặc không xác nhận sẵn sàng đúng hạn nên bị xử thua kỹ thuật.'
+          );
+          res.json({ resolved: Boolean(out), reason: 'setup-timeout', winnerId: out?.winnerId });
+          return;
+        }
+        res.status(202).json({ resolved: false, waiting: true });
+        return;
+      }
+
+      // 2. Withheld FINAL_PROOF timeout after terminal state
+      if (
+        cs.finalProofs?.[claimantSeat] &&
+        !cs.finalProofs?.[opponentSeat] &&
+        now - (cs.finalProofAt?.[claimantSeat] || now) >= ackTimeoutMs
+      ) {
+        if (req.body?.replay) {
+          verifyReplay(req.body.replay, match.seed, match.id, match.tournament_rules || null);
+        }
+        const out = adjudicateMatchForfeit(
+          match.id,
+          opponentId,
+          'withheld-final-proof',
+          'Đối thủ cố tình không gửi chữ ký xác nhận cuối trận — Bạn được xử thắng kỹ thuật!',
+          'Bạn không gửi chữ ký xác nhận kết quả cuối trận đúng hạn nên bị xử thua kỹ thuật.'
+        );
+        res.json({ resolved: Boolean(out), reason: 'withheld-final-proof', winnerId: out?.winnerId });
+        return;
+      }
+
+      // 3. Withheld CONSENSUS_ACK timeout
+      const currentStep = Number(cs.currentStep || 0);
+      if (
+        cs.lastRevealStep === currentStep &&
+        cs.acksForPendingStep?.[claimantSeat] &&
+        !cs.acksForPendingStep?.[opponentSeat] &&
+        now - (cs.lastRevealAt || now) >= ackTimeoutMs
+      ) {
+        const out = adjudicateMatchForfeit(
+          match.id,
+          opponentId,
+          'withheld-ack',
+          'Đối thủ cố tình ngâm gói xác nhận trạng thái (ACK) — Bạn được xử thắng kỹ thuật ngay lập tức!',
+          'Bạn không phản hồi gói xác nhận trạng thái (ACK) đúng hạn nên bị xử thua kỹ thuật.'
+        );
+        res.json({ resolved: Boolean(out), reason: 'withheld-ack', winnerId: out?.winnerId });
+        return;
+      }
+
+      // 4. Turn / Stalled Bot timeout
+      const activeTurnSeat: 1 | 2 = currentStep % 2 === 0 ? 1 : 2;
+      const turnTimeoutMs = match.match_type === 'bot' ? botTurnTimeoutMs : 45000;
+      if (
+        activeTurnSeat === opponentSeat &&
+        cs.lastRevealStep !== currentStep &&
+        now - (cs.stepStartedAt || now) >= turnTimeoutMs
+      ) {
+        const out = adjudicateMatchForfeit(
+          match.id,
+          opponentId,
+          'turn-timeout',
+          'Đối thủ treo máy hoặc không gửi nước đi đúng hạn — Bạn được xử thắng kỹ thuật!',
+          'Bot hoặc phiên của bạn không gửi nước đi đúng hạn nên bị xử thua kỹ thuật.'
+        );
+        res.json({ resolved: Boolean(out), reason: 'turn-timeout', winnerId: out?.winnerId });
+        return;
+      }
+
+      res.status(202).json({ resolved: false, waiting: true });
+    } catch (err: any) {
+      res.status(err.status || 400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/match/claim-disconnect', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      const proof = req.body?.proof;
+      if (!proof || proof.kind !== 'disconnect-claim' || !req.body?.signature) {
+        res.status(400).json({ error: 'Biên bản báo mất kết nối không hợp lệ.' });
+        return;
+      }
+      const match = db.matches.find((m) => m.id === proof.matchId && m.status === 'active');
+      if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
+        res.status(404).json({ error: 'Không tìm thấy trận đấu đang diễn ra.' });
+        return;
+      }
+      const disconnectedId = match.player1_id === user.id ? match.player2_id : match.player1_id;
+      if (
+        match.disconnected_player_id === disconnectedId &&
+        match.disconnected_at &&
+        Date.now() - new Date(match.disconnected_at).getTime() >= disconnectForfeitMs
+      ) {
+        const out = adjudicateMatchForfeit(
+          match.id,
+          disconnectedId,
+          'disconnect-timeout',
+          'Đối thủ đã mất kết nối quá thời gian quy định — Bạn được xử thắng kỹ thuật!',
+          'Bạn đã mất kết nối quá thời gian quy định nên bị xử thua kỹ thuật.'
+        );
+        res.json({ status: 'adjudicated', winnerId: out?.winnerId });
+        return;
+      }
+      res.status(202).json({
+        status: 'waiting',
+        message: 'Đang chờ đối chiếu trạng thái kết nối của đối thủ.',
       });
     } catch (err: any) {
       res.status(err.status || 400).json({ error: err.message });
@@ -1409,236 +1969,210 @@ async function startServer() {
     try {
       const user = getAuthUser(req);
       const report = req.body?.report;
-      const proof = report?.payload;
       const evidence = req.body?.evidence;
-      if (!proof || proof.kind !== 'consensus-dispute' || typeof report.signature !== 'string') {
-        res.status(400).json({ error: 'Bằng chứng kiểm tra hash không hợp lệ.' });
-        return;
-      }
-      const match = db.matches.find((entry) => entry.id === proof.matchId);
-      if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
-        res.status(404).json({ error: 'Không tìm thấy trận đấu của bạn.' });
-        return;
-      }
-      if (match.status !== 'active') {
-        res.status(409).json({ error: 'Trận đấu không còn ở trạng thái đang diễn ra.' });
-        return;
-      }
-      const claimantSeat = match.player1_id === user.id ? 1 : 2;
-      if (proof.claimantSeat !== claimantSeat || proof.stepCount !== evidence?.moves?.length + 1 ||
-          proof.stepCount !== evidence?.disputedStep?.stepCount ||
-          !Array.isArray(evidence?.disputedStep?.acknowledgements) ||
-          evidence.disputedStep.acknowledgements.length !== 2 || evidence.matchId !== match.id ||
-          sha256Canonical(evidence) !== proof.evidenceHash) {
-        res.status(400).json({ error: 'Bằng chứng hash không khớp với biên bản trận đấu.' });
-        return;
-      }
-      const localAck = evidence.disputedStep.acknowledgements.find((item: any) => item?.payload?.player === claimantSeat);
-      const remoteAck = evidence.disputedStep.acknowledgements.find((item: any) => item?.payload?.player !== claimantSeat);
-      if (proof.localHash !== localAck?.payload?.stateHash || proof.remoteHash !== remoteAck?.payload?.stateHash ||
-          proof.localHash !== evidence.disputedStep.stateHash || proof.localHash === proof.remoteHash) {
-        res.status(400).json({ error: 'Hash báo cáo không khớp với hai chữ ký đã nhận.' });
-        return;
-      }
-      const claimantKey = claimantSeat === 1 ? match.player1_key : match.player2_key;
-      if (!verifySessionProof(claimantKey, proof, report.signature)) {
-        res.status(400).json({ error: 'Chữ ký bằng chứng kiểm tra hash không hợp lệ.' });
+      const proof = report?.payload;
+
+      if (
+        !proof ||
+        proof.kind !== 'consensus-dispute' ||
+        typeof report?.signature !== 'string' ||
+        !/^[0-9a-f]{64}$/i.test(proof.evidenceHash || '')
+      ) {
+        res.status(400).json({ error: 'Biên bản tranh chấp đồng thuận không hợp lệ.' });
         return;
       }
 
-      const decision = verifyConsensusDispute(evidence, match);
-      if (!decision.adjudicated) {
+      const match = db.matches.find((m) => m.id === proof.matchId);
+      if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
+        res.status(404).json({ error: 'Không tìm thấy trận đấu thuộc tài khoản của bạn.' });
+        return;
+      }
+
+      if (match.status !== 'active') {
+        const prior = db.matchDisputes.find((d) => d.match_id === match.id);
+        if (prior) {
+          const mr = db.matchResults.find((r) => r.match_id === match.id);
+          res.json({
+            matchId: match.id,
+            resolved: prior.status === 'adjudicated',
+            winnerId: prior.winner_id,
+            winnerPlayer:
+              prior.winner_id === match.player1_id
+                ? 1
+                : prior.winner_id === match.player2_id
+                ? 2
+                : null,
+            offenderPlayer:
+              prior.offender_id === match.player1_id
+                ? 1
+                : prior.offender_id === match.player2_id
+                ? 2
+                : null,
+            eloUpdated: prior.status === 'adjudicated' && match.match_type === 'bot' && !match.is_sparring,
+            player1EloAfter: mr?.player1_elo_after,
+            player2EloAfter: mr?.player2_elo_after,
+            message: 'Biên bản tranh chấp của trận này đã được phân xử trước đó.',
+          });
+          return;
+        }
+        res.status(409).json({ error: 'Trận đấu đã kết thúc trước khi gửi biên bản tranh chấp.' });
+        return;
+      }
+
+      if (!match.player1_key || !match.player2_key) {
+        res.status(409).json({ error: 'Khóa phiên của cả 2 phía chưa được đăng ký đầy đủ.' });
+        return;
+      }
+
+      const claimantSeat: 1 | 2 = match.player1_id === user.id ? 1 : 2;
+      const claimantKey = claimantSeat === 1 ? match.player1_key : match.player2_key;
+
+      if (
+        proof.claimantSeat !== claimantSeat ||
+        evidence?.matchId !== match.id ||
+        hashCanonical(evidence) !== proof.evidenceHash
+      ) {
+        res.status(400).json({ error: 'Dữ liệu bằng chứng không khớp với biên bản ký số.' });
+        return;
+      }
+
+      if (!verifySessionProof(claimantKey, proof, report.signature)) {
+        res.status(400).json({ error: 'Chữ ký biên bản tranh chấp không hợp lệ.' });
+        return;
+      }
+
+      const verdict = verifyConsensusDispute(evidence, match);
+      if (!verdict.adjudicated || !verdict.offenderSeat) {
         match.status = 'disputed';
         match.completed_at = new Date().toISOString();
+        db.matchDisputes.push({
+          match_id: match.id,
+          claimant_id: user.id,
+          offender_id: null,
+          status: 'needs_review',
+          reason: verdict.reason,
+          winner_id: null,
+          step_count: verdict.stepCount,
+          expected_state_hash: verdict.expectedHash,
+          created_at: match.completed_at,
+        });
         saveDb();
-        const outcome = {
+        res.json({
           matchId: match.id,
-          claimantId: user.id,
           resolved: false,
-          message: 'Hash hai bên bất đồng nhưng máy chủ chưa xác định được duy nhất bên sai. Trận được đánh dấu tranh chấp.',
-        };
-        for (const playerId of [match.player1_id, match.player2_id]) {
-          sendWs(liveSockets.get(playerId), 'match-dispute-result', outcome);
-        }
-        res.json(outcome);
+          message: 'Đã ghi nhận tranh chấp để kiểm tra thủ công.',
+        });
         return;
       }
 
-      const offenderId = decision.offenderSeat === 1 ? match.player1_id : match.player2_id;
-      const winnerId = offenderId === match.player1_id ? match.player2_id : match.player1_id;
+      const offenderId = verdict.offenderSeat === 1 ? match.player1_id : match.player2_id;
+      const winnerId = verdict.offenderSeat === 1 ? match.player2_id : match.player1_id;
+      const winnerPlayer: 1 | 2 = verdict.offenderSeat === 1 ? 2 : 1;
       const score1 = winnerId === match.player1_id ? 1 : 0;
-      const player1 = db.users.find((entry) => entry.id === match.player1_id)!;
-      const player2 = db.users.find((entry) => entry.id === match.player2_id)!;
-      const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
-      const player1Before = player1.elo;
-      const player2Before = player2.elo;
-      const player1After = eloUpdated ? calculateElo(player1Before, player2Before, score1) : player1Before;
-      const player2After = eloUpdated ? calculateElo(player2Before, player1Before, 1 - score1) : player2Before;
+
+      const u1 = db.users.find((u) => u.id === match.player1_id)!;
+      const u2 = db.users.find((u) => u.id === match.player2_id)!;
+      const eloUpdated =
+        match.match_type === 'bot' &&
+        match.tournament_phase !== 'practice' &&
+        !match.is_sparring;
+      const p1Before = u1.elo;
+      const p2Before = u2.elo;
+      const p1After = eloUpdated ? calculateElo(p1Before, p2Before, score1) : p1Before;
+      const p2After = eloUpdated ? calculateElo(p2Before, p1Before, 1 - score1) : p2Before;
+
       if (eloUpdated) {
-        player1.elo = player1After;
-        player2.elo = player2After;
+        u1.elo = p1After;
+        u2.elo = p2After;
       }
-      db.matchResults.push({
-        match_id: match.id,
-        player1_elo_before: player1Before,
-        player2_elo_before: player2Before,
-        player1_elo_after: player1After,
-        player2_elo_after: player2After,
-        result_player1: score1,
-        created_at: new Date().toISOString(),
-      });
-      if (match.tournament_id) {
-        for (const [playerId, score] of [[match.player1_id, score1], [match.player2_id, 1 - score1]] as const) {
-          const entry = db.tournamentEntries.find((item) => item.tournament_id === match.tournament_id && item.player_id === playerId);
-          if (!entry) continue;
-          entry.matches_played += 1;
-          if (score === 1) entry.wins += 1;
-          else entry.losses += 1;
-          if (match.tournament_phase === 'ranked') {
-            const progress = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, score);
-            entry.tier = progress.tier;
-            entry.rank_stars = progress.stars;
-            entry.season_points = progress.seasonPoints;
-            entry.points = entry.wins;
-          }
-        }
-      }
+
+      const tournamentUpdates = applyTournamentScoreForMatch(match, score1);
+      const completedAt = new Date().toISOString();
       match.status = 'completed';
       match.winner_id = winnerId;
-      match.completed_at = new Date().toISOString();
-      saveDb();
-      const outcome = {
-        matchId: match.id,
-        claimantId: user.id,
-        resolved: true,
-        winnerId,
-        winnerPlayer: winnerId === match.player1_id ? 1 : 2,
-        offenderPlayer: decision.offenderSeat,
-        stepCount: decision.stepCount,
-        eloUpdated,
-        player1EloAfter: player1After,
-        player2EloAfter: player2After,
-        message: 'Máy chủ xác minh transcript: chữ ký hash của đối thủ không khớp trạng thái bàn cờ.',
-      };
-      for (const playerId of [winnerId, offenderId]) {
-        const playerNumber = playerId === match.player1_id ? 1 : 2;
-        sendWs(liveSockets.get(playerId), 'match-dispute-result', {
-          ...outcome,
-          eloAfter: playerNumber === 1 ? player1After : player2After,
+      match.final_state_hash = verdict.expectedHash;
+      match.completed_at = completedAt;
+
+      if (!db.matchResults.some((r) => r.match_id === match.id)) {
+        db.matchResults.push({
+          match_id: match.id,
+          player1_elo_before: p1Before,
+          player2_elo_before: p2Before,
+          player1_elo_after: p1After,
+          player2_elo_after: p2After,
+          result_player1: score1,
+          created_at: completedAt,
         });
       }
-      res.json(outcome);
+
+      db.matchDisputes.push({
+        match_id: match.id,
+        claimant_id: user.id,
+        offender_id: offenderId,
+        status: 'adjudicated',
+        reason: verdict.reason,
+        winner_id: winnerId,
+        step_count: verdict.stepCount,
+        expected_state_hash: verdict.expectedHash,
+        created_at: completedAt,
+      });
+
+      saveDb();
+
+      const winnerMsg =
+        verdict.reason === 'signed-final-proof-mismatch'
+          ? 'Phát hiện đối thủ ký sai lệch kết quả cuối trận — Bạn được xử thắng kỹ thuật ngay lập tức!'
+          : verdict.reason === 'signed-illegal-move'
+          ? 'Đối thủ gửi nước đi bất hợp pháp — Bạn được xử thắng kỹ thuật ngay lập tức!'
+          : 'Phát hiện sai lệch mã băm trạng thái (Hash Mismatch) từ phía đối thủ — Bạn được xử thắng kỹ thuật ngay lập tức!';
+      const loserMsg =
+        'Phiên của bạn gửi dữ liệu trạng thái hoặc chữ ký sai lệch với luật tất định nên bị xử thua kỹ thuật.';
+
+      for (const pid of [match.player1_id, match.player2_id]) {
+        const isP1 = pid === match.player1_id;
+        const isWinner = pid === winnerId;
+        sendWs(liveSockets.get(pid), 'match-dispute-result', {
+          matchId: match.id,
+          resolved: true,
+          winnerId,
+          winnerPlayer,
+          offenderPlayer: verdict.offenderSeat,
+          reason: verdict.reason,
+          eloUpdated,
+          eloBefore: isP1 ? p1Before : p2Before,
+          eloAfter: isP1 ? p1After : p2After,
+          tournamentUpdate: tournamentUpdates.get(pid) || null,
+          message: isWinner ? winnerMsg : loserMsg,
+        });
+      }
+
+      res.json({
+        matchId: match.id,
+        resolved: true,
+        winnerId,
+        winnerPlayer,
+        offenderPlayer: verdict.offenderSeat,
+        reason: verdict.reason,
+        eloUpdated,
+        eloBefore: claimantSeat === 1 ? p1Before : p2Before,
+        eloAfter: claimantSeat === 1 ? p1After : p2After,
+        player1EloAfter: p1After,
+        player2EloAfter: p2After,
+        tournamentUpdate: tournamentUpdates.get(user.id) || null,
+        message: user.id === winnerId ? winnerMsg : loserMsg,
+      });
     } catch (err: any) {
-      res.status(err.status || 400).json({ error: err.message || 'Không thể xác minh bằng chứng hash.' });
+      res.status(err.status || 400).json({ error: err.message });
     }
   });
 
-  // ── WebSocket Server (/ws) ────────────────────────────────────
-  interface AuthedSocket extends WebSocket {
-    authenticated?: boolean;
-    userId?: string;
-    queueMode?: 'human' | 'bot' | 'tournament' | null;
-    tournamentId?: string | null;
-  }
-
-  const liveSockets = new Map<string, AuthedSocket>();
-  const humanQueue = new Set<string>();
-  const botQueue = new Set<string>();
-  const tournamentQueue = new Map<string, Set<string>>();
-
-  const sendWs = (ws: WebSocket | undefined, type: string, data: Record<string, unknown> = {}) => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type, ...data }));
-    }
-  };
-
-  function resolveDisconnectedMatch(match: MatchRecord, now = Date.now()) {
-    const disconnectedId = match.disconnected_player_id;
-    if (match.status !== 'active' || !disconnectedId) return false;
-
-    const winnerId = disconnectedId === match.player1_id ? match.player2_id : match.player1_id;
-    const player1 = db.users.find((entry) => entry.id === match.player1_id);
-    const player2 = db.users.find((entry) => entry.id === match.player2_id);
-    if (!player1 || !player2) return false;
-
-    const resultPlayer1 = winnerId === match.player1_id ? 1 : 0;
-    const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
-    const player1Before = player1.elo;
-    const player2Before = player2.elo;
-    const player1After = eloUpdated ? calculateElo(player1Before, player2Before, resultPlayer1) : player1Before;
-    const player2After = eloUpdated ? calculateElo(player2Before, player1Before, 1 - resultPlayer1) : player2Before;
-    if (eloUpdated) {
-      player1.elo = player1After;
-      player2.elo = player2After;
-    }
-
-    match.status = 'completed';
-    match.winner_id = winnerId;
-    match.completed_at = new Date(now).toISOString();
-    match.disconnected_player_id = null;
-    match.disconnected_at = null;
-    db.matchResults.push({
-      match_id: match.id,
-      player1_elo_before: player1Before,
-      player2_elo_before: player2Before,
-      player1_elo_after: player1After,
-      player2_elo_after: player2After,
-      result_player1: resultPlayer1,
-      created_at: match.completed_at,
-    });
-
-    if (match.tournament_id) {
-      for (const [playerId, score] of [[match.player1_id, resultPlayer1], [match.player2_id, 1 - resultPlayer1]] as const) {
-        const entry = db.tournamentEntries.find((item) => item.tournament_id === match.tournament_id && item.player_id === playerId);
-        if (!entry) continue;
-        entry.matches_played += 1;
-        if (score === 1) entry.wins += 1;
-        else entry.losses += 1;
-        if (match.tournament_phase === 'ranked') {
-          const progress = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, score);
-          entry.tier = progress.tier;
-          entry.rank_stars = progress.stars;
-          entry.season_points = progress.seasonPoints;
-          entry.points = entry.wins;
-        }
-      }
-    }
-
-    sparringSessions.delete(match.id);
-    saveDb();
-    const common = {
-      matchId: match.id,
-      winnerId,
-      winnerPlayer: winnerId === match.player1_id ? 1 : 2,
-      disconnectedId,
-      eloUpdated,
-    };
-    sendWs(liveSockets.get(winnerId), 'match-forfeited-win', {
-      ...common,
-      eloAfter: winnerId === match.player1_id ? player1After : player2After,
-      message: 'Bạn thắng kỹ thuật vì đối thủ đã rời trận.',
-    });
-    sendWs(liveSockets.get(disconnectedId), 'match-forfeited', {
-      ...common,
-      eloAfter: disconnectedId === match.player1_id ? player1After : player2After,
-      message: 'Bạn bị xử thua vì đã rời trận.',
-    });
-    return true;
-  }
-
-  function clearUserQueues(userId: string) {
-    humanQueue.delete(userId);
-    botQueue.delete(userId);
-    for (const set of tournamentQueue.values()) {
-      set.delete(userId);
-    }
-  }
-
+  // ── Match Pairing Helper ──────────────────────────────────────
   function pairPlayers(
     u1: UserRecord,
     u2: UserRecord,
     matchType: 'human' | 'bot',
-    tournament: TournamentRecord | null = null
+    tournament: TournamentRecord | null = null,
+    isSparring = false
   ) {
     const firstIsP1 = Math.random() < 0.5;
     const p1 = firstIsP1 ? u1 : u2;
@@ -1654,6 +2188,9 @@ async function startServer() {
         ? tournament.rules_json || weeklyRules(tournament.current_week || 1, tournament.rules_schedule)
         : null;
 
+    const p1Bot = tournament ? getActiveUserBot(p1.id) : null;
+    const p2Bot = tournament ? getActiveUserBot(p2.id) : null;
+
     const match: MatchRecord = {
       id: randomUUID(),
       seed,
@@ -1664,6 +2201,11 @@ async function startServer() {
       tournament_id: tournament?.id || null,
       tournament_phase: phase,
       tournament_rules: rules,
+      is_sparring: isSparring,
+      player1_bot_version: p1Bot?.version,
+      player2_bot_version: p2Bot?.version,
+      player1_bot_code: p1Bot?.code,
+      player2_bot_code: p2Bot?.code,
       player1_key: null,
       player2_key: null,
       winner_id: null,
@@ -1672,6 +2214,9 @@ async function startServer() {
       replay_json: null,
       player1_proof: null,
       player2_proof: null,
+      disconnected_player_id: null,
+      disconnected_at: null,
+      consensus_state: createInitialConsensusState(matchType),
       created_at: new Date().toISOString(),
       completed_at: null,
     };
@@ -1685,6 +2230,7 @@ async function startServer() {
       mode: matchType,
       tournamentId: match.tournament_id,
       tournamentPhase: match.tournament_phase,
+      isSparring,
       rules: match.tournament_rules,
       player1: { id: p1.id, displayName: p1.display_name, elo: p1.elo },
       player2: { id: p2.id, displayName: p2.display_name, elo: p2.elo },
@@ -1699,6 +2245,7 @@ async function startServer() {
         seat: 1,
         match: baseMatchPayload,
         opponent: { id: p2.id, displayName: p2.display_name, elo: p2.elo },
+        ...(p1Bot ? { myBotCode: p1Bot.code, myBotVersion: p1Bot.version } : {}),
       });
     }
     if (ws2) {
@@ -1708,14 +2255,18 @@ async function startServer() {
         seat: 2,
         match: baseMatchPayload,
         opponent: { id: p1.id, displayName: p1.display_name, elo: p1.elo },
+        ...(p2Bot ? { myBotCode: p2Bot.code, myBotVersion: p2Bot.version } : {}),
       });
     }
     return match;
   }
 
-  // Handle server-side Sparring Bot consensus responses
+  // ── Server-Side Sparring Bot Controller ──────────────────────
   async function handleSparringRelay(session: SparringSession, humanWs: AuthedSocket, packet: any) {
     if (session.destroyed) return;
+    const match = db.matches.find((m) => m.id === session.matchId && m.status === 'active');
+    if (!match) return;
+
     const sendToHuman = (payload: Record<string, unknown>) => {
       sendWs(humanWs, 'match-relay', {
         matchId: session.matchId,
@@ -1725,11 +2276,18 @@ async function startServer() {
     };
 
     const triggerBotMoveIfNeeded = async () => {
-      if (session.destroyed || session.state.winner || session.state.turn !== session.botSeat) return;
-      await new Promise((r) => setTimeout(r, 220));
-      if (session.destroyed || session.state.winner) return;
+      if (
+        session.destroyed ||
+        OTTGameEngine.isGameOver(session.state) ||
+        session.state.turn !== session.botSeat
+      ) {
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+      if (session.destroyed || OTTGameEngine.isGameOver(session.state)) return;
       const move = pickTacticalBotMove(session.state, session.botSeat);
       if (!move) return;
+
       const stepIdx = session.state.stepCount;
       const nonce = randomBytes(32).toString('hex');
       const commit = sha256Canonical({
@@ -1783,7 +2341,7 @@ async function startServer() {
         attestation: { payload: ackPayload, signature: ackSig },
       });
 
-      if (session.state.winner) {
+      if (OTTGameEngine.isGameOver(session.state)) {
         const finalProof = {
           matchId: session.matchId,
           roomId: session.matchId,
@@ -1802,6 +2360,13 @@ async function startServer() {
     };
 
     if (packet.type === 'BOT_READY') {
+      const cs = match.consensus_state || createInitialConsensusState(match.match_type);
+      const now = Date.now();
+      cs.p1ReadyAt = now;
+      cs.p2ReadyAt = now;
+      cs.bothReadyAt = now;
+      cs.stepStartedAt = now;
+      match.consensus_state = cs;
       sendToHuman({ type: 'BOT_READY', botLabel: 'Hắc Kỵ Sĩ AI (Minimax)' });
       await triggerBotMoveIfNeeded();
       return;
@@ -1813,7 +2378,7 @@ async function startServer() {
         seat: session.botSeat,
         publicKey: session.publicJwk,
       });
-      if ( packet.autoStart ) {
+      if (packet.autoStart) {
         await triggerBotMoveIfNeeded();
       }
       return;
@@ -1853,7 +2418,7 @@ async function startServer() {
         attestation: { payload: ackPayload, signature: ackSig },
       });
 
-      if (session.state.winner) {
+      if (OTTGameEngine.isGameOver(session.state)) {
         const finalProof = {
           matchId: session.matchId,
           roomId: session.matchId,
@@ -1874,6 +2439,7 @@ async function startServer() {
     }
   }
 
+  // ── WebSocket Server (/ws) ────────────────────────────────────
   const wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: 256 * 1024 });
 
   wss.on('connection', (ws: AuthedSocket) => {
@@ -1907,42 +2473,54 @@ async function startServer() {
           const prev = liveSockets.get(user.id);
           liveSockets.set(user.id, ws);
           if (prev && prev !== ws) prev.close(4001, 'Replaced by newer session');
+
+          // Clear disconnect marker if player reconnected within grace window
+          let clearedDisconnect = false;
+          for (const m of db.matches) {
+            if (m.status === 'active' && m.disconnected_player_id === user.id) {
+              m.disconnected_player_id = null;
+              m.disconnected_at = null;
+              clearedDisconnect = true;
+            }
+          }
+          if (clearedDisconnect) saveDb();
+
           sendWs(ws, 'authenticated', { user: publicUser(user) });
           return;
         }
 
         const user = db.users.find((u) => u.id === ws.userId)!;
 
-        if (packet.type === 'leave-match') {
-          const match = db.matches.find((entry) => entry.id === packet.matchId && entry.status === 'active');
-          if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
-            sendWs(ws, 'error', { message: 'Không tìm thấy trận đấu đang diễn ra.' });
-            return;
-          }
-          match.disconnected_player_id = user.id;
-          match.disconnected_at = new Date().toISOString();
-          resolveDisconnectedMatch(match);
-          saveDb();
-          sendWs(ws, 'match-left', { matchId: match.id });        } else if (packet.type === 'find-match' || packet.type === 'find-bot-match') {
+        if (packet.type === 'find-match' || packet.type === 'find-bot-match') {
           clearUserQueues(user.id);
           const mode: 'human' | 'bot' = packet.type === 'find-bot-match' ? 'bot' : 'human';
           const targetQueue = mode === 'bot' ? botQueue : humanQueue;
 
-          let opponentId: string | null = null;
+          let bestOpponent: UserRecord | null = null;
+          let bestGap = Infinity;
           for (const candidateId of targetQueue) {
-            if (candidateId !== user.id && liveSockets.get(candidateId)?.readyState === WebSocket.OPEN) {
-              opponentId = candidateId;
-              break;
+            if (candidateId === user.id) continue;
+            const candSock = liveSockets.get(candidateId);
+            if (!candSock || candSock.readyState !== WebSocket.OPEN) {
+              targetQueue.delete(candidateId);
+              continue;
+            }
+            const candUser = db.users.find((u) => u.id === candidateId);
+            if (!candUser) continue;
+            const gap = Math.abs(candUser.elo - user.elo);
+            if (gap < bestGap) {
+              bestGap = gap;
+              bestOpponent = candUser;
             }
           }
 
-          if (opponentId) {
-            targetQueue.delete(opponentId);
-            const opp = db.users.find((u) => u.id === opponentId)!;
-            pairPlayers(user, opp, mode, null);
+          if (bestOpponent) {
+            targetQueue.delete(bestOpponent.id);
+            pairPlayers(user, bestOpponent, mode, null, false);
           } else {
             targetQueue.add(user.id);
             ws.queueMode = mode;
+            ws.searchStartedAt = Date.now();
             sendWs(ws, 'searching', { elo: user.elo, mode });
           }
         } else if (packet.type === 'find-tournament-match') {
@@ -1957,42 +2535,83 @@ async function startServer() {
             (e) => e.tournament_id === t.id && e.player_id === user.id
           );
           if (!entry) {
-            sendWs(ws, 'error', { message: 'Bạn cần bấm Tham gia giải trước khi tìm trận.' });
+            sendWs(ws, 'error', { message: 'Bạn cần bấm Đăng ký tham gia giải trước khi tìm trận.' });
+            return;
+          }
+          const myBot = getActiveUserBot(user.id);
+          if (!myBot) {
+            sendWs(ws, 'error', {
+              message: 'Bạn cần lưu Bot Python trong Phòng Lab trước khi tìm trận giải đấu.',
+            });
             return;
           }
 
           const qSet = tournamentQueue.get(t.id) || new Set<string>();
           tournamentQueue.set(t.id, qSet);
 
-          let opponentId: string | null = null;
-          for (const candidateId of qSet) {
-            if (candidateId !== user.id && liveSockets.get(candidateId)?.readyState === WebSocket.OPEN) {
-              opponentId = candidateId;
-              break;
+          const validCandidates: UserRecord[] = [];
+          for (const candidateId of [...qSet]) {
+            if (candidateId === user.id) continue;
+            const candSock = liveSockets.get(candidateId);
+            if (!candSock || candSock.readyState !== WebSocket.OPEN) {
+              qSet.delete(candidateId);
+              continue;
+            }
+            const candEntry = db.tournamentEntries.find(
+              (e) => e.tournament_id === t.id && e.player_id === candidateId
+            );
+            const candUser = db.users.find((u) => u.id === candidateId);
+            if (!candEntry || !candUser || !getActiveUserBot(candidateId)) {
+              qSet.delete(candidateId);
+              continue;
+            }
+            if (t.status === 'registration') {
+              // Stage A (Chạy đà): random pairing across ALL waiting registered players
+              validCandidates.push(candUser);
+            } else if (candEntry.tier === entry.tier) {
+              // Stage B (Thực chiến): strictly same rank tier in current Sprint week
+              validCandidates.push(candUser);
             }
           }
 
-          if (opponentId) {
-            qSet.delete(opponentId);
-            const opp = db.users.find((u) => u.id === opponentId)!;
-            pairPlayers(user, opp, 'bot', t);
+          if (validCandidates.length > 0) {
+            const chosen =
+              t.status === 'registration'
+                ? validCandidates[randomInt(0, validCandidates.length)]
+                : validCandidates[0];
+            qSet.delete(chosen.id);
+            pairPlayers(user, chosen, 'bot', t, false);
           } else {
             qSet.add(user.id);
             ws.queueMode = 'tournament';
             ws.tournamentId = t.id;
-            sendWs(ws, 'searching', { elo: user.elo, mode: 'tournament', tournamentId: t.id });
+            ws.searchStartedAt = Date.now();
+            sendWs(ws, 'searching', {
+              elo: user.elo,
+              mode: 'tournament',
+              tournament: true,
+              tournamentId: t.id,
+              phase: t.status === 'registration' ? 'practice' : 'ranked',
+              tier: entry.tier,
+              week: t.current_week,
+              rules: t.status === 'qualifying' ? t.rules_json : null,
+            });
           }
         } else if (packet.type === 'find-sparring-match') {
-          // Instant real server-verified sparring opponent for 1-tab solo testing!
           clearUserQueues(user.id);
+          updateTournamentLifecycle();
           const mode: 'human' | 'bot' = packet.mode === 'human' ? 'human' : 'bot';
           const t = packet.tournamentId
             ? db.tournaments.find((tour) => tour.id === packet.tournamentId) || null
             : null;
+          if (t && !getActiveUserBot(user.id)) {
+            sendWs(ws, 'error', {
+              message: 'Bạn cần lưu Bot Python trong Phòng Lab trước khi chạy thử nghiệm giải đấu.',
+            });
+            return;
+          }
           const sysBot = db.users.find((u) => u.is_system_bot)!;
-          const match = pairPlayers(user, sysBot, mode, t);
-          match.is_sparring = true;
-          saveDb();
+          const match = pairPlayers(user, sysBot, mode, t, true);
 
           const kp = await webcrypto.subtle.generateKey(
             { name: 'ECDSA', namedCurve: 'P-256' },
@@ -2008,6 +2627,10 @@ async function startServer() {
           const botSeat: 1 | 2 = humanSeat === 1 ? 2 : 1;
           if (botSeat === 1) match.player1_key = publicJwk;
           else match.player2_key = publicJwk;
+          if (match.consensus_state) {
+            if (botSeat === 1) match.consensus_state.p1ReadyAt = Date.now();
+            else match.consensus_state.p2ReadyAt = Date.now();
+          }
           saveDb();
 
           sparringSessions.set(match.id, {
@@ -2027,31 +2650,148 @@ async function startServer() {
           clearUserQueues(user.id);
           ws.queueMode = null;
           sendWs(ws, 'search-cancelled', {});
+        } else if (packet.type === 'leave-match') {
+          if (packet.matchId) {
+            adjudicateMatchForfeit(
+              String(packet.matchId),
+              user.id,
+              'player-left-match',
+              'Đối thủ đã thoát khỏi bàn đấu — Bạn được xử thắng kỹ thuật ngay lập tức!',
+              'Bạn đã rời bàn khi trận đấu chưa kết thúc và bị xử thua kỹ thuật.'
+            );
+          }
+        } else if (packet.type === 'bot-setup-failed' || packet.type === 'bot-fault') {
+          if (packet.matchId) {
+            adjudicateMatchForfeit(
+              String(packet.matchId),
+              user.id,
+              'bot-fault',
+              'Bot của đối thủ gặp lỗi thực thi hoặc quá thời gian (TLE) — Bạn được xử thắng kỹ thuật ngay lập tức!',
+              `Bot của bạn gặp lỗi (${String(packet.message || 'Runtime/TLE').slice(0, 80)}) nên bị xử thua kỹ thuật.`
+            );
+          }
         } else if (packet.type === 'session-key') {
           const match = db.matches.find((m) => m.id === packet.matchId && m.status === 'active');
-          if (!match) {
+          if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) {
             sendWs(ws, 'error', { message: 'Không tìm thấy trận đấu đang diễn ra.' });
             return;
           }
-          if (match.player1_id === user.id) match.player1_key = packet.publicKey;
-          else if (match.player2_id === user.id) match.player2_key = packet.publicKey;
+          const key = packet.publicKey;
+          if (
+            !key ||
+            key.kty !== 'EC' ||
+            key.crv !== 'P-256' ||
+            typeof key.x !== 'string' ||
+            typeof key.y !== 'string'
+          ) {
+            sendWs(ws, 'error', { message: 'Khóa phiên phải là khóa ECDSA P-256 hợp lệ.' });
+            return;
+          }
+          if (match.player1_id === user.id) match.player1_key = key;
+          else if (match.player2_id === user.id) match.player2_key = key;
           saveDb();
           sendWs(ws, 'session-key-accepted', { matchId: match.id });
+          const peerId = match.player1_id === user.id ? match.player2_id : match.player1_id;
+          sendWs(liveSockets.get(peerId), 'peer-session-key', {
+            matchId: match.id,
+            playerId: user.id,
+            publicKey: key,
+          });
         } else if (packet.type === 'signal' || packet.type === 'match-relay') {
           const match = db.matches.find((m) => m.id === packet.matchId && m.status === 'active');
-          if (!match) return;
+          if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) return;
+
+          const senderSeat: 1 | 2 = match.player1_id === user.id ? 1 : 2;
+          const senderKey = senderSeat === 1 ? match.player1_key : match.player2_key;
+
+          if (packet.type === 'match-relay' && packet.payload && typeof packet.payload === 'object') {
+            const p = packet.payload;
+            // Verify ECDSA signature on signed consensus messages immediately at relay
+            if (['CONSENSUS_COMMIT', 'CONSENSUS_REVEAL', 'CONSENSUS_ACK'].includes(p.type)) {
+              const att = p.attestation;
+              if (
+                !att?.payload ||
+                att.payload.player !== senderSeat ||
+                (senderKey && !verifySessionProof(senderKey, att.payload, att.signature))
+              ) {
+                adjudicateMatchForfeit(
+                  match.id,
+                  user.id,
+                  'invalid-relay-signature',
+                  'Phát hiện đối thủ gửi gói đồng thuận giả mạo chữ ký — Bạn được xử thắng kỹ thuật ngay lập tức!',
+                  'Gói đồng thuận của bạn có chữ ký P-256 không hợp lệ nên bị xử thua kỹ thuật.'
+                );
+                return;
+              }
+            } else if (p.type === 'FINAL_PROOF') {
+              if (
+                p.seat !== senderSeat ||
+                !p.proof ||
+                (senderKey && !verifySessionProof(senderKey, p.proof, p.signature))
+              ) {
+                adjudicateMatchForfeit(
+                  match.id,
+                  user.id,
+                  'invalid-final-signature',
+                  'Phát hiện đối thủ gửi chữ ký kết thúc ván không hợp lệ — Bạn được xử thắng kỹ thuật ngay lập tức!',
+                  'Chữ ký kết thúc ván của bạn không hợp lệ nên bị xử thua kỹ thuật.'
+                );
+                return;
+              }
+            }
+
+            // Update server consensus progress tracker for stall/withheld-ACK detection
+            const cs = match.consensus_state || createInitialConsensusState(match.match_type);
+            const now = Date.now();
+            cs.lastActivityAt = now;
+
+            if (p.type === 'BOT_READY' || (p.type === 'CONSENSUS_HELLO' && p.autoStart)) {
+              if (senderSeat === 1 && !cs.p1ReadyAt) cs.p1ReadyAt = now;
+              if (senderSeat === 2 && !cs.p2ReadyAt) cs.p2ReadyAt = now;
+              if (cs.p1ReadyAt && cs.p2ReadyAt && !cs.bothReadyAt) {
+                cs.bothReadyAt = now;
+                cs.stepStartedAt = now;
+              }
+            } else if (p.type === 'CONSENSUS_REVEAL' && p.attestation?.payload) {
+              cs.lastRevealStep = p.attestation.payload.stepCount;
+              cs.lastRevealSeat = senderSeat;
+              cs.lastRevealAt = now;
+              cs.lastRevealCommit = p.attestation.payload.commit;
+            } else if (p.type === 'CONSENSUS_ACK' && p.attestation?.payload) {
+              const ackStep = p.attestation.payload.stepCount;
+              if (ackStep === Number(cs.currentStep || 0) + 1) {
+                cs.acksForPendingStep = cs.acksForPendingStep || {};
+                cs.acksForPendingStep[senderSeat] = p.attestation.payload.stateHash;
+                if (
+                  cs.acksForPendingStep[1] &&
+                  cs.acksForPendingStep[2] &&
+                  cs.acksForPendingStep[1] === cs.acksForPendingStep[2]
+                ) {
+                  cs.currentStep = ackStep;
+                  cs.acksForPendingStep = {};
+                  cs.lastRevealStep = null;
+                  cs.stepStartedAt = now;
+                }
+              }
+            } else if (p.type === 'FINAL_PROOF' && p.proof) {
+              cs.finalProofs = cs.finalProofs || {};
+              cs.finalProofAt = cs.finalProofAt || {};
+              cs.finalProofs[senderSeat] = { proof: p.proof, signature: p.signature };
+              cs.finalProofAt[senderSeat] = now;
+            }
+            match.consensus_state = cs;
+          }
+
           const spar = sparringSessions.get(match.id);
           if (spar && packet.type === 'match-relay') {
             await handleSparringRelay(spar, ws, packet.payload);
             return;
           }
+
           const peerId = match.player1_id === user.id ? match.player2_id : match.player1_id;
           const peerSocket = liveSockets.get(peerId);
           if (!peerSocket || peerSocket.readyState !== WebSocket.OPEN) {
-            match.disconnected_player_id = peerId;
-            match.disconnected_at = new Date().toISOString();
-            resolveDisconnectedMatch(match);
-            saveDb();
+            sendWs(ws, 'peer-offline', { matchId: match.id });
             return;
           }
           sendWs(peerSocket, packet.type, {
@@ -2059,66 +2799,7 @@ async function startServer() {
             from: user.id,
             payload: packet.payload,
           });
-        } else if (packet.type === 'bot-forfeit' || packet.type === 'bot-setup-failed') {
-          const match = db.matches.find((m) => m.id === packet.matchId && m.status === 'active');
-          if (match) {
-            const forfeitingUserId = user.id;
-            const winningUserId = match.player1_id === forfeitingUserId ? match.player2_id : match.player1_id;
-            match.status = 'completed';
-            match.winner_id = winningUserId;
-            match.completed_at = new Date().toISOString();
-            sparringSessions.delete(match.id);
-
-            const u1 = db.users.find((u) => u.id === match.player1_id)!;
-            const u2 = db.users.find((u) => u.id === match.player2_id)!;
-            const score1 = winningUserId === match.player1_id ? 1 : 0;
-            const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
-            const u1Before = u1.elo;
-            const u2Before = u2.elo;
-            const u1After = eloUpdated ? calculateElo(u1Before, u2Before, score1) : u1Before;
-            const u2After = eloUpdated ? calculateElo(u2Before, u1Before, 1 - score1) : u2Before;
-
-            if (eloUpdated) {
-              u1.elo = u1After;
-              u2.elo = u2After;
-            }
-
-            if (match.tournament_id) {
-              const e1 = db.tournamentEntries.find((e) => e.tournament_id === match.tournament_id && e.player_id === u1.id);
-              const e2 = db.tournamentEntries.find((e) => e.tournament_id === match.tournament_id && e.player_id === u2.id);
-              for (const [entry, sc] of [[e1, score1], [e2, 1 - score1]] as const) {
-                if (!entry) continue;
-                entry.matches_played += 1;
-                if (sc === 1) entry.wins += 1;
-                else entry.losses += 1;
-                if (match.tournament_phase === 'ranked') {
-                  const prog = applyTournamentResult(entry.tier, entry.rank_stars, entry.season_points, sc);
-                  entry.tier = prog.tier;
-                  entry.rank_stars = prog.stars;
-                  entry.season_points = prog.seasonPoints;
-                  entry.points = entry.wins;
-                }
-              }
-            }
-
-            db.matchResults.push({
-              match_id: match.id,
-              player1_elo_before: u1Before,
-              player2_elo_before: u2Before,
-              player1_elo_after: u1After,
-              player2_elo_after: u2After,
-              result_player1: score1,
-              created_at: match.completed_at,
-            });
-
-            saveDb();
-
-            const peerSocket = liveSockets.get(winningUserId);
-            const forfeitMsg = 'Äá»‘i thá»§ gáº·p lá»—i Python / TLE. Báº¡n giÃ nh chiáº¿n tháº¯ng ká»¹ thuáº­t!';
-            sendWs(peerSocket, 'match-forfeited-win', { matchId: match.id, winnerId: winningUserId, message: forfeitMsg });
-            sendWs(ws, 'match-forfeited-loss', { matchId: match.id, winnerId: winningUserId, message: 'Bot cá»§a báº¡n gáº·p lá»—i / TLE vÃ  bá»‹ xá»­ thua ká»¹ thuáº­t.' });
-          }
-} else if (packet.type === 'ping') {
+        } else if (packet.type === 'ping') {
           sendWs(ws, 'pong', { at: Date.now() });
         }
       } catch (err: any) {
@@ -2128,45 +2809,98 @@ async function startServer() {
 
     ws.on('close', () => {
       clearTimeout(authTimer);
-      if (ws.userId) {
-        clearUserQueues(ws.userId);
-        if (liveSockets.get(ws.userId) === ws) {
-          liveSockets.delete(ws.userId);
-          const disconnectedAt = new Date().toISOString();
-          for (const match of db.matches) {
-            if (match.status !== 'active' || (match.player1_id !== ws.userId && match.player2_id !== ws.userId)) continue;
-            match.disconnected_player_id = ws.userId;
-            match.disconnected_at = disconnectedAt;
-            resolveDisconnectedMatch(match);
+      if (!ws.userId) return;
+      if (liveSockets.get(ws.userId) !== ws) return;
+
+      clearUserQueues(ws.userId);
+      liveSockets.delete(ws.userId);
+
+      // Mark any active non-sparring match as disconnected so the 5s forfeit timer starts
+      let marked = false;
+      for (const m of db.matches) {
+        if (
+          m.status === 'active' &&
+          !m.is_sparring &&
+          (m.player1_id === ws.userId || m.player2_id === ws.userId)
+        ) {
+          if (!m.disconnected_player_id) {
+            m.disconnected_player_id = ws.userId;
+            m.disconnected_at = new Date().toISOString();
+            marked = true;
           }
-          saveDb();
+          const peerId = m.player1_id === ws.userId ? m.player2_id : m.player1_id;
+          sendWs(liveSockets.get(peerId), 'peer-disconnected', {
+            matchId: m.id,
+            disconnectedPlayerId: ws.userId,
+          });
         }
       }
+      if (marked) saveDb();
     });
   });
 
+  const disconnectSweepTimer = setInterval(() => {
+    try {
+      processDisconnectedMatches();
+    } catch (err) {
+      console.error('Disconnect sweep error:', err);
+    }
+  }, sweepIntervalMs);
+  disconnectSweepTimer.unref();
+
+  const lifecycleSweepTimer = setInterval(() => {
+    try {
+      updateTournamentLifecycle();
+    } catch (err) {
+      console.error('Tournament lifecycle sweep error:', err);
+    }
+  }, 30000);
+  lifecycleSweepTimer.unref();
+
   // ── Vite Middleware (Dev) or Static Serve (Prod) ──────────────
-  if (process.env.NODE_ENV !== 'production') {
+  if (!options.skipVite && process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
+  } else if (!options.skipVite) {
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
   }
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`OTTv2 Full-Stack Server listening on http://0.0.0.0:${PORT}`);
+  await new Promise<void>((resolve) => {
+    httpServer.listen(port, '0.0.0.0', () => {
+      const addr = httpServer.address();
+      const boundPort = typeof addr === 'object' && addr ? addr.port : port;
+      if (process.env.OTTV2_SKIP_AUTOSTART !== '1') {
+        console.log(`OTTv2 Full-Stack Server listening on http://0.0.0.0:${boundPort}`);
+      }
+      resolve();
+    });
   });
+
+  const close = async () => {
+    clearInterval(disconnectSweepTimer);
+    clearInterval(lifecycleSweepTimer);
+    for (const spar of sparringSessions.values()) spar.destroyed = true;
+    sparringSessions.clear();
+    for (const client of wss.clients) client.close(1001, 'Server closing');
+    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+  };
+
+  return { app, httpServer, wss, close };
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start OTTv2 server:', err);
-  process.exit(1);
-});
+if (process.env.OTTV2_SKIP_AUTOSTART !== '1') {
+  startServer().catch((err) => {
+    console.error('Failed to start OTTv2 server:', err);
+    process.exit(1);
+  });
+}

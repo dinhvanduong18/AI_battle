@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowLeft,
   Bot,
   CheckCircle2,
@@ -8,7 +9,6 @@ import {
   Loader2,
   Play,
   RotateCcw,
-  ShieldAlert,
   ShieldCheck,
   Swords,
 } from 'lucide-react';
@@ -16,6 +16,7 @@ import {
   OTTGameEngine,
   PIECE_VIET_NAMES,
   type BoardRules,
+  type DrawReason,
   type GameState,
   type ValidMove,
 } from '../core/ottEngine';
@@ -38,8 +39,6 @@ import { Board9x9 } from './Board9x9';
 import { MascotCountsInline } from './HalloweenPieces';
 import { useToast } from './ToastProvider';
 
-const BOT_TURN_TIMEOUT_MS = 5000;
-
 export interface ActiveMatchSession {
   source: 'backend' | 'p2p';
   matchId: string;
@@ -57,10 +56,11 @@ export interface ActiveMatchSession {
   tournamentId?: string | null;
   tournamentPhase?: 'practice' | 'ranked' | null;
   isSparring?: boolean;
+  lockedBotCode?: string | null;
+  lockedBotVersion?: number;
   // For P2P rooms (PeerJS data channel wrapper)
   p2pSend?: (payload: any) => void;
   subscribePeerData?: (cb: (payload: any) => void) => () => void;
-  onP2PDisconnect?: (handler: () => void) => () => void;
   onHostResetRoom?: () => void;
 }
 
@@ -79,6 +79,44 @@ interface MoveLogEntry {
   text: string;
   isCapture?: boolean;
   elapsedMs?: number;
+}
+
+interface SignedAttestation {
+  payload: any;
+  signature: string;
+}
+
+interface ConsensusStepRecord {
+  stepCount: number;
+  player: 1 | 2;
+  move: { from: number; to: number };
+  nonce: string;
+  commit: string;
+  stateHash: string;
+  commitAttestation: SignedAttestation | null;
+  revealAttestation: SignedAttestation | null;
+  acknowledgements: SignedAttestation[];
+}
+
+interface TechnicalResolution {
+  winner: 0 | 1 | 2;
+  reasonCode: string;
+  message: string;
+}
+
+const TIER_VIET: Record<string, string> = {
+  Bronze: 'Đồng',
+  Silver: 'Bạc',
+  Gold: 'Vàng',
+  Master: 'Cao Thủ',
+  Challenger: 'Thách Đấu',
+};
+
+function describeDrawReason(reason?: DrawReason | null): string {
+  if (reason === 'threefold-repetition') return 'Hòa cờ do lặp lại thế cờ 3 lần';
+  if (reason === 'fifty-move-rule') return 'Hòa cờ do 50 nước liên tiếp không ăn quân';
+  if (reason === 'stalemate') return 'Hòa cờ do bên tới lượt không còn nước đi hợp lệ';
+  return 'Ván đấu kết thúc với kết quả Hòa';
 }
 
 export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
@@ -110,38 +148,38 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
   // Bot Ready State (for online Bot vs Bot)
   const isBotMatch = session.mode === 'bot' && session.mySeat !== null;
+  const isTournamentBotMatch = Boolean(session.tournamentId) && isBotMatch;
   const [selectedBotSource, setSelectedBotSource] = useState<string>(
-    hasSavedBot ? 'saved' : 'minimax'
+    hasSavedBot ? 'saved' : 'phantom_hunter'
   );
   const [myBotReady, setMyBotReady] = useState(!isBotMatch);
   const [peerBotReady, setPeerBotReady] = useState(!isBotMatch);
   const [loadingPyodide, setLoadingPyodide] = useState(false);
-  const [botSecondsLeft, setBotSecondsLeft] = useState(BOT_TURN_TIMEOUT_MS / 1000);
-  const [botThinking, setBotThinking] = useState(false);
-
-  // Hash dispute status returned by the backend.
-  const [hashNotice, setHashNotice] = useState<{
-    step: number;
-    status: 'checking' | 'resolved' | 'unresolved' | 'error';
-    message: string;
-  } | null>(null);
+  const [setupRemainingSec, setSetupRemainingSec] = useState(15);
 
   // Consensus Cryptographic State
   const identityRef = useRef<ConsensusIdentity | null>(null);
   const peerPubKeyRef = useRef<CryptoKey | null>(null);
   const [consensusReady, setConsensusReady] = useState(session.mySeat === null);
-  const pendingPeerCommitRef = useRef<{ stepCount: number; hash: string; attestation: any } | null>(
-    null
-  );
+  const pendingPeerCommitRef = useRef<{
+    stepCount: number;
+    hash: string;
+    attestation: SignedAttestation;
+  } | null>(null);
+  const consensusStepsRef = useRef<ConsensusStepRecord[]>([]);
+  const [ackedStepCount, setAckedStepCount] = useState<number>(0);
   const replayMovesRef = useRef<any[]>([]);
-  const acknowledgementsRef = useRef<Map<number, any[]>>(new Map());
-  const submittedHashDisputesRef = useRef<Set<number>>(new Set());
   const myFinalProofRef = useRef<{ proof: any; signature: string } | null>(null);
   const peerFinalProofRef = useRef<{ proof: any; signature: string } | null>(null);
   const submittedResultRef = useRef(false);
-  const reportHashMismatchRef = useRef<() => void>(() => {});
+  const disputeSentRef = useRef(false);
+  const resolvedRef = useRef(false);
   const botRunnerRef = useRef<BotRunner | null>(null);
   const steppingBotRef = useRef(false);
+  const packetQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  // Technical resolution (forfeit / disconnect / timeout / hash dispute)
+  const [technicalResolution, setTechnicalResolution] = useState<TechnicalResolution | null>(null);
 
   // Post-match result summary
   const [resultSummary, setResultSummary] = useState<{
@@ -152,11 +190,19 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     verified?: boolean;
   } | null>(null);
 
+  const effectiveWinner: 0 | 1 | 2 | null =
+    technicalResolution !== null ? technicalResolution.winner : gameState.winner;
+  const isMatchFinished =
+    technicalResolution !== null || OTTGameEngine.isGameOver(gameState);
 
   const sendMessageToPeer = useCallback(
     (payload: unknown) => {
       if (session.source === 'backend') {
-        backendClient.sendPeerMessage(session.matchId, payload, Boolean(session.isSparring));
+        try {
+          backendClient.sendPeerMessage(session.matchId, payload, true);
+        } catch {
+          // Socket may be closing during resolution
+        }
       } else if (session.p2pSend) {
         session.p2pSend(payload);
       }
@@ -164,20 +210,162 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     [session]
   );
 
-  const rememberAcknowledgement = useCallback((attestation: any) => {
-    const payload = attestation?.payload;
-    if (payload?.kind !== 'state-ack' || payload.matchId !== session.matchId ||
-        !Number.isInteger(payload.stepCount) || (payload.player !== 1 && payload.player !== 2)) return;
-    const acknowledgements = acknowledgementsRef.current.get(payload.stepCount) || [];
-    const existingIndex = acknowledgements.findIndex((item) => item?.payload?.player === payload.player);
-    if (existingIndex >= 0) acknowledgements[existingIndex] = attestation;
-    else acknowledgements.push(attestation);
-    acknowledgementsRef.current.set(payload.stepCount, acknowledgements);
-    const move = replayMovesRef.current.find((entry) =>
-      entry.stepCount === payload.stepCount && entry.commit === payload.moveCommit
-    );
-    if (move) move.acknowledgements = acknowledgements;
-  }, [session.matchId]);
+  const applyTechnicalOutcome = useCallback(
+    (
+      winnerSeat: 0 | 1 | 2,
+      reasonCode: string,
+      message: string,
+      summary?: {
+        eloBefore?: number;
+        eloAfter?: number;
+        eloUpdated?: boolean;
+        tournamentUpdate?: {
+          tier: string;
+          stars: number;
+          seasonPoints: number;
+          phase: string;
+        } | null;
+      }
+    ) => {
+      if (resolvedRef.current) return;
+      resolvedRef.current = true;
+      submittedResultRef.current = true;
+      botRunnerRef.current?.destroy();
+      setTechnicalResolution({ winner: winnerSeat, reasonCode, message });
+      if (summary) {
+        setResultSummary({
+          eloBefore: summary.eloBefore,
+          eloAfter: summary.eloAfter,
+          eloUpdated: summary.eloUpdated,
+          tournamentUpdate: summary.tournamentUpdate || null,
+          verified: true,
+        });
+      }
+      if (session.mySeat !== null) {
+        if (winnerSeat === session.mySeat) {
+          soundFx.playVictory();
+          notify(message, 'success');
+        } else if (winnerSeat === 0) {
+          notify(message, 'info');
+        } else {
+          soundFx.playDefeat();
+          notify(message, 'error');
+        }
+      } else {
+        notify(message, 'info');
+      }
+    },
+    [notify, session.mySeat]
+  );
+
+  // Raise signed consensus dispute to backend when peer sends bad hash / illegal move / conflicting proof
+  const raiseConsensusDispute = useCallback(
+    async (params: {
+      faultType: 'state-ack-mismatch' | 'reveal-fault' | 'final-proof-mismatch';
+      stepCount: number;
+      disputedStep?: ConsensusStepRecord;
+      disputedReveal?: SignedAttestation;
+      commitAttestation?: SignedAttestation | null;
+      disputedFinalProof?: { seat: number; proof: any; signature: string };
+      localHash?: string;
+      remoteHash?: string;
+    }) => {
+      if (disputeSentRef.current || resolvedRef.current || session.mySeat === null) return;
+      disputeSentRef.current = true;
+
+      if (session.source !== 'backend' || !identityRef.current) {
+        const oppSeat = session.mySeat;
+        applyTechnicalOutcome(
+          oppSeat,
+          params.faultType,
+          'Phát hiện dữ liệu đồng thuận hoặc mã băm trạng thái sai lệch từ đối thủ — Xử thắng kỹ thuật!'
+        );
+        return;
+      }
+
+      try {
+        const priorMoves =
+          params.faultType === 'final-proof-mismatch'
+            ? consensusStepsRef.current.map((s) => ({
+                stepCount: s.stepCount,
+                player: s.player,
+                move: s.move,
+                nonce: s.nonce,
+                commit: s.commit,
+                stateHash: s.stateHash,
+                commitAttestation: s.commitAttestation,
+                revealAttestation: s.revealAttestation,
+                acknowledgements: s.acknowledgements,
+              }))
+            : consensusStepsRef.current
+                .filter(
+                  (s) =>
+                    s.acknowledgements.length === 2 &&
+                    (!params.disputedStep || s.stepCount < params.disputedStep.stepCount)
+                )
+                .map((s) => ({
+                  stepCount: s.stepCount,
+                  player: s.player,
+                  move: s.move,
+                  nonce: s.nonce,
+                  commit: s.commit,
+                  stateHash: s.stateHash,
+                  commitAttestation: s.commitAttestation,
+                  revealAttestation: s.revealAttestation,
+                  acknowledgements: s.acknowledgements,
+                }));
+
+        const evidence: Record<string, unknown> = {
+          format: 'ottv2-consensus-dispute-v1',
+          matchId: session.matchId,
+          seed: session.seed,
+          initialState: initialSerializedRef.current,
+          moves: priorMoves,
+          faultType: params.faultType,
+          ...(params.disputedStep ? { disputedStep: params.disputedStep } : {}),
+          ...(params.disputedReveal ? { disputedReveal: params.disputedReveal } : {}),
+          ...(params.commitAttestation ? { commitAttestation: params.commitAttestation } : {}),
+          ...(params.disputedFinalProof ? { disputedFinalProof: params.disputedFinalProof } : {}),
+        };
+
+        const evidenceHash = await digest(evidence);
+        const reportPayload: Record<string, unknown> = {
+          kind: 'consensus-dispute',
+          matchId: session.matchId,
+          claimantSeat: session.mySeat,
+          stepCount: params.stepCount,
+          evidenceHash,
+          ...(params.faultType === 'state-ack-mismatch'
+            ? { localHash: params.localHash, remoteHash: params.remoteHash }
+            : {}),
+        };
+        const signature = await signPayload(identityRef.current, reportPayload);
+        const res = await backendClient.submitConsensusDispute({
+          report: { payload: reportPayload, signature },
+          evidence,
+        });
+
+        if (res?.resolved && res?.winnerPlayer) {
+          applyTechnicalOutcome(
+            res.winnerPlayer as 1 | 2,
+            res.reason || params.faultType,
+            res.message ||
+              'Phát hiện sai lệch mã băm trạng thái (Hash Mismatch) từ đối thủ — Bạn được xử thắng kỹ thuật ngay lập tức!',
+            {
+              eloBefore: res.eloBefore,
+              eloAfter: res.eloAfter,
+              eloUpdated: res.eloUpdated,
+              tournamentUpdate: res.tournamentUpdate || null,
+            }
+          );
+        }
+      } catch (err: any) {
+        disputeSentRef.current = false;
+        notify(err.message || 'Không thể gửi biên bản phân xử đồng thuận.', 'error');
+      }
+    },
+    [applyTechnicalOutcome, notify, session.matchId, session.mySeat, session.seed, session.source]
+  );
 
   // Submit result once both signed final proofs arrive
   const trySubmitBackendResult = useCallback(async () => {
@@ -185,12 +373,14 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       session.source !== 'backend' ||
       session.mySeat === null ||
       submittedResultRef.current ||
+      resolvedRef.current ||
       !myFinalProofRef.current ||
       !peerFinalProofRef.current
     ) {
       return;
     }
     submittedResultRef.current = true;
+    resolvedRef.current = true;
     const p1Proof = session.mySeat === 1 ? myFinalProofRef.current : peerFinalProofRef.current;
     const p2Proof = session.mySeat === 2 ? myFinalProofRef.current : peerFinalProofRef.current;
 
@@ -218,6 +408,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       });
       notify('Kết quả trận đấu đã được xác minh chữ ký P-256 và lưu lên hệ thống!', 'success');
     } catch (err: any) {
+      submittedResultRef.current = false;
+      resolvedRef.current = false;
       notify(err.message || 'Không thể gửi kết quả xác minh lên máy chủ.', 'error');
     }
   }, [notify, session]);
@@ -227,8 +419,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (
         !identityRef.current ||
         session.mySeat === null ||
-        finalState.winner === null ||
-        finalState.winner === undefined
+        !OTTGameEngine.isGameOver(finalState)
       ) {
         return;
       }
@@ -260,7 +451,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (
         !identityRef.current ||
         session.mySeat === null ||
-        current.winner !== null ||
+        resolvedRef.current ||
+        OTTGameEngine.isGameOver(current) ||
         current.turn !== session.mySeat
       ) {
         return;
@@ -284,9 +476,13 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         hash: commit,
       };
       const commitSig = await signPayload(identityRef.current, commitPayload);
+      const commitAttestation: SignedAttestation = {
+        payload: commitPayload,
+        signature: commitSig,
+      };
       sendMessageToPeer({
         type: 'CONSENSUS_COMMIT',
-        attestation: { payload: commitPayload, signature: commitSig },
+        attestation: commitAttestation,
       });
 
       const revealPayload = {
@@ -299,6 +495,10 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         commit,
       };
       const revealSig = await signPayload(identityRef.current, revealPayload);
+      const revealAttestation: SignedAttestation = {
+        payload: revealPayload,
+        signature: revealSig,
+      };
 
       const nextState = OTTGameEngine.applyMove(current, { from: move.from, to: move.to });
       const stateHash = await hashState(nextState);
@@ -311,9 +511,23 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         stateHash,
       };
       const ackSig = await signPayload(identityRef.current, ackPayload);
+      const myAckAttestation: SignedAttestation = {
+        payload: ackPayload,
+        signature: ackSig,
+      };
 
-      const ownAcknowledgement = { payload: ackPayload, signature: ackSig };
-      rememberAcknowledgement(ownAcknowledgement);
+      consensusStepsRef.current.push({
+        stepCount: nextState.stepCount,
+        player: session.mySeat,
+        move: { from: move.from, to: move.to },
+        nonce,
+        commit,
+        stateHash,
+        commitAttestation,
+        revealAttestation,
+        acknowledgements: [myAckAttestation],
+      });
+
       replayMovesRef.current.push({
         stepCount: nextState.stepCount,
         player: session.mySeat,
@@ -321,11 +535,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         nonce,
         commit,
         stateHash,
-        commitAttestation: { payload: commitPayload, signature: commitSig },
-        revealAttestation: { payload: revealPayload, signature: revealSig },
-        acknowledgements: acknowledgementsRef.current.get(nextState.stepCount) || [],
       });
-      reportHashMismatchRef.current();
 
       stateRef.current = nextState;
       setGameState(nextState);
@@ -352,109 +562,23 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
       sendMessageToPeer({
         type: 'CONSENSUS_REVEAL',
-        attestation: { payload: revealPayload, signature: revealSig },
+        attestation: revealAttestation,
       });
       sendMessageToPeer({
         type: 'CONSENSUS_ACK',
-        attestation: { payload: ackPayload, signature: ackSig },
+        attestation: myAckAttestation,
       });
 
-      if (nextState.winner !== null) {
+      if (OTTGameEngine.isGameOver(nextState)) {
         if (nextState.winner === session.mySeat) soundFx.playVictory();
-        else if (nextState.winner === 0) soundFx.playMove();
-        else soundFx.playDefeat();
+        else if (nextState.winner && nextState.winner !== session.mySeat) soundFx.playDefeat();
         await signAndBroadcastFinalProof(nextState);
       }
     },
-    [rememberAcknowledgement, sendMessageToPeer, session.matchId, session.mySeat, signAndBroadcastFinalProof]
+    [sendMessageToPeer, session.matchId, session.mySeat, signAndBroadcastFinalProof]
   );
 
-  const handleReportHashMismatch = useCallback(async () => {
-    if (session.source !== 'backend' || session.mySeat === null || !identityRef.current) return;
-    const entries = replayMovesRef.current;
-    const mismatchIndex = entries.findIndex((entry) => {
-      const opponentAck = entry.acknowledgements?.find((ack: any) => ack?.payload?.player !== session.mySeat);
-      return opponentAck && opponentAck.payload?.stateHash !== entry.stateHash;
-    });
-    if (mismatchIndex < 0) return;
-
-    const disputedStep = entries[mismatchIndex];
-    const step = disputedStep.stepCount;
-    if (submittedHashDisputesRef.current.has(step)) return;
-    setHashNotice({
-      step,
-      status: 'checking',
-      message: `Phát hiện hash hai bên không khớp ở nước ${step}. Có thể có gian lận; đang chờ máy chủ xác minh.`,
-    });
-
-    try {
-      const opponentAck = disputedStep.acknowledgements?.find((ack: any) => ack?.payload?.player !== session.mySeat);
-      const ownAck = disputedStep.acknowledgements?.find((ack: any) => ack?.payload?.player === session.mySeat);
-      if (!opponentAck || !ownAck) {
-        setHashNotice({ step, status: 'error', message: 'Hash bị lệch nhưng chưa nhận đủ chữ ký từ hai bên để xác minh.' });
-        return;
-      }
-      if (!peerPubKeyRef.current ||
-          !(await verifyPayload(peerPubKeyRef.current, opponentAck.payload, opponentAck.signature))) {
-        setHashNotice({ step, status: 'error', message: 'Chữ ký hash của đối thủ không hợp lệ; không thể gửi bằng chứng.' });
-        return;
-      }
-      if (ownAck.payload.stateHash !== disputedStep.stateHash || disputedStep.stateHash === opponentAck.payload.stateHash) {
-        setHashNotice({ step, status: 'error', message: 'Chưa có bằng chứng chữ ký đủ để xác định hash nào bị thay đổi.' });
-        return;
-      }
-      const incompleteHistory = entries.slice(0, mismatchIndex).some((entry) =>
-        !entry.commitAttestation || !entry.revealAttestation || entry.acknowledgements?.length !== 2
-      );
-      if (incompleteHistory || !disputedStep.commitAttestation || !disputedStep.revealAttestation ||
-          disputedStep.acknowledgements?.length !== 2) {
-        setHashNotice({ step, status: 'error', message: 'Lịch sử chưa đủ chữ ký để máy chủ xác minh hash bị lệch.' });
-        return;
-      }
-
-      submittedHashDisputesRef.current.add(step);
-      const evidence = {
-        format: 'ottv2-consensus-dispute-v1',
-        matchId: session.matchId,
-        seed: session.seed,
-        initialState: initialSerializedRef.current,
-        moves: entries.slice(0, mismatchIndex),
-        disputedStep,
-      };
-      const proof = {
-        kind: 'consensus-dispute',
-        matchId: session.matchId,
-        claimantSeat: session.mySeat,
-        stepCount: step,
-        localHash: ownAck.payload.stateHash,
-        remoteHash: opponentAck.payload.stateHash,
-        evidenceHash: await digest(evidence),
-      };
-      const signature = await signPayload(identityRef.current, proof);
-      const outcome = await backendClient.submitConsensusDispute({ payload: proof, signature }, evidence);
-
-      if (outcome.resolved) {
-        const winner = outcome.winnerPlayer === 1 || outcome.winnerPlayer === 2 ? outcome.winnerPlayer : null;
-        if (winner) {
-          setGameState((previous) => ({ ...previous, winner }));
-          if (winner === session.mySeat) soundFx.playVictory();
-          else soundFx.playDefeat();
-        }
-        const ownElo = session.mySeat === 1 ? outcome.player1EloAfter : outcome.player2EloAfter;
-        setResultSummary({ eloAfter: ownElo, eloUpdated: Boolean(outcome.eloUpdated), verified: true });
-        setHashNotice({ step, status: 'resolved', message: outcome.message || 'Máy chủ xác nhận hash không hợp lệ và đã xử lý trận đấu.' });
-      } else {
-        setHashNotice({ step, status: 'unresolved', message: outcome.message || 'Máy chủ chưa thể kết luận bên nào gửi hash sai.' });
-      }
-    } catch (err: any) {
-      submittedHashDisputesRef.current.delete(step);
-      setHashNotice({ step, status: 'error', message: err.message || 'Máy chủ không thể xác minh hash của trận đấu.' });
-    }
-  }, [session]);
-
-  reportHashMismatchRef.current = () => { void handleReportHashMismatch(); };
-
-  // Setup Consensus Identity & Peer Message Listener
+  // Setup Consensus Identity, Sequential Peer Message Queue & Server Adjudication Listeners
   useEffect(() => {
     let active = true;
     let helloInterval: ReturnType<typeof setInterval> | null = null;
@@ -481,45 +605,24 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         };
         sendHello();
         helloInterval = setInterval(() => {
-          if (!peerPubKeyRef.current) sendHello();
+          if (!peerPubKeyRef.current && !resolvedRef.current) sendHello();
           else if (helloInterval) clearInterval(helloInterval);
-        }, 1200);
+        }, 1000);
       }
     })();
 
-    const handlePeerPacket = async (packet: any) => {
-      if (!active || !packet) return;
+    const processPeerPacket = async (packet: any) => {
+      if (!active || !packet || resolvedRef.current) return;
 
-      if (packet.type === 'PLAYER_DISCONNECTED' && session.mySeat !== null) {
-        if (packet.seat !== 1 && packet.seat !== 2) return;
-        const winner: GameState['winner'] = packet.seat === 1 ? 2 : 1;
-        const finalState = { ...stateRef.current, winner };
-        stateRef.current = finalState;
-        setGameState(finalState);
-        if (winner === session.mySeat) {
-          notify('Đối thủ đã rời trận. Bạn thắng ván này!', 'success');
-          soundFx.playVictory();
-        } else {
-          notify('Bạn đã mất kết nối với đối thủ và bị xử thua.', 'error');
-          soundFx.playDefeat();
-        }
-        return;
-      }
-
-      if (packet.type === 'BOT_FORFEIT' && session.mySeat !== null) {
-        if (packet.seat !== 1 && packet.seat !== 2) return;
-        const winner: GameState['winner'] = packet.seat === 1 ? 2 : 1;
-        const finalState = { ...stateRef.current, winner };
-        stateRef.current = finalState;
-        setGameState(finalState);
-        notify(
-          packet.seat === session.mySeat
-            ? 'Bot của bạn gặp lỗi và bị xử thua kỹ thuật.'
-            : 'Bot đối thủ gặp lỗi. Bạn thắng kỹ thuật!',
-          winner === session.mySeat ? 'success' : 'error'
+      if (packet.type === 'PLAYER_FORFEIT' && packet.seat !== session.mySeat) {
+        const winnerSeat: 1 | 2 = packet.seat === 1 ? 2 : 1;
+        applyTechnicalOutcome(
+          winnerSeat,
+          packet.reason || 'player-left-match',
+          packet.reason === 'bot-fault'
+            ? 'Bot của đối thủ gặp lỗi hoặc quá thời gian (TLE) — Bạn được xử thắng kỹ thuật ngay lập tức!'
+            : 'Đối thủ đã thoát khỏi bàn đấu — Bạn được xử thắng kỹ thuật ngay lập tức!'
         );
-        if (winner === session.mySeat) soundFx.playVictory();
-        else soundFx.playDefeat();
         return;
       }
 
@@ -539,7 +642,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
               type: 'CONSENSUS_HELLO',
               seat: session.mySeat,
               publicKey: identityRef.current.publicJwk,
-              autoStart: false,
+              autoStart: !isBotMatch,
             });
           }
         }
@@ -551,16 +654,20 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         return;
       }
 
-      if (packet.type === 'BOT_SETUP_FAILED') {
-        notify(packet.message || 'Trận bị hủy vì Bot của đối thủ không khởi động được.', 'error');
-        onExit();
-        return;
-      }
-
       if (packet.type === 'CONSENSUS_COMMIT' && packet.attestation) {
+        const payload = packet.attestation.payload;
+        if (!payload || payload.player === session.mySeat) return;
+        if (peerPubKeyRef.current) {
+          const validCommitSig = await verifyPayload(
+            peerPubKeyRef.current,
+            payload,
+            packet.attestation.signature
+          );
+          if (!validCommitSig) return;
+        }
         pendingPeerCommitRef.current = {
-          stepCount: packet.attestation.payload?.stepCount,
-          hash: packet.attestation.payload?.hash,
+          stepCount: payload.stepCount,
+          hash: payload.hash,
           attestation: packet.attestation,
         };
         return;
@@ -569,11 +676,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (packet.type === 'CONSENSUS_REVEAL' && packet.attestation) {
         const payload = packet.attestation.payload;
         if (!payload || payload.player === session.mySeat) return;
-        const pendingCommit = pendingPeerCommitRef.current;
-        if (!pendingCommit || pendingCommit.stepCount !== payload.stepCount || pendingCommit.hash !== payload.commit) {
-          notify('Hash cam kết không khớp với nước đi được tiết lộ.', 'error');
-          return;
-        }
         const curr = stateRef.current;
         if (payload.stepCount !== curr.stepCount) return;
 
@@ -589,11 +691,96 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           }
         }
 
-        const nextState = OTTGameEngine.applyMove(curr, {
-          from: payload.move.from,
-          to: payload.move.to,
+        const priorCommit =
+          pendingPeerCommitRef.current?.stepCount === curr.stepCount
+            ? pendingPeerCommitRef.current
+            : null;
+
+        if (priorCommit && priorCommit.hash !== payload.commit) {
+          await raiseConsensusDispute({
+            faultType: 'reveal-fault',
+            stepCount: curr.stepCount + 1,
+            disputedReveal: packet.attestation,
+            commitAttestation: priorCommit.attestation,
+          });
+          return;
+        }
+
+        const expectedCommit = await hashMove({
+          matchId: session.matchId,
+          stepCount: curr.stepCount,
+          player: payload.player,
+          move: payload.move,
+          nonce: payload.nonce,
         });
+        if (expectedCommit !== payload.commit) {
+          await raiseConsensusDispute({
+            faultType: 'reveal-fault',
+            stepCount: curr.stepCount + 1,
+            disputedReveal: packet.attestation,
+            commitAttestation: priorCommit?.attestation || null,
+          });
+          return;
+        }
+
+        let nextState: GameState;
+        try {
+          nextState = OTTGameEngine.applyMove(curr, {
+            from: payload.move.from,
+            to: payload.move.to,
+          });
+        } catch {
+          await raiseConsensusDispute({
+            faultType: 'reveal-fault',
+            stepCount: curr.stepCount + 1,
+            disputedReveal: packet.attestation,
+            commitAttestation: priorCommit?.attestation || null,
+          });
+          return;
+        }
+
         const stateHash = await hashState(nextState);
+        const acknowledgements: SignedAttestation[] = [];
+
+        if (identityRef.current && session.mySeat !== null) {
+          const ackPayload = {
+            kind: 'state-ack',
+            matchId: session.matchId,
+            stepCount: nextState.stepCount,
+            player: session.mySeat,
+            moveCommit: payload.commit,
+            stateHash,
+          };
+          const ackSig = await signPayload(identityRef.current, ackPayload);
+          const myAck: SignedAttestation = { payload: ackPayload, signature: ackSig };
+          acknowledgements.push(myAck);
+          sendMessageToPeer({
+            type: 'CONSENSUS_ACK',
+            attestation: myAck,
+          });
+        }
+
+        consensusStepsRef.current.push({
+          stepCount: nextState.stepCount,
+          player: payload.player,
+          move: { from: payload.move.from, to: payload.move.to },
+          nonce: payload.nonce,
+          commit: payload.commit,
+          stateHash,
+          commitAttestation: priorCommit?.attestation || null,
+          revealAttestation: packet.attestation,
+          acknowledgements,
+        });
+        pendingPeerCommitRef.current = null;
+
+        replayMovesRef.current.push({
+          stepCount: nextState.stepCount,
+          player: payload.player,
+          move: { from: payload.move.from, to: payload.move.to },
+          nonce: payload.nonce,
+          commit: payload.commit,
+          stateHash,
+        });
 
         stateRef.current = nextState;
         setGameState(nextState);
@@ -615,286 +802,447 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           },
         ]);
 
-        if (identityRef.current && session.mySeat !== null) {
-          const ackPayload = {
-            kind: 'state-ack',
-            matchId: session.matchId,
-            stepCount: nextState.stepCount,
-            player: session.mySeat,
-            moveCommit: payload.commit,
-            stateHash,
-          };
-          const ackSig = await signPayload(identityRef.current, ackPayload);
-          const ownAcknowledgement = { payload: ackPayload, signature: ackSig };
-          rememberAcknowledgement(ownAcknowledgement);
-          sendMessageToPeer({
-            type: 'CONSENSUS_ACK',
-            attestation: ownAcknowledgement,
-          });
-        }
-
-        replayMovesRef.current.push({
-          stepCount: nextState.stepCount,
-          player: payload.player,
-          move: { from: payload.move.from, to: payload.move.to },
-          nonce: payload.nonce,
-          commit: payload.commit,
-          stateHash,
-          commitAttestation: pendingCommit.attestation,
-          revealAttestation: packet.attestation,
-          acknowledgements: acknowledgementsRef.current.get(nextState.stepCount) || [],
-        });
-        pendingPeerCommitRef.current = null;
-        reportHashMismatchRef.current();
-
-        if (nextState.winner !== null) {
+        if (OTTGameEngine.isGameOver(nextState)) {
           if (nextState.winner === session.mySeat) soundFx.playVictory();
-          else if (nextState.winner === 0) soundFx.playMove();
-          else soundFx.playDefeat();
+          else if (nextState.winner && nextState.winner !== session.mySeat) soundFx.playDefeat();
           await signAndBroadcastFinalProof(nextState);
         }
         return;
       }
 
       if (packet.type === 'CONSENSUS_ACK' && packet.attestation) {
-        const ack = packet.attestation;
-        const payload = ack.payload;
-        if (!payload || payload.player === session.mySeat || payload.matchId !== session.matchId) return;
-        if (!peerPubKeyRef.current || !(await verifyPayload(peerPubKeyRef.current, payload, ack.signature))) {
-          notify('Chữ ký xác nhận hash của đối thủ không hợp lệ.', 'error');
+        const ackPayload = packet.attestation.payload;
+        if (!ackPayload || ackPayload.player === session.mySeat) return;
+
+        if (peerPubKeyRef.current) {
+          const validSig = await verifyPayload(
+            peerPubKeyRef.current,
+            ackPayload,
+            packet.attestation.signature
+          );
+          if (!validSig) return;
+        }
+
+        const stepEntry = consensusStepsRef.current.find(
+          (s) => s.stepCount === ackPayload.stepCount
+        );
+        if (!stepEntry) return;
+
+        if (ackPayload.stateHash !== stepEntry.stateHash) {
+          const combinedAcks = [
+            ...stepEntry.acknowledgements.filter((a) => a.payload?.player !== ackPayload.player),
+            packet.attestation,
+          ];
+          await raiseConsensusDispute({
+            faultType: 'state-ack-mismatch',
+            stepCount: stepEntry.stepCount,
+            disputedStep: {
+              ...stepEntry,
+              acknowledgements: combinedAcks,
+            },
+            localHash: stepEntry.stateHash,
+            remoteHash: ackPayload.stateHash,
+          });
           return;
         }
-        rememberAcknowledgement(ack);
-        const entry = replayMovesRef.current.find((move) =>
-          move.stepCount === payload.stepCount && move.commit === payload.moveCommit
-        );
-        if (entry && payload.stateHash !== entry.stateHash) {
-          reportHashMismatchRef.current();
+
+        if (!stepEntry.acknowledgements.some((a) => a.payload?.player === ackPayload.player)) {
+          stepEntry.acknowledgements.push(packet.attestation);
+        }
+        if (stepEntry.acknowledgements.length === 2) {
+          setAckedStepCount((prev) => Math.max(prev, stepEntry.stepCount));
         }
         return;
       }
 
       if (packet.type === 'FINAL_PROOF' && packet.seat !== session.mySeat) {
+        if (!packet.proof || typeof packet.signature !== 'string') return;
+        if (peerPubKeyRef.current) {
+          const validSig = await verifyPayload(
+            peerPubKeyRef.current,
+            packet.proof,
+            packet.signature
+          );
+          if (!validSig) return;
+        }
+
+        if (!myFinalProofRef.current && OTTGameEngine.isGameOver(stateRef.current)) {
+          await signAndBroadcastFinalProof(stateRef.current);
+        }
+
+        const mine = myFinalProofRef.current?.proof;
+        if (
+          mine &&
+          (packet.proof.stateHash !== mine.stateHash ||
+            packet.proof.stepCount !== mine.stepCount ||
+            packet.proof.winner !== mine.winner)
+        ) {
+          await raiseConsensusDispute({
+            faultType: 'final-proof-mismatch',
+            stepCount: mine.stepCount,
+            disputedFinalProof: {
+              seat: packet.seat,
+              proof: packet.proof,
+              signature: packet.signature,
+            },
+          });
+          return;
+        }
+
         peerFinalProofRef.current = { proof: packet.proof, signature: packet.signature };
         await trySubmitBackendResult();
-        return;
       }
-
     };
 
-    const unsub =
+    const enqueuePeerPacket = (pkt: any) => {
+      packetQueueRef.current = packetQueueRef.current
+        .then(() => processPeerPacket(pkt))
+        .catch((err) => console.error('Consensus packet processing error:', err));
+    };
+
+    const unsubPeerData =
       session.source === 'backend'
-        ? backendClient.on('peer-data', handlePeerPacket)
+        ? backendClient.on('peer-data', enqueuePeerPacket)
         : session.subscribePeerData
-        ? session.subscribePeerData(handlePeerPacket)
-        : () => {};
-    const handleP2PDisconnect = () => {
-      if (!active || session.source !== 'p2p' || stateRef.current.winner) return;
-      if (session.mySeat === null) {
-        notify('Chủ phòng đã rời phòng. Trận đấu đã kết thúc.', 'error');
-        onExit();
-        return;
-      }
-      const winner: 1 | 2 = session.mySeat === 1 ? 2 : 1;
-      const forfeitedState = { ...stateRef.current, winner, turn: winner };
-      stateRef.current = forfeitedState;
-      setGameState(forfeitedState);
-      setResultSummary({ verified: true });
-      soundFx.playVictory();
-      notify('Đối thủ đã rời phòng, bạn đã thắng!', 'success');
-    };
-    const unsubP2PDisconnect =
-      session.source === 'p2p' && session.onP2PDisconnect
-        ? session.onP2PDisconnect(handleP2PDisconnect)
+        ? session.subscribePeerData(enqueuePeerPacket)
         : () => {};
 
-    const unsubAborted =
+    const unsubPeerKey =
       session.source === 'backend'
-        ? backendClient.on('match-aborted', (pkt) => {
-            notify(pkt.message || 'Trận đấu đã bị hủy.', 'error');
-            onExit();
-          })
-        : () => {};
-
-    const unsubForfeitWin =
-      session.source === 'backend'
-        ? backendClient.on('match-forfeited-win', (pkt) => {
-            if (pkt.matchId === session.matchId) {
-              notify(pkt.message || 'Đối thủ bị xử thua kỹ thuật. Bạn giành chiến thắng!', 'success');
-              soundFx.playVictory();
-              setGameState((prev) => ({ ...prev, winner: session.mySeat }));
-              setResultSummary((prev) => ({
-                ...prev,
-                verified: true,
-              }));
+        ? backendClient.on('peer-session-key', async (pkt) => {
+            if (!active || pkt?.matchId !== session.matchId || !pkt?.publicKey) return;
+            if (!peerPubKeyRef.current) {
+              try {
+                peerPubKeyRef.current = await importPublicKey(pkt.publicKey);
+                setConsensusReady(true);
+              } catch {
+                // ignore
+              }
             }
           })
         : () => {};
 
-    const unsubForfeitLoss =
+    const unsubForfeited =
       session.source === 'backend'
-        ? backendClient.on('match-forfeited-loss', (pkt) => {
-            if (pkt.matchId === session.matchId) {
-              notify(pkt.message || 'Bạn bị xử thua kỹ thuật!', 'error');
-              soundFx.playDefeat();
-              setGameState((prev) => ({ ...prev, winner: session.mySeat === 1 ? 2 : 1 }));
-              setResultSummary((prev) => ({
-                ...prev,
-                verified: true,
-              }));
-            }
+        ? backendClient.on('match-forfeited', (pkt) => {
+            if (!active || pkt?.matchId !== session.matchId) return;
+            applyTechnicalOutcome(
+              pkt.winnerPlayer as 1 | 2,
+              pkt.reason || 'forfeit',
+              pkt.message ||
+                (pkt.winnerPlayer === session.mySeat
+                  ? 'Đối thủ vi phạm hoặc rời trận — Bạn được xử thắng kỹ thuật!'
+                  : 'Bạn bị xử thua kỹ thuật.'),
+              {
+                eloBefore: pkt.eloBefore,
+                eloAfter: pkt.eloAfter,
+                eloUpdated: pkt.eloUpdated,
+                tournamentUpdate: pkt.tournamentUpdate || null,
+              }
+            );
           })
         : () => {};
 
     const unsubDisputeResult =
       session.source === 'backend'
         ? backendClient.on('match-dispute-result', (pkt) => {
-            if (pkt.matchId !== session.matchId || pkt.claimantId === backendClient.user?.id) return;
-            if (!pkt.resolved) {
-              setHashNotice({
-                step: pkt.stepCount || stateRef.current.stepCount,
-                status: 'unresolved',
-                message: pkt.message || 'Máy chủ chưa thể kết luận bên nào gửi hash sai.',
-              });
-              return;
+            if (!active || pkt?.matchId !== session.matchId) return;
+            if (pkt.resolved && pkt.winnerPlayer) {
+              applyTechnicalOutcome(
+                pkt.winnerPlayer as 1 | 2,
+                pkt.reason || 'consensus-dispute',
+                pkt.message ||
+                  (pkt.winnerPlayer === session.mySeat
+                    ? 'Trọng tài máy chủ xác nhận đối thủ sai lệch dữ liệu — Bạn được xử thắng kỹ thuật!'
+                    : 'Bạn bị xử thua do sai lệch dữ liệu đồng thuận.'),
+                {
+                  eloBefore: pkt.eloBefore,
+                  eloAfter: pkt.eloAfter,
+                  eloUpdated: pkt.eloUpdated,
+                  tournamentUpdate: pkt.tournamentUpdate || null,
+                }
+              );
+            } else {
+              notify(pkt.message || 'Trận đấu đã đóng để kiểm tra biên bản.', 'info');
+              onExit();
             }
-            const winner = pkt.winnerPlayer === 1 || pkt.winnerPlayer === 2 ? pkt.winnerPlayer : null;
-            if (!winner) return;
-            setGameState((previous) => ({ ...previous, winner }));
-            setResultSummary({ eloAfter: pkt.eloAfter, eloUpdated: Boolean(pkt.eloUpdated), verified: true });
-            setHashNotice({
-              step: pkt.stepCount || stateRef.current.stepCount,
-              status: 'resolved',
-              message: pkt.message || 'Máy chủ đã xác minh tranh chấp hash của trận đấu.',
-            });
-            if (winner === session.mySeat) soundFx.playVictory();
-            else soundFx.playDefeat();
-            notify(pkt.message || 'Máy chủ đã xác minh tranh chấp hash của trận đấu.', winner === session.mySeat ? 'success' : 'error');
+          })
+        : () => {};
+
+    const unsubAborted =
+      session.source === 'backend'
+        ? backendClient.on('match-aborted', (pkt) => {
+            if (pkt?.matchId && pkt.matchId !== session.matchId) return;
+            resolvedRef.current = true;
+            notify(pkt.message || 'Trận đấu đã bị hủy.', 'error');
+            onExit();
           })
         : () => {};
 
     return () => {
       active = false;
       if (helloInterval) clearInterval(helloInterval);
-      unsub();
-      unsubP2PDisconnect();
-      unsubAborted();
-      unsubForfeitWin();
-      unsubForfeitLoss();
+      unsubPeerData();
+      unsubPeerKey();
+      unsubForfeited();
       unsubDisputeResult();
+      unsubAborted();
       botRunnerRef.current?.destroy();
     };
   }, [
+    applyTechnicalOutcome,
     isBotMatch,
-    handleReportHashMismatch,
     notify,
     onExit,
-    rememberAcknowledgement,
+    raiseConsensusDispute,
     sendMessageToPeer,
     session,
     signAndBroadcastFinalProof,
     trySubmitBackendResult,
   ]);
 
-  // Start a visible turn clock for both players, and enforce it on the active bot.
+  // Auto-load & Auto-ready submitted Bot in Tournament Bot-vs-Bot matches
+  useEffect(() => {
+    if (!isTournamentBotMatch || myBotReady) return;
+    let cancelled = false;
+    setLoadingPyodide(true);
+
+    (async () => {
+      try {
+        const code = (session.lockedBotCode || savedBotCode || '').trim();
+        if (!code) {
+          throw new Error('Không tìm thấy mã nguồn Bot đã nộp cho giải đấu.');
+        }
+        const runner = new BotRunner('TournamentBot', 1500);
+        await runner.loadBot(
+          code,
+          session.lockedBotVersion ? `Tournament v${session.lockedBotVersion}` : 'Tournament Bot'
+        );
+        if (cancelled) {
+          runner.destroy();
+          return;
+        }
+        botRunnerRef.current = runner;
+        setMyBotReady(true);
+      } catch (err: any) {
+        if (cancelled) return;
+        const msg = err.message || 'Không thể khởi tạo Bot giải đấu.';
+        notify(`Lỗi nạp Bot giải đấu: ${msg}`, 'error');
+        if (session.source === 'backend') {
+          backendClient.abortBotSetup(session.matchId, msg);
+        }
+      } finally {
+        if (!cancelled) setLoadingPyodide(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isTournamentBotMatch,
+    myBotReady,
+    notify,
+    savedBotCode,
+    session.lockedBotCode,
+    session.lockedBotVersion,
+    session.matchId,
+    session.source,
+  ]);
+
+  // Broadcast BOT_READY reliably once both our Bot and P-256 session keys are ready
+  useEffect(() => {
+    if (!isBotMatch || !myBotReady || !consensusReady || isMatchFinished) return;
+    sendMessageToPeer({ type: 'BOT_READY' });
+    if (peerBotReady) return;
+
+    const timer = setInterval(() => {
+      if (!resolvedRef.current) {
+        sendMessageToPeer({ type: 'BOT_READY' });
+      }
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [consensusReady, isBotMatch, isMatchFinished, myBotReady, peerBotReady, sendMessageToPeer]);
+
+  // Setup countdown display for non-tournament Bot-vs-Bot matches
+  useEffect(() => {
+    if (!isBotMatch || (myBotReady && peerBotReady) || isMatchFinished) return;
+    const timer = setInterval(() => {
+      setSetupRemainingSec((s) => Math.max(0, s - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isBotMatch, isMatchFinished, myBotReady, peerBotReady]);
+
+  // Server-authoritative Stall / Withheld-ACK / Turn-Timeout Watchdog
+  useEffect(() => {
+    if (
+      session.source !== 'backend' ||
+      session.mySeat === null ||
+      session.isSparring ||
+      isMatchFinished
+    ) {
+      return;
+    }
+
+    const timer = setInterval(async () => {
+      if (resolvedRef.current) return;
+      const curr = stateRef.current;
+      const waitingOnSetup = !consensusReady || !peerBotReady;
+      const waitingOnAck = ackedStepCount < curr.stepCount;
+      const waitingOnFinalProof =
+        OTTGameEngine.isGameOver(curr) &&
+        Boolean(myFinalProofRef.current) &&
+        !peerFinalProofRef.current;
+      const waitingOnOpponentTurn =
+        consensusReady &&
+        myBotReady &&
+        peerBotReady &&
+        !OTTGameEngine.isGameOver(curr) &&
+        curr.turn !== session.mySeat;
+
+      if (!waitingOnSetup && !waitingOnAck && !waitingOnFinalProof && !waitingOnOpponentTurn) {
+        return;
+      }
+
+      try {
+        const replayPayload = waitingOnFinalProof
+          ? {
+              format: 'ottv2-replay-v1',
+              matchId: session.matchId,
+              seed: session.seed,
+              initialState: initialSerializedRef.current,
+              moves: replayMovesRef.current,
+            }
+          : undefined;
+        await backendClient.claimMatchTimeout(session.matchId, replayPayload);
+      } catch {
+        // Ignore transient network errors; WS match-forfeited handles resolution
+      }
+    }, 2000);
+
+    return () => clearInterval(timer);
+  }, [
+    ackedStepCount,
+    consensusReady,
+    isMatchFinished,
+    myBotReady,
+    peerBotReady,
+    session.isSparring,
+    session.matchId,
+    session.mySeat,
+    session.seed,
+    session.source,
+  ]);
+
+  // Immediate forfeit if tab closes / reloads mid-match
+  useEffect(() => {
+    if (session.mySeat === null || isMatchFinished) return;
+
+    const handlePageUnload = () => {
+      if (resolvedRef.current) return;
+      if (session.source === 'backend') {
+        backendClient.leaveMatchWs(session.matchId);
+        if (backendClient.token) {
+          fetch(`${backendClient.baseUrl}/api/match/forfeit`, {
+            method: 'POST',
+            keepalive: true,
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${backendClient.token}`,
+            },
+            body: JSON.stringify({ matchId: session.matchId }),
+          }).catch(() => {});
+        }
+      } else {
+        sendMessageToPeer({
+          type: 'PLAYER_FORFEIT',
+          seat: session.mySeat,
+          reason: 'player-left-match',
+        });
+      }
+    };
+
+    window.addEventListener('pagehide', handlePageUnload);
+    window.addEventListener('beforeunload', handlePageUnload);
+    return () => {
+      window.removeEventListener('pagehide', handlePageUnload);
+      window.removeEventListener('beforeunload', handlePageUnload);
+    };
+  }, [isMatchFinished, sendMessageToPeer, session.matchId, session.mySeat, session.source]);
+
+  // Trigger BotRunner automatically when it's our turn in Bot vs Bot mode
   useEffect(() => {
     if (
       !isBotMatch ||
       !myBotReady ||
       !peerBotReady ||
       !consensusReady ||
-      gameState.winner !== null
+      !botRunnerRef.current?.ready ||
+      isMatchFinished ||
+      ackedStepCount < gameState.stepCount ||
+      gameState.turn !== session.mySeat ||
+      steppingBotRef.current
     ) {
-      setBotThinking(false);
       return;
     }
 
-    const deadline = Date.now() + BOT_TURN_TIMEOUT_MS;
-    let expired = false;
-    setBotSecondsLeft(BOT_TURN_TIMEOUT_MS / 1000);
-    setBotThinking(true);
-    const countdown = setInterval(() => {
-      setBotSecondsLeft(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
-    }, 100);
-
-    const forfeit = (message: string) => {
-      if (expired) return;
-      if (stateRef.current.winner !== null || stateRef.current.turn !== session.mySeat) return;
-      expired = true;
+    steppingBotRef.current = true;
+    const timer = setTimeout(async () => {
       try {
-        if (session.source === 'backend') {
-          backendClient.botForfeit(session.matchId, message);
-        } else if (session.mySeat !== null) {
-          sendMessageToPeer({ type: 'BOT_FORFEIT', seat: session.mySeat, message });
+        const curr = stateRef.current;
+        if (
+          resolvedRef.current ||
+          OTTGameEngine.isGameOver(curr) ||
+          curr.turn !== session.mySeat ||
+          !botRunnerRef.current
+        ) {
+          return;
         }
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : 'Lỗi kết nối không xác định.';
-        notify(`Không gửi được kết quả xử thua lên máy chủ: ${detail}`, 'error');
+        const botState = OTTGameEngine.createBotGameState(curr, session.mySeat);
+        const moveRes = await botRunnerRef.current.getMove(session.mySeat, botState);
+        await proposeMyMove({ from: moveRes.from, to: moveRes.to }, moveRes.elapsedMs);
+      } catch (err: any) {
+        const errMsg = err.message || 'Runtime/TLE';
+        notify(`Bot của bạn gặp lỗi thực thi/TLE: ${errMsg}`, 'error');
+        if (session.source === 'backend') {
+          backendClient.reportBotFault(session.matchId, errMsg);
+        } else if (session.mySeat !== null) {
+          sendMessageToPeer({
+            type: 'PLAYER_FORFEIT',
+            seat: session.mySeat,
+            reason: 'bot-fault',
+            message: errMsg,
+          });
+          applyTechnicalOutcome(
+            session.mySeat === 1 ? 2 : 1,
+            'bot-fault',
+            `Bot của bạn gặp lỗi (${errMsg}) nên bị xử thua kỹ thuật.`
+          );
+        }
+      } finally {
+        steppingBotRef.current = false;
       }
-      const winner: GameState['winner'] = session.mySeat === 1 ? 2 : 1;
-      const forfeitedState = { ...stateRef.current, winner };
-      stateRef.current = forfeitedState;
-      setGameState(forfeitedState);
-      setBotThinking(false);
-      notify(`Hết 5 giây: Bot bị xử thua kỹ thuật. ${message}`, 'error');
-      soundFx.playDefeat();
-    };
-
-    let moveTimeout: ReturnType<typeof setTimeout> | undefined;
-    if (gameState.turn === session.mySeat && !steppingBotRef.current) {
-      steppingBotRef.current = true;
-      const timeout = new Promise<never>((_, reject) => {
-        moveTimeout = setTimeout(() => {
-          botRunnerRef.current?.destroy();
-          reject(new Error('Bot vượt quá giới hạn 5 giây.'));
-        }, Math.max(0, deadline - Date.now()));
-      });
-
-      Promise.race([
-        (async () => {
-          const curr = stateRef.current;
-          const runner = botRunnerRef.current;
-          if (
-            curr.winner !== null ||
-            curr.turn !== session.mySeat ||
-            !runner?.ready
-          ) {
-            throw new Error('Bot chưa sẵn sàng khi bắt đầu lượt.');
-          }
-          const botState = OTTGameEngine.createBotGameState(curr, session.mySeat);
-          const moveRes = await runner.getMove(session.mySeat, botState);
-          steppingBotRef.current = false;
-          await proposeMyMove({ from: moveRes.from, to: moveRes.to }, moveRes.elapsedMs);
-          if (stateRef.current.stepCount === curr.stepCount && stateRef.current.winner === null) {
-            throw new Error('Nước đi Bot không được áp dụng trước khi hết lượt.');
-          }
-        })(),
-        timeout,
-      ]).catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : 'Bot không trả về nước đi hợp lệ.';
-        forfeit(message);
-      }).finally(() => {
-        if (moveTimeout) clearTimeout(moveTimeout);
-      });
-    }
+    }, 160);
 
     return () => {
-      clearInterval(countdown);
-      if (moveTimeout) clearTimeout(moveTimeout);
+      clearTimeout(timer);
       steppingBotRef.current = false;
     };
   }, [
+    ackedStepCount,
+    applyTechnicalOutcome,
     consensusReady,
     gameState,
     isBotMatch,
+    isMatchFinished,
     myBotReady,
     notify,
     peerBotReady,
     proposeMyMove,
+    sendMessageToPeer,
     session.matchId,
     session.mySeat,
     session.source,
-    sendMessageToPeer,
   ]);
 
   const handleConfirmBotReady = async () => {
@@ -912,7 +1260,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         throw new Error('Không tìm thấy mã nguồn Python cho lựa chọn này.');
       }
 
-      const runner = new BotRunner('MatchBot', BOT_TURN_TIMEOUT_MS);
+      const runner = new BotRunner('MatchBot', 1500);
       await runner.loadBot(code, selectedBotSource);
       botRunnerRef.current = runner;
       setMyBotReady(true);
@@ -921,17 +1269,29 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     } catch (err: any) {
       notify(err.message || 'Không thể khởi tạo Bot Python.', 'error');
       if (session.source === 'backend') {
-        backendClient.abortBotSetup(session.matchId, err.message || 'Không thể khởi tạo Bot Python.');
-      } else {
-        sendMessageToPeer({
-          type: 'BOT_SETUP_FAILED',
-          message: 'Trận bị hủy vì Bot của một người chơi không khởi động được.',
-        });
-        onExit();
+        backendClient.abortBotSetup(session.matchId, err.message || 'Bot init error');
       }
     } finally {
       setLoadingPyodide(false);
     }
+  };
+
+  const handleLeaveMatchButton = async () => {
+    if (!isMatchFinished && session.mySeat !== null && !resolvedRef.current) {
+      resolvedRef.current = true;
+      if (session.source === 'backend') {
+        backendClient.leaveMatchWs(session.matchId);
+        await backendClient.forfeitMatch(session.matchId).catch(() => {});
+        notify('Bạn đã rời bàn khi trận đấu chưa kết thúc và bị xử thua kỹ thuật.', 'error');
+      } else {
+        sendMessageToPeer({
+          type: 'PLAYER_FORFEIT',
+          seat: session.mySeat,
+          reason: 'player-left-match',
+        });
+      }
+    }
+    onExit();
   };
 
   const handleBoardClick = (index: number) => {
@@ -939,7 +1299,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       session.mySeat === null ||
       session.mode === 'bot' ||
       !consensusReady ||
-      gameState.winner !== null ||
+      isMatchFinished ||
       gameState.turn !== session.mySeat
     ) {
       return;
@@ -966,7 +1326,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   };
 
   const counts = OTTGameEngine.countPieces(gameState.board);
-  const isMyTurn = session.mySeat !== null && gameState.turn === session.mySeat && gameState.winner === null;
+  const isMyTurn =
+    session.mySeat !== null && gameState.turn === session.mySeat && !isMatchFinished;
 
   const exportCurrentReplay = () => {
     const replayPayload = {
@@ -996,6 +1357,10 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     URL.revokeObjectURL(url);
   };
 
+  const bannerIsWin =
+    session.mySeat !== null && effectiveWinner === session.mySeat;
+  const bannerIsDraw = effectiveWinner === 0;
+
   return (
     <div className="space-y-5">
       {/* Top Match Control Header */}
@@ -1003,11 +1368,11 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={onExit}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+            onClick={handleLeaveMatchButton}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
             <ArrowLeft className="w-4 h-4" />
-            Rời bàn đấu
+            {isMatchFinished || session.mySeat === null ? 'Rời bàn đấu' : 'Rời bàn (Chịu thua)'}
           </button>
           <div>
             <div className="flex items-center gap-2 text-sm font-bold text-[var(--text-primary)]">
@@ -1015,6 +1380,10 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
               <span>
                 {session.mySeat === null
                   ? 'Chế độ Khán giả Trực tiếp'
+                  : session.tournamentId
+                  ? session.tournamentPhase === 'practice'
+                    ? 'Giải Đấu · Vòng Chạy Đà (Bot tự động)'
+                    : 'Giải Đấu · Vòng Thực Chiến (Bot tự động)'
                   : session.mode === 'bot'
                   ? 'Đấu Trường Bot vs Bot'
                   : 'Đối Kháng Trực Tiếp 1v1'}
@@ -1035,7 +1404,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                 navigator.clipboard.writeText(session.roomCode!);
                 notify(`Đã sao chép mã phòng ${session.roomCode}`, 'success');
               }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-mono border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer whitespace-nowrap shrink-0"
             >
               <Copy className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
               {session.roomCode}
@@ -1050,82 +1419,82 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         </div>
       </div>
 
-      {hashNotice && (
-        <div
-          role="status"
-          aria-live="polite"
-          className={`flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm ${
-            hashNotice.status === 'checking'
-              ? 'border-amber-500/40 bg-amber-950/25 text-amber-100'
-              : hashNotice.status === 'resolved'
-              ? 'border-emerald-500/40 bg-emerald-950/25 text-emerald-100'
-              : 'border-rose-500/40 bg-rose-950/25 text-rose-100'
-          }`}
-        >
-          {hashNotice.status === 'checking'
-            ? <Loader2 className="h-5 w-5 shrink-0 animate-spin text-amber-400" />
-            : <ShieldAlert className="h-5 w-5 shrink-0" />}
-          <span>{hashNotice.message}</span>
-        </div>
-      )}
-
-      {/* Bot Ready Selection Banner (for Bot vs Bot before start) */}
-      {isBotMatch && (!myBotReady || !peerBotReady) && (
+      {/* Tournament Auto-Bot Banner OR Regular Bot Ready Selection Banner */}
+      {isBotMatch && !isMatchFinished && (!myBotReady || !peerBotReady) && (
         <div className="p-5 rounded-2xl border border-[var(--border-accent)] bg-[var(--bg-panel)] flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div>
-            <h3 className="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
-              <Bot className="w-5 h-5 text-[var(--accent-primary)]" />
-              Chọn Bot Python xuất trận
-            </h3>
-            <p className="text-xs text-[var(--text-secondary)] mt-1">
-              {myBotReady
-                ? 'Bot của bạn đã nạp xong. Đang chờ đối thủ bấm Sẵn sàng…'
-                : 'Chọn phiên bản Bot đã lưu hoặc sử dụng ngay một trong các Bot chiến thuật mẫu bên dưới.'}
-            </p>
-          </div>
+          {isTournamentBotMatch ? (
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-5 h-5 text-[var(--accent-primary)] animate-spin shrink-0" />
+              <div>
+                <h3 className="text-sm font-bold text-[var(--text-primary)]">
+                  Đang tự động nạp Bot đã đăng ký giải đấu
+                  {session.lockedBotVersion ? ` (v${session.lockedBotVersion})` : ''}…
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)] mt-0.5 tabular-nums">
+                  {myBotReady
+                    ? 'Bot của bạn đã sẵn sàng. Đang đồng bộ khởi chạy với Bot đối thủ (tự xử thắng nếu đối thủ treo quá 10s)…'
+                    : 'Hệ thống đang khởi chạy Web Worker Pyodide cho Bot đã nộp của bạn…'}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div>
+                <h3 className="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
+                  <Bot className="w-5 h-5 text-[var(--accent-primary)]" />
+                  Chọn Bot Python xuất trận
+                </h3>
+                <p className="text-xs text-[var(--text-secondary)] mt-1 tabular-nums">
+                  {myBotReady
+                    ? 'Bot của bạn đã nạp xong. Đang chờ đối thủ sẵn sàng (tự xử thắng nếu đối thủ treo quá 10s)…'
+                    : `Hãy xác nhận Bot trong ${setupRemainingSec}s để tránh bị xử thua do treo phiên.`}
+                </p>
+              </div>
 
-          <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-            <select
-              disabled={myBotReady || loadingPyodide}
-              value={selectedBotSource}
-              onChange={(e) => setSelectedBotSource(e.target.value)}
-              aria-label="Chọn Bot xuất trận"
-              className="px-3.5 py-2.5 text-xs font-medium rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-            >
-              {hasSavedBot && <option value="saved">Bot đã lưu trên tài khoản</option>}
-              <option value="phantom_hunter">Bot mẫu · Phantom Hunter (Halloween)</option>
-              <option value="minimax">Bot mẫu · Minimax Tactical</option>
-              <option value="greedy">Bot mẫu · Greedy AI</option>
-              <option value="random">Bot mẫu · Random Bot</option>
-              {customEditorCode.trim() && (
-                <option value="custom">Code đang mở trong Phòng Lab</option>
-              )}
-            </select>
+              <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+                <select
+                  disabled={myBotReady || loadingPyodide}
+                  value={selectedBotSource}
+                  onChange={(e) => setSelectedBotSource(e.target.value)}
+                  aria-label="Chọn Bot xuất trận"
+                  className="px-3.5 py-2.5 text-xs font-medium rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
+                >
+                  {hasSavedBot && <option value="saved">Bot đã lưu trên tài khoản</option>}
+                  <option value="phantom_hunter">Bot mẫu · Phantom Hunter (Halloween)</option>
+                  <option value="minimax">Bot mẫu · Minimax Tactical</option>
+                  <option value="greedy">Bot mẫu · Greedy AI</option>
+                  <option value="random">Bot mẫu · Random Bot</option>
+                  {customEditorCode.trim() && (
+                    <option value="custom">Code đang mở trong Phòng Lab</option>
+                  )}
+                </select>
 
-            <button
-              type="button"
-              disabled={myBotReady || loadingPyodide || !consensusReady}
-              onClick={handleConfirmBotReady}
-              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap"
-            >
-              {loadingPyodide ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Đang nạp Python…
-                </>
-              ) : myBotReady ? (
-                <>
-                  <CheckCircle2 className="w-4 h-4" />
-                  Đã sẵn sàng
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4" />
-                  Sẵn sàng khai cuộc
-                </>
-              )}
-            </button>
-          </div>
+                <button
+                  type="button"
+                  disabled={myBotReady || loadingPyodide || !consensusReady}
+                  onClick={handleConfirmBotReady}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] disabled:opacity-50 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  {loadingPyodide ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Đang nạp Python…
+                    </>
+                  ) : myBotReady ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      Đã sẵn sàng
+                    </>
+                  ) : (
+                    <>
+                      <Play className="w-4 h-4" />
+                      Sẵn sàng khai cuộc
+                    </>
+                  )}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
@@ -1137,7 +1506,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             {/* Player 1 */}
             <div
               className={`sm:col-span-5 p-3 rounded-xl border transition-colors ${
-                gameState.turn === 1 && gameState.winner === null
+                gameState.turn === 1 && !isMatchFinished
                   ? 'border-[var(--p1-border)] bg-[var(--p1-bg)]'
                   : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)]'
               }`}
@@ -1168,7 +1537,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             {/* Player 2 */}
             <div
               className={`sm:col-span-5 p-3 rounded-xl border transition-colors ${
-                gameState.turn === 2 && gameState.winner === null
+                gameState.turn === 2 && !isMatchFinished
                   ? 'border-[var(--p2-border)] bg-[var(--p2-bg)]'
                   : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)]'
               }`}
@@ -1189,62 +1558,95 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
             </div>
           </div>
 
-          {/* Turn Banner / Victory / Draw Banner */}
-          {gameState.winner !== null ? (
+          {/* Turn Banner / Victory, Draw or Technical Forfeit Banner */}
+          {isMatchFinished ? (
             <div
               className={`p-5 rounded-2xl border flex flex-wrap items-center justify-between gap-4 ${
-                gameState.winner === 0
-                  ? 'border-amber-500/40 bg-amber-950/25'
-                  : session.mySeat === null || gameState.winner === session.mySeat
+                bannerIsDraw
+                  ? 'border-amber-400/40 bg-amber-950/20'
+                  : session.mySeat === null || bannerIsWin
                   ? 'border-emerald-500/40 bg-emerald-950/25'
-                  : 'border-rose-500/40 bg-rose-950/25'
+                  : 'border-red-500/40 bg-red-950/25'
               }`}
             >
-              <div>
+              <div className="space-y-1">
                 <h3
-                  className={`text-lg font-bold ${
-                    gameState.winner === 0
+                  className={`text-lg font-bold flex items-center gap-2 ${
+                    bannerIsDraw
                       ? 'text-amber-300'
-                      : session.mySeat === null || gameState.winner === session.mySeat
+                      : session.mySeat === null || bannerIsWin
                       ? 'text-emerald-300'
-                      : 'text-rose-300'
+                      : 'text-red-300'
                   }`}
                 >
-                  {gameState.winner === 0
-                    ? 'Ván cờ Hòa! (Lặp lại 3 lần, 50 nước không ăn quân, hết nước đi hoặc đạt mốc 180 lượt)'
-                    : session.mySeat === null
-                    ? `${gameState.winner === 1 ? session.player1Name : session.player2Name} giành chiến thắng!`
-                    : gameState.winner === session.mySeat
-                    ? 'Chiến thắng thuyết phục!'
-                    : 'Trận đấu khép lại — Đối thủ thắng!'}
+                  {technicalResolution && !bannerIsWin && session.mySeat !== null && (
+                    <AlertTriangle className="w-5 h-5 shrink-0" />
+                  )}
+                  <span>
+                    {bannerIsDraw
+                      ? describeDrawReason(gameState.drawReason)
+                      : session.mySeat === null
+                      ? `${effectiveWinner === 1 ? session.player1Name : session.player2Name} giành chiến thắng!`
+                      : bannerIsWin
+                      ? technicalResolution
+                        ? 'Chiến thắng kỹ thuật! Đã ghi nhận kết quả cho bạn'
+                        : 'Chiến thắng thuyết phục!'
+                      : technicalResolution
+                      ? 'Xử thua kỹ thuật — Trận đấu đã khép lại'
+                      : 'Trận đấu khép lại — Đối thủ thắng!'}
+                  </span>
                 </h3>
-                <div className="text-xs text-[var(--text-secondary)] mt-1 tabular-nums">
-                  Hoàn tất sau {gameState.stepCount} nước đi
+
+                {technicalResolution && (
+                  <p className="text-xs text-[var(--text-primary)]">{technicalResolution.message}</p>
+                )}
+
+                <div className="text-xs text-[var(--text-secondary)] tabular-nums">
+                  {technicalResolution
+                    ? `Kết thúc tại nước #${gameState.stepCount}`
+                    : `Hoàn tất sau ${gameState.stepCount} nước đi`}
                   {resultSummary?.eloUpdated &&
                     resultSummary.eloBefore !== undefined &&
                     resultSummary.eloAfter !== undefined && (
                       <>
                         {' · '}Elo: {resultSummary.eloBefore} →{' '}
-                        <strong className="text-[var(--text-primary)]">{resultSummary.eloAfter}</strong> (
-                        {resultSummary.eloAfter - resultSummary.eloBefore >= 0 ? '+' : ''}
+                        <strong className="text-[var(--text-primary)]">
+                          {resultSummary.eloAfter}
+                        </strong>{' '}
+                        ({resultSummary.eloAfter - resultSummary.eloBefore >= 0 ? '+' : ''}
                         {resultSummary.eloAfter - resultSummary.eloBefore})
                       </>
                     )}
                   {resultSummary?.tournamentUpdate && (
                     <>
-                      {' · '}Hạng giải: {resultSummary.tournamentUpdate.tier} (
-                      {resultSummary.tournamentUpdate.stars} Sao)
+                      {' · '}
+                      {resultSummary.tournamentUpdate.phase === 'practice' ? (
+                        <span>Vòng Chạy Đà (0 Sao · 0 Elo)</span>
+                      ) : (
+                        <span>
+                          Hạng giải:{' '}
+                          <strong className="text-[var(--text-primary)]">
+                            {TIER_VIET[resultSummary.tournamentUpdate.tier] ||
+                              resultSummary.tournamentUpdate.tier}
+                          </strong>{' '}
+                          (
+                          {resultSummary.tournamentUpdate.tier === 'Challenger'
+                            ? `${resultSummary.tournamentUpdate.seasonPoints} điểm Thách Đấu`
+                            : `${resultSummary.tournamentUpdate.stars} Sao`}
+                          )
+                        </span>
+                      )}
                     </>
                   )}
                 </div>
               </div>
 
               <div className="flex items-center gap-2.5">
-                {gameState.stepCount > 0 && (
+                {gameState.stepCount > 0 && replayMovesRef.current.length > 0 && (
                   <button
                     type="button"
                     onClick={exportCurrentReplay}
-                    className="px-4 py-2 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-panel)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer"
+                    className="px-4 py-2 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-panel)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] cursor-pointer whitespace-nowrap shrink-0"
                   >
                     Xem lại Replay
                   </button>
@@ -1253,7 +1655,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                   <button
                     type="button"
                     onClick={session.onHostResetRoom}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                     Ván mới
@@ -1262,7 +1664,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                 <button
                   type="button"
                   onClick={onExit}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer"
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap shrink-0"
                 >
                   Về sảnh
                 </button>
@@ -1273,13 +1675,11 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
               <span className="font-semibold text-[var(--text-primary)]">
                 {session.mySeat === null
                   ? `Đang tới lượt: ${gameState.turn === 1 ? session.player1Name : session.player2Name}`
-                  : isBotMatch && botThinking
-                  ? gameState.turn === session.mySeat
-                    ? `Bot của bạn đang tính toán… còn ${botSecondsLeft} giây`
-                    : `Bot đối thủ đang tính toán… còn ${botSecondsLeft} giây`
+                  : ackedStepCount < gameState.stepCount
+                  ? 'Đang đối chiếu xác nhận mã băm trạng thái (ACK) từ đối thủ…'
                   : isMyTurn
                   ? session.mode === 'bot'
-                    ? 'Bot đang chuẩn bị tính toán nước đi…'
+                    ? 'Bot của bạn đang tính toán nước đi…'
                     : 'Lượt của bạn — Hãy chọn quân cờ để di chuyển'
                   : 'Đang chờ nước đi của đối thủ…'}
               </span>
@@ -1312,7 +1712,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                 <button
                   type="button"
                   onClick={downloadReplayFile}
-                  className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+                  className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer whitespace-nowrap"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Lưu JSON
@@ -1331,7 +1731,11 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                     key={entry.step}
                     className="flex items-center justify-between px-3 py-2 rounded-lg bg-[var(--bg-canvas)] text-xs font-mono tabular-nums"
                   >
-                    <span className={entry.isCapture ? 'text-amber-300 font-medium' : 'text-[var(--text-primary)]'}>
+                    <span
+                      className={
+                        entry.isCapture ? 'text-amber-300 font-medium' : 'text-[var(--text-primary)]'
+                      }
+                    >
                       #{String(entry.step).padStart(2, '0')} {entry.text}
                     </span>
                     {entry.elapsedMs !== undefined && (
@@ -1344,13 +1748,13 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           </div>
 
           <div className="p-4 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-2 text-xs text-[var(--text-secondary)]">
-            <h4 className="font-bold text-[var(--text-primary)]">Quy tắc thắng nhanh OTTv2</h4>
-            <p>1. Phe 1 đưa quân vào căn cứ Phe 2 (i9), hoặc Phe 2 đưa quân vào căn cứ Phe 1 (a1) để thắng ngay.</p>
+            <h4 className="font-bold text-[var(--text-primary)]">Quy tắc thắng & bảo vệ công bằng</h4>
+            <p>1. Chiếm một trong hai ô đích góc bàn cờ (a1 hoặc i9) hoặc diệt sạch 1 trong 3 hệ linh vật của đối phương.</p>
             <p>
-              2. Hoặc tiêu diệt toàn bộ 1 trong 3 hệ linh vật (Bí Ngô - Đấm, Bé Ma - Lá hoặc Dơi - Kéo) của đối phương.
+              2. Hòa cờ khi lặp thế cờ 3 lần, 50 nước không ăn quân hoặc bên tới lượt hết nước đi hợp lệ.
             </p>
             <p>
-              3. Hòa cờ khi một thế cờ lặp lại 3 lần, 50 nước liên tiếp không ăn quân, đối thủ hết nước đi hợp lệ hoặc ván đấu chạm mốc 180 lượt.
+              3. Mọi hành vi thoát trận, treo máy, ngâm gói xác nhận ACK hoặc gửi sai mã băm SHA-256 đều bị xử thua kỹ thuật ngay lập tức.
             </p>
           </div>
         </div>

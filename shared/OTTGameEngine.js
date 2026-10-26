@@ -22,9 +22,6 @@
     const COLS = 'abcdefghi'.split('');
     const ROWS = 9;
     const TOTAL_CELLS = 81; // 9x9
-    const MAX_MATCH_STEPS = 180; // Trận đấu tự động Hòa nếu vượt quá 180 nước
-    const NO_CAPTURE_DRAW_STEPS = 50;
-    const REPETITION_DRAW_COUNT = 3;
 
     // Piece Encoding (Int8):
     // 0: Empty
@@ -56,9 +53,9 @@
         4: 'Đấm', 5: 'Lá', 6: 'Kéo',
     };
 
-    // Special win cells:
-    // a1: col 0, row 8 -> index 8*9 + 0 = 72 (Căn cứ P1, mục tiêu chiến thắng của P2)
-    // i9: col 8, row 0 -> index 0*9 + 8 = 8  (Căn cứ P2, mục tiêu chiến thắng của P1)
+    // Special win cells
+    // a1: col 0, row 8 -> index 8*9 + 0 = 72
+    // i9: col 8, row 0 -> index 0*9 + 8 = 8
     const SPECIAL_A1_INDEX = 72;
     const SPECIAL_I9_INDEX = 8;
 
@@ -90,8 +87,12 @@
         return a;
     }
 
-    function positionKey(board, turn) {
-        return `${Array.from(board).join('')}:${turn}`;
+    function isTerminalWinner(winner) {
+        return winner === 0 || winner === 1 || winner === 2;
+    }
+
+    function computePositionKey(board, turn) {
+        return `${turn}:${Array.from(board).join(',')}`;
     }
 
     // ── State Hash Functions ─────────────────────────────────────
@@ -114,8 +115,8 @@
         hash ^= (state.stepCount & 0xFFFF);
         hash = Math.imul(hash, 0x01000193);
 
-        const winVal = (state.winner === null || state.winner === undefined) ? 255 : (state.winner & 0xFF);
-        hash ^= winVal;
+        const winnerCode = state.winner === 0 ? 3 : (state.winner || 0);
+        hash ^= (winnerCode & 0xFF);
         hash = Math.imul(hash, 0x01000193);
 
         if (state.rules) {
@@ -135,19 +136,20 @@
      */
     async function computeStateHashAsync(state, matchId = '') {
         const fastHash = computeFastHash(state);
-        const winVal = (state.winner === null || state.winner === undefined) ? 'none' : String(state.winner);
-        const rawPayload = `${matchId}|${fastHash}|${state.turn}|${state.stepCount}|${winVal}`;
+        const winnerToken = state.winner === 0 ? 'draw' : (state.winner || 0);
+        const rawPayload = `${matchId}|${fastHash}|${state.turn}|${state.stepCount}|${winnerToken}`;
 
         if (typeof crypto !== 'undefined' && crypto.subtle) {
             const enc = new TextEncoder();
             const buf = await crypto.subtle.digest('SHA-256', enc.encode(rawPayload));
             return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
         } else {
+            // Node.js fallback
             try {
                 const nodeCrypto = require('crypto');
                 return nodeCrypto.createHash('sha256').update(rawPayload).digest('hex');
             } catch (e) {
-                return fastHash;
+                return fastHash; // Fallback if crypto is unavailable
             }
         }
     }
@@ -155,15 +157,12 @@
     // ── OTTGameEngine Class ──────────────────────────────────────
     class OTTGameEngine {
         /**
-         * Initialize a new game state deterministically from a numeric seed.
-         * Enforces piece count to be a multiple of 3 (6, 9, 12...) for perfect RPS balance.
-         * Disallows spawning pieces directly on shrines a1 (72) and i9 (8).
+         * Initialize a new game state deterministically from a numeric seed
+         * @param {number} seed - PRNG seed
+         * @param {number} pieceCountPerSide - Pieces per player (3 to 36, default 9)
          */
         static createGame(seed = 1234567, pieceCountPerSide = 9, rules = null) {
-            let requestedCount = Math.floor(pieceCountPerSide || 9);
-            // Ensure multiple of 3 between 6 and 24
-            requestedCount = Math.max(6, Math.min(24, Math.round(requestedCount / 3) * 3));
-
+            const count = Math.max(3, Math.min(36, Math.floor(pieceCountPerSide || 9)));
             const board = new Int8Array(TOTAL_CELLS);
             const rng = mulberry32(seed);
             const normalizedRules = rules ? {
@@ -175,34 +174,24 @@
                 blockedCells: [...new Set((rules.blockedCells || []).filter(index => Number.isInteger(index) && index >= 0 && index < TOTAL_CELLS))].sort((a, b) => a - b)
             } : null;
             const blocked = new Set(normalizedRules?.blockedCells || []);
-            if (blocked.has(SPECIAL_A1_INDEX) || blocked.has(SPECIAL_I9_INDEX)) {
-                throw new Error('Luật tuần không được chặn hai ô mục tiêu chiến thắng.');
-            }
+            if (blocked.has(SPECIAL_A1_INDEX) || blocked.has(SPECIAL_I9_INDEX)) throw new Error('Luật tuần không được chặn hai ô mục tiêu chiến thắng.');
 
-            // Lower-left triangle: row > col, exclude shrine a1 (72) and opposite shrine i9 (8)
+            // Lower-left triangle: row > col
             const p1Indices = [];
             for (let r = 0; r < 9; r++) {
                 for (let c = 0; c < 9; c++) {
-                    const idx1 = r * 9 + c;
-                    const idx2 = c * 9 + r;
-                    if (r > c && idx1 !== SPECIAL_A1_INDEX && idx2 !== SPECIAL_I9_INDEX && !blocked.has(idx1) && !blocked.has(idx2)) {
-                        p1Indices.push(idx1);
+                    if (r > c && !blocked.has(r * 9 + c) && !blocked.has(c * 9 + r)) {
+                        p1Indices.push(r * 9 + c);
                     }
                 }
             }
 
-            // Calculate actual balanced piece count (multiple of 3)
-            let actualCount = Math.min(requestedCount, p1Indices.length);
-            actualCount = Math.max(3, Math.floor(actualCount / 3) * 3);
+            // Pool of pieces for P1 (1: Rock, 2: Paper, 3: Scissors)
+            const actualCount = Math.min(count, p1Indices.length);
             if (actualCount < 3) throw new Error('Bộ luật tuần chặn quá nhiều ô khởi đầu.');
-
-            // Balanced pool: equal Rock, Paper, Scissors
             const piecePool = [];
-            const countPerType = actualCount / 3;
-            for (let t = 1; t <= 3; t++) {
-                for (let i = 0; i < countPerType; i++) {
-                    piecePool.push(t);
-                }
+            for (let i = 0; i < actualCount; i++) {
+                piecePool.push((i % 3) + 1);
             }
 
             const shuffledIndices = seededShuffle(p1Indices, rng).slice(0, actualCount);
@@ -213,32 +202,50 @@
                 const p1Idx = shuffledIndices[i];
                 const r = Math.floor(p1Idx / 9);
                 const c = p1Idx % 9;
-                const pType = shuffledPieces[i]; // 1 (Rock), 2 (Paper), or 3 (Scissors)
+                const pType = shuffledPieces[i]; // 1, 2, or 3
 
-                board[p1Idx] = pType;              // P1: 1..3
-                board[c * 9 + r] = pType + 3;      // P2: 4..6
+                board[p1Idx] = pType;              // P1: 1 (Rock), 2 (Paper), 3 (Scissors)
+                board[c * 9 + r] = pType + 3;      // P2: 4 (Rock), 5 (Paper), 6 (Scissors)
             }
 
-            const state = {
+            const initialPosKey = computePositionKey(board, 1);
+
+            return {
                 seed: seed,
                 pieceCount: actualCount,
                 board: board,
                 turn: 1,
                 stepCount: 0,
                 winner: null,
+                drawReason: null,
+                noCapturePlies: 0,
+                positionCounts: { [initialPosKey]: 1 },
                 lastMove: null, // { from, to, isAttack, piece, captured }
                 rules: normalizedRules,
-                positionHistory: [],
-                noCaptureCount: 0,
             };
-            state.positionHistory.push(positionKey(board, state.turn));
-            return state;
         }
 
+        /**
+         * Alias for createGame
+         */
         static createInitialState(seed = 1234567, pieceCountPerSide = 9, rules = null) {
             return this.createGame(seed, pieceCountPerSide, rules);
         }
 
+        static isGameOver(state) {
+            return Boolean(state && isTerminalWinner(state.winner));
+        }
+
+        static computeFastHash(state) {
+            return computeFastHash(state);
+        }
+
+        /**
+         * Check if attacker piece can capture defender piece
+         * 1/4 (Rock) beats 3/6 (Scissors)
+         * 3/6 (Scissors) beats 2/5 (Paper)
+         * 2/5 (Paper) beats 1/4 (Rock)
+         */
         static canCapture(attackerPiece, defenderPiece) {
             if (!attackerPiece || !defenderPiece) return false;
             const aPlayer = attackerPiece <= 3 ? 1 : 2;
@@ -248,14 +255,20 @@
             const aType = attackerPiece <= 3 ? attackerPiece : attackerPiece - 3;
             const dType = defenderPiece <= 3 ? defenderPiece : defenderPiece - 3;
 
-            if (aType === dType) return false;
+            if (aType === dType) return false; // Same type cannot capture
             return (aType === 1 && dType === 3) || // Rock beats Scissors
                    (aType === 3 && dType === 2) || // Scissors beats Paper
                    (aType === 2 && dType === 1);   // Paper beats Rock
         }
 
+        /**
+         * Get valid moves for a given cell index (0..80)
+         * @returns {Array<{ from: number, to: number, isAttack: boolean }>}
+         */
         static getValidMoves(state, fromIndex) {
-            if (state.winner !== null || fromIndex < 0 || fromIndex >= TOTAL_CELLS) return [];
+            if (isTerminalWinner(state.winner) || fromIndex < 0 || fromIndex >= TOTAL_CELLS) return [];
+            const blockedCells = state.rules?.blockedCells || [];
+            if (blockedCells.includes(fromIndex)) return [];
             const piece = state.board[fromIndex];
             if (!piece) return [];
 
@@ -272,7 +285,7 @@
                 if (nr < 0 || nr >= 9 || nc < 0 || nc >= 9) continue;
 
                 const toIndex = nr * 9 + nc;
-                if ((state.rules?.blockedCells || []).includes(toIndex)) continue;
+                if (blockedCells.includes(toIndex)) continue;
                 const target = state.board[toIndex];
 
                 if (target === PIECE.EMPTY) {
@@ -288,8 +301,11 @@
             return valid;
         }
 
+        /**
+         * Get all valid moves for the current active player
+         */
         static getAllValidMoves(state) {
-            if (state.winner !== null) return [];
+            if (isTerminalWinner(state.winner)) return [];
             const allMoves = [];
             for (let i = 0; i < TOTAL_CELLS; i++) {
                 const piece = state.board[i];
@@ -307,42 +323,42 @@
         }
 
         /**
-         * State transition with Win, Draw (Stalemate & Max Steps) evaluation.
-         * winner: 1 (Player 1), 2 (Player 2), 0 (Hòa / Draw), null (chưa xong).
+         * Pure State Transition: Apply move and return next GameState
+         * S_{t+1} = applyMove(S_t, Move)
          */
         static applyMove(state, move) {
-            if (state.winner !== null) throw new Error("Ván đấu đã kết thúc.");
+            if (isTerminalWinner(state.winner)) throw new Error("Game is already over");
             if (!move || move.from === undefined || move.to === undefined) {
-                throw new Error("Dữ liệu nước đi không hợp lệ.");
+                throw new Error("Invalid move object");
             }
 
             if (!Number.isInteger(move.from) || !Number.isInteger(move.to) ||
                 move.from < 0 || move.from >= TOTAL_CELLS ||
                 move.to < 0 || move.to >= TOTAL_CELLS || move.from === move.to) {
-                throw new Error("Tọa độ nước đi vượt quá giới hạn bàn cờ.");
+                throw new Error("Move coordinates are out of bounds or invalid");
             }
             const piece = state.board[move.from];
-            if (!piece) throw new Error(`Không có quân cờ tại ô ${move.from}`);
+            if (!piece) throw new Error(`No piece at source cell ${move.from}`);
             const piecePlayer = piece <= 3 ? 1 : 2;
             if (piecePlayer !== state.turn) {
-                throw new Error(`Đang là lượt của Player ${state.turn}, không thể đi quân của Player ${piecePlayer}`);
+                throw new Error(`It is Player ${state.turn}'s turn, but piece belongs to Player ${piecePlayer}`);
             }
 
             const legalMove = this.getValidMoves(state, move.from).some(candidate => candidate.to === move.to);
-            if (!legalMove) throw new Error(`Nước đi từ ${move.from} tới ${move.to} không hợp lệ`);
+            if (!legalMove) throw new Error(`Illegal move from ${move.from} to ${move.to}`);
             const captured = state.board[move.to];
             const isAttack = captured !== PIECE.EMPTY;
 
             if (isAttack && !this.canCapture(piece, captured)) {
-                throw new Error(`Không thể ăn quân từ ${move.from} tới ${move.to}`);
+                throw new Error(`Illegal capture from ${move.from} to ${move.to}`);
             }
 
+            // Clone board (Int8Array.slice is extremely fast)
             const nextBoard = new Int8Array(state.board);
             nextBoard[move.to] = piece;
             nextBoard[move.from] = PIECE.EMPTY;
 
             const nextStepCount = state.stepCount + 1;
-            const nextTurnCandidate = state.turn === 1 ? 2 : 1;
             const lastMoveInfo = {
                 from: move.from,
                 to: move.to,
@@ -351,52 +367,34 @@
                 captured: captured || null
             };
 
-            // 1. Check Win condition for current mover
             let winner = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
-            const noCaptureCount = isAttack ? 0 : (state.noCaptureCount || 0) + 1;
-            const positionHistory = [
-                ...(state.positionHistory?.length
-                    ? state.positionHistory
-                    : [positionKey(state.board, state.turn)]),
-                positionKey(nextBoard, nextTurnCandidate),
-            ];
+            let drawReason = null;
+            const nextTurn = winner ? state.turn : (state.turn === 1 ? 2 : 1);
+            const nextNoCapturePlies = isAttack ? 0 : ((state.noCapturePlies || 0) + 1);
+            const nextPositionCounts = { ...(state.positionCounts || {}) };
 
-            // 2. Draw Check A: Max steps reached
-            if (winner === null && nextStepCount >= MAX_MATCH_STEPS) {
-                winner = 0; // 0 = Hòa cờ (Draw)
-            }
-
-            // 3. Draw Check B: Threefold repetition
-            if (winner === null &&
-                positionHistory.filter(key => key === positionHistory[positionHistory.length - 1]).length >= REPETITION_DRAW_COUNT) {
-                winner = 0;
-            }
-
-            // 4. Draw Check C: 50 consecutive moves without a capture
-            if (winner === null && noCaptureCount >= NO_CAPTURE_DRAW_STEPS) {
-                winner = 0;
-            }
-
-            // 5. Draw Check D: Stalemate (Next player has no legal moves)
             if (winner === null) {
-                const probeState = {
-                    seed: state.seed,
-                    pieceCount: state.pieceCount,
+                const posKey = computePositionKey(nextBoard, nextTurn);
+                const seenCount = (nextPositionCounts[posKey] || 0) + 1;
+                nextPositionCounts[posKey] = seenCount;
+
+                const nextCandidateState = {
                     board: nextBoard,
-                    turn: nextTurnCandidate,
-                    stepCount: nextStepCount,
+                    turn: nextTurn,
                     winner: null,
-                    lastMove: lastMoveInfo,
-                    rules: state.rules || null,
-                    positionHistory,
-                    noCaptureCount,
+                    rules: state.rules || null
                 };
-                if (this.getAllValidMoves(probeState).length === 0) {
-                    winner = 0; // 0 = Hòa cờ do đối thủ hết nước đi (Stalemate)
+                if (this.getAllValidMoves(nextCandidateState).length === 0) {
+                    winner = 0;
+                    drawReason = 'stalemate';
+                } else if (seenCount >= 3) {
+                    winner = 0;
+                    drawReason = 'threefold-repetition';
+                } else if (nextNoCapturePlies >= 100) {
+                    winner = 0;
+                    drawReason = 'fifty-move-rule';
                 }
             }
-
-            const nextTurn = winner !== null ? state.turn : nextTurnCandidate;
 
             return {
                 seed: state.seed,
@@ -405,30 +403,26 @@
                 turn: nextTurn,
                 stepCount: nextStepCount,
                 winner: winner,
+                drawReason: drawReason,
+                noCapturePlies: nextNoCapturePlies,
+                positionCounts: nextPositionCounts,
                 lastMove: lastMoveInfo,
                 rules: state.rules || null,
-                positionHistory,
-                noCaptureCount,
             };
         }
 
         /**
-         * Check win condition:
-         * 1. Occupation of OPPONENT'S shrine:
-         *    Player 1 wins by reaching i9 (8).
-         *    Player 2 wins by reaching a1 (72).
-         * 2. Total elimination of any 1 piece type of opponent.
+         * Check win condition after a move is made
+         * 1. Occupation of Special Win Square: a1 (72) or i9 (8)
+         * 2. Total elimination of any 1 piece type of the opponent (rock, paper, or scissors)
          */
         static checkWinCondition(board, lastMove, movingPlayer) {
-            if (lastMove) {
-                if (movingPlayer === 1 && lastMove.to === SPECIAL_I9_INDEX) {
-                    return 1;
-                }
-                if (movingPlayer === 2 && lastMove.to === SPECIAL_A1_INDEX) {
-                    return 2;
-                }
+            // Rule 1: Special Win Square reached on this move
+            if (lastMove && (lastMove.to === SPECIAL_A1_INDEX || lastMove.to === SPECIAL_I9_INDEX)) {
+                return movingPlayer;
             }
 
+            // Rule 2: Count opponent pieces
             const opponent = movingPlayer === 1 ? 2 : 1;
             let oppRock = 0;
             let oppPaper = 0;
@@ -446,6 +440,7 @@
                 }
             }
 
+            // If opponent lost all of at least one piece type -> current player wins!
             if (oppRock === 0 || oppPaper === 0 || oppScissors === 0) {
                 return movingPlayer;
             }
@@ -453,6 +448,9 @@
             return null;
         }
 
+        /**
+         * Count remaining pieces for both players
+         */
         static countPieces(board) {
             const counts = {
                 1: { rock: 0, paper: 0, scissors: 0, total: 0 },
@@ -471,6 +469,7 @@
             return counts;
         }
 
+        // Coordinate conversion helpers
         static toIndex(row, col) { return row * 9 + col; }
         static toCoords(index) { return { row: Math.floor(index / 9), col: index % 9 }; }
         static toAlgebraic(index) {
@@ -486,6 +485,9 @@
             return r * 9 + c;
         }
 
+        /**
+         * Serialize state to JSON-safe plain object
+         */
         static serialize(state) {
             return {
                 seed: state.seed,
@@ -493,19 +495,24 @@
                 board: Array.from(state.board),
                 turn: state.turn,
                 stepCount: state.stepCount,
-                winner: state.winner,
+                winner: state.winner === 0 ? 0 : (state.winner || null),
+                drawReason: state.drawReason || null,
+                noCapturePlies: state.noCapturePlies || 0,
+                positionCounts: state.positionCounts ? { ...state.positionCounts } : undefined,
                 lastMove: state.lastMove,
                 rules: state.rules || null,
-                positionHistory: state.positionHistory,
-                noCaptureCount: state.noCaptureCount,
                 hash: computeFastHash(state)
             };
         }
 
+        /**
+         * Create an ergonomic, safe, and descriptive GameState view for Bots
+         */
         static createBotGameState(state, myPlayerId) {
             const myId = myPlayerId || state.turn;
             const oppId = myId === 1 ? 2 : 1;
 
+            // 1. Build 2D board
             const board2D = [];
             for (let r = 0; r < 9; r++) {
                 const row = [];
@@ -529,6 +536,7 @@
                 board2D.push(row);
             }
 
+            // 2. Extract myPieces and opponentPieces
             const myPieces = [];
             const opponentPieces = [];
             for (let i = 0; i < TOTAL_CELLS; i++) {
@@ -550,6 +558,7 @@
                 else opponentPieces.push(item);
             }
 
+            // 3. Extract and enrich valid moves
             const rawMoves = this.getAllValidMoves(state);
             const validMoves = rawMoves.map(m => {
                 const fromR = Math.floor(m.from / 9);
@@ -586,6 +595,7 @@
                 stepCount: state.stepCount,
                 boardRows: 9,
                 boardCols: 9,
+                noCapturePlies: state.noCapturePlies || 0,
                 myPlayerId: myId,
                 opponentPlayerId: oppId,
                 myPieceCounts: counts[myId],
@@ -593,33 +603,33 @@
                 specialCells: {
                     a1: SPECIAL_A1_INDEX,
                     i9: SPECIAL_I9_INDEX,
-                    // Player 1's goal is opponent shrine i9 (8), Player 2's goal is opponent shrine a1 (72)
-                    myWinIndex: myId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
-                    opponentWinIndex: oppId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX
+                    myWinIndex: myId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
+                    opponentWinIndex: oppId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX
                 },
                 rules: state.rules || null,
                 blockedCells: state.rules?.blockedCells || []
             };
         }
 
+        /**
+         * Deserialize plain object back to GameState with Int8Array
+         */
         static deserialize(obj) {
             const board = new Int8Array(obj.board);
-            const turn = obj.turn;
+            const turn = obj.turn || 1;
+            const initialPosKey = computePositionKey(board, turn);
             return {
                 seed: obj.seed,
                 pieceCount: obj.pieceCount,
                 board: board,
                 turn: turn,
-                stepCount: obj.stepCount,
-                winner: obj.winner === undefined ? null : obj.winner,
-                lastMove: obj.lastMove,
+                stepCount: obj.stepCount || 0,
+                winner: obj.winner === 0 ? 0 : (obj.winner || null),
+                drawReason: obj.drawReason || null,
+                noCapturePlies: Number(obj.noCapturePlies) || 0,
+                positionCounts: obj.positionCounts ? { ...obj.positionCounts } : { [initialPosKey]: 1 },
+                lastMove: obj.lastMove || null,
                 rules: obj.rules || null,
-                positionHistory: Array.isArray(obj.positionHistory)
-                    ? obj.positionHistory.filter(key => typeof key === 'string')
-                    : [positionKey(board, turn)],
-                noCaptureCount: Number.isInteger(obj.noCaptureCount) && obj.noCaptureCount >= 0
-                    ? obj.noCaptureCount
-                    : 0,
             };
         }
     }
@@ -630,7 +640,7 @@
         computeFastHash,
         computeStateHashAsync,
         OTT_CONSTANTS: {
-            COLS, ROWS, TOTAL_CELLS, MAX_MATCH_STEPS, NO_CAPTURE_DRAW_STEPS, REPETITION_DRAW_COUNT,
+            COLS, ROWS, TOTAL_CELLS,
             PIECE, PIECE_TYPE_NAMES, PIECE_EMOJIS, PIECE_VIET_NAMES,
             SPECIAL_A1_INDEX, SPECIAL_I9_INDEX
         }

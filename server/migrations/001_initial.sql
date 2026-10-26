@@ -108,7 +108,6 @@ CREATE TABLE IF NOT EXISTS tournament_entries (
   draws INTEGER NOT NULL DEFAULT 0,
   losses INTEGER NOT NULL DEFAULT 0,
   points INTEGER NOT NULL DEFAULT 0,
-  tournament_elo INTEGER NOT NULL DEFAULT 1200,
   tier TEXT NOT NULL DEFAULT 'Bronze' CHECK (tier IN ('Bronze','Silver','Gold','Master','Challenger')),
   registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY(tournament_id, team_id)
@@ -133,5 +132,5 @@ ALTER TABLE tournaments DROP COLUMN IF EXISTS division;
 ALTER TABLE tournament_entries ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'Bronze';
 ALTER TABLE tournament_entries DROP CONSTRAINT IF EXISTS tournament_entries_tier_check;
 ALTER TABLE tournament_entries ADD CONSTRAINT tournament_entries_tier_check CHECK (tier IN ('Bronze','Silver','Gold','Master','Challenger'));
-CREATE INDEX IF NOT EXISTS tournament_entries_rank_idx ON tournament_entries(tournament_id, points DESC, tournament_elo DESC);
+CREATE INDEX IF NOT EXISTS tournament_entries_rank_idx ON tournament_entries(tournament_id, points DESC);
 CREATE INDEX IF NOT EXISTS tournament_matches_idx ON matches(tournament_id, completed_at DESC);

@@ -1,104 +1,152 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { verifyReplay } from '../src/replay.js';
 
 const require = createRequire(import.meta.url);
-const { OTTGameEngine } = require('../../shared/OTTGameEngine.js');
+const { OTTGameEngine, computeFastHash } = require('../../shared/OTTGameEngine.js');
 
-function positionKey(board, turn) {
-  return `${Array.from(board).join('')}:${turn}`;
-}
+const canonical = (value) =>
+  Array.isArray(value)
+    ? `[${value.map(canonical).join(',')}]`
+    : value && typeof value === 'object'
+    ? `{${Object.keys(value)
+        .sort()
+        .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+        .join(',')}}`
+    : JSON.stringify(value);
+const sha256 = (value) => createHash('sha256').update(canonical(value)).digest('hex');
 
-function createTestState() {
-  const state = OTTGameEngine.createGame(42, 9);
-  const board = new Int8Array(81);
-  board[27] = 1;
-  board[28] = 2;
-  board[29] = 3;
-  board[50] = 4;
-  board[51] = 5;
-  board[52] = 6;
-  board[53] = 6;
+function statePayload(state) {
   return {
-    ...state,
-    board,
-    positionHistory: [positionKey(board, 1)],
-    noCaptureCount: 0,
+    board: Array.from(state.board),
+    turn: state.turn,
+    stepCount: state.stepCount,
+    winner: state.winner === 0 ? 0 : state.winner || null,
+    seed: state.seed,
+    pieceCount: state.pieceCount,
+    lastMove: state.lastMove || null,
+    ...(state.rules ? { rules: state.rules } : {}),
   };
 }
 
-const repetitionCycle = [
-  { from: 27, to: 36 },
-  { from: 50, to: 41 },
-  { from: 36, to: 27 },
-  { from: 41, to: 50 },
-];
+test('isGameOver distinguishes ongoing null winner from draw (0) and wins (1, 2)', () => {
+  const game = OTTGameEngine.createGame(102030, 9);
+  assert.equal(OTTGameEngine.isGameOver(game), false);
+  assert.equal(OTTGameEngine.isGameOver({ ...game, winner: 0 }), true);
+  assert.equal(OTTGameEngine.isGameOver({ ...game, winner: 1 }), true);
+  assert.equal(OTTGameEngine.isGameOver({ ...game, winner: 2 }), true);
+});
 
-test('declares a draw when the same position occurs for the third time', () => {
-  let state = createTestState();
-  for (let index = 0; index < 4; index++) {
-    state = OTTGameEngine.applyMove(state, repetitionCycle[index]);
-  }
-  assert.equal(state.winner, null);
+test('threefold-repetition ends game with winner === 0 and passes verifyReplay', () => {
+  const matchId = 'draw-replay-test-1';
+  const seed = 424242;
+  let state = OTTGameEngine.createGame(seed, 9);
+  const initialSerialized = OTTGameEngine.serialize(state);
 
-  for (let index = 0; index < 4; index++) {
-    state = OTTGameEngine.applyMove(state, repetitionCycle[index]);
+  const p1Move = OTTGameEngine.getAllValidMoves(state).find((m) => !m.isAttack);
+  const s1 = OTTGameEngine.applyMove(state, { from: p1Move.from, to: p1Move.to });
+  const p2Move = OTTGameEngine.getAllValidMoves(s1).find((m) => !m.isAttack);
+
+  const cycle = [
+    { from: p1Move.from, to: p1Move.to },
+    { from: p2Move.from, to: p2Move.to },
+    { from: p1Move.to, to: p1Move.from },
+    { from: p2Move.to, to: p2Move.from },
+  ];
+  const plan = [...cycle, ...cycle];
+  const moves = [];
+
+  for (let i = 0; i < plan.length; i++) {
+    const move = plan[i];
+    const player = state.turn;
+    const nonce = `rep-nonce-${i}`;
+    const commit = sha256({ matchId, stepCount: i, player, move, nonce });
+    state = OTTGameEngine.applyMove(state, move);
+    const stateHash = sha256(statePayload(state));
+    moves.push({
+      stepCount: i + 1,
+      player,
+      move,
+      nonce,
+      commit,
+      stateHash,
+    });
   }
+
   assert.equal(state.winner, 0);
+  assert.equal(state.drawReason, 'threefold-repetition');
+
+  const verified = verifyReplay(
+    {
+      format: 'ottv2-replay-v1',
+      matchId,
+      seed,
+      initialState: initialSerialized,
+      moves,
+    },
+    seed,
+    matchId,
+    null
+  );
+  assert.equal(verified.winner, 0);
+  assert.equal(verified.drawReason, 'threefold-repetition');
+  assert.equal(verified.stepCount, 8);
 });
 
-test('draws on the 50th consecutive move without a capture', () => {
-  let state = createTestState();
-  for (let step = 0; step < 50; step++) {
-    state = OTTGameEngine.applyMove(state, repetitionCycle[step % repetitionCycle.length]);
-    state.positionHistory = [`test-position-${state.stepCount}`];
-    if (step === 48) {
-      assert.equal(state.noCaptureCount, 49);
-      assert.equal(state.winner, null);
-    }
-  }
-  assert.equal(state.noCaptureCount, 50);
-  assert.equal(state.winner, 0);
+test('50-move no-capture rule triggers winner === 0 at 100 consecutive non-capture plies', () => {
+  const state = OTTGameEngine.createGame(999111, 9);
+  state.noCapturePlies = 99;
+  state.positionCounts = {}; // isolate from threefold-repetition
+  const nonCapture = OTTGameEngine.getAllValidMoves(state).find((m) => !m.isAttack);
+  assert.ok(nonCapture);
+
+  const next = OTTGameEngine.applyMove(state, { from: nonCapture.from, to: nonCapture.to });
+  assert.equal(next.noCapturePlies, 100);
+  assert.equal(next.winner, 0);
+  assert.equal(next.drawReason, 'fifty-move-rule');
 });
 
-test('resets the no-capture counter when a piece is captured', () => {
-  const state = createTestState();
-  state.board[36] = 6;
-  state.positionHistory = ['before-capture'];
-  state.noCaptureCount = 49;
+test('stalemate triggers winner === 0 when next turn player still has all 3 piece types alive but 0 legal moves', () => {
+  const state = OTTGameEngine.createGame(888222, 9);
+  state.board = new Int8Array(81);
+  // P1 pieces: 1 (Rock) at 40, 2 (Paper) at 50, 3 (Scissors) at 60
+  state.board[40] = 1;
+  state.board[50] = 2;
+  state.board[60] = 3;
+  // P2 pieces: 4 (Rock) at 0, 5 (Paper) at 1, 6 (Scissors) at 2 (top row col 0..2)
+  // Boxed in completely by blocked cells at col 3 (index 3) and row 1 cols 0..3 (indices 9, 10, 11, 12)!
+  state.board[0] = 4;
+  state.board[1] = 5;
+  state.board[2] = 6;
+  state.rules = {
+    id: 'test-stalemate-box',
+    rows: 9,
+    cols: 9,
+    blockedCells: [3, 9, 10, 11, 12],
+  };
+  state.turn = 1;
+  state.noCapturePlies = 0;
+  state.positionCounts = {};
 
-  const next = OTTGameEngine.applyMove(state, { from: 27, to: 36 });
-  assert.equal(next.lastMove.isAttack, true);
-  assert.equal(next.noCaptureCount, 0);
-  assert.equal(next.winner, null);
+  const next = OTTGameEngine.applyMove(state, { from: 40, to: 41 });
+  assert.equal(next.winner, 0);
+  assert.equal(next.drawReason, 'stalemate');
 });
 
-test('a win takes precedence over the 50-move draw', () => {
-  const state = createTestState();
-  state.board[17] = 1;
-  state.board[27] = 0;
-  state.positionHistory = ['before-winning-move'];
-  state.noCaptureCount = 49;
+test('computeFastHash distinguishes turn, piece types, and draw (winner === 0) vs ongoing (winner === null)', () => {
+  const s1 = OTTGameEngine.createGame(314159, 9);
+  const s2 = OTTGameEngine.deserialize(OTTGameEngine.serialize(s1));
+  s2.turn = 2;
+  assert.notEqual(computeFastHash(s1), computeFastHash(s2));
 
-  const next = OTTGameEngine.applyMove(state, { from: 17, to: 8 });
-  assert.equal(next.noCaptureCount, 50);
-  assert.equal(next.winner, 1);
-});
+  const s3 = OTTGameEngine.deserialize(OTTGameEngine.serialize(s1));
+  const idx = s3.board.findIndex((v) => v === 1);
+  s3.board[idx] = 2; // change P1 Rock to P1 Paper
+  assert.notEqual(computeFastHash(s1), computeFastHash(s3));
 
-test('serializing preserves repetition and no-capture history', () => {
-  let state = createTestState();
-  state = OTTGameEngine.applyMove(state, repetitionCycle[0]);
-  const restored = OTTGameEngine.deserialize(OTTGameEngine.serialize(state));
-  assert.deepEqual(restored.positionHistory, state.positionHistory);
-  assert.equal(restored.noCaptureCount, state.noCaptureCount);
-});
-
-test('deserializing an older state initializes draw history', () => {
-  const serialized = OTTGameEngine.serialize(createTestState());
-  delete serialized.positionHistory;
-  delete serialized.noCaptureCount;
-
-  const restored = OTTGameEngine.deserialize(serialized);
-  assert.deepEqual(restored.positionHistory, [positionKey(restored.board, restored.turn)]);
-  assert.equal(restored.noCaptureCount, 0);
+  const s4 = OTTGameEngine.deserialize(OTTGameEngine.serialize(s1));
+  s4.winner = 0; // draw must hash differently from winner: null!
+  assert.notEqual(computeFastHash(s1), computeFastHash(s4));
 });

@@ -10,7 +10,6 @@ import {
   Trophy,
 } from 'lucide-react';
 import type { BackendUser, MatchSummary, TournamentItem } from '../core/backendClient';
-import { LeaderboardRank } from '../components/LeaderboardRank';
 import {
   HalloweenMascotPiece,
   HalloweenObstacleGlyph,
@@ -28,6 +27,7 @@ interface OverviewViewProps {
   onNavigate: (
     view: 'overview' | 'bot-lab' | 'matchmaking' | 'tournaments' | 'private-room' | 'multi-watch'
   ) => void;
+  onOpenTournament?: (tournamentId: string) => void;
   onOpenAuth: (tab?: 'login' | 'register' | 'profile') => void;
   onWatchMatchReplay: (match: MatchSummary) => void;
 }
@@ -121,7 +121,7 @@ function HalloweenHeroVisual() {
                     item?.blocked
                       ? 'Bia đá vật cản'
                       : item?.shrine
-                      ? `Ô đích ${item.shrine} — Phe ${item.shrine === 'a1' ? 2 : 1} thắng khi tới đây`
+                      ? `Ô đích ${item.shrine} — Chiếm ô này thắng ngay`
                       : item?.type
                       ? `Nhấn để xem chú thích quân ${
                           item.type === 'rock'
@@ -195,7 +195,7 @@ function HalloweenHeroVisual() {
 
       <div className="pt-2 border-t border-[var(--border-subtle)] flex items-center justify-between gap-2 text-[11px] text-[var(--text-muted)]">
         <span>Di chuyển 1 ô (8 hướng)</span>
-        <span>Vào ô đích đối phương (Phe 1 tới i9, Phe 2 tới a1) hoặc diệt một hệ quân địch</span>
+        <span>Chiếm ô góc a1 / i9 hoặc diệt 1 hệ quân để thắng</span>
       </div>
     </div>
   );
@@ -209,6 +209,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   tournaments,
   loadingData,
   onNavigate,
+  onOpenTournament,
   onOpenAuth,
   onWatchMatchReplay,
 }) => {
@@ -338,19 +339,33 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                 Hiện chưa có giải đấu nào đang mở.
               </div>
             ) : (
-              <div className="divide-y divide-[var(--border-subtle)]">
+              <div className="space-y-2.5">
                 {openTournaments.slice(0, 3).map((t) => (
                   <div
                     key={t.id}
-                    className="py-4 first:pt-1 last:pb-1 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() =>
+                      onOpenTournament ? onOpenTournament(t.id) : onNavigate('tournaments')
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        if (onOpenTournament) onOpenTournament(t.id);
+                        else onNavigate('tournaments');
+                      }
+                    }}
+                    className="group p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:border-[var(--border-accent)] hover:bg-[var(--bg-panel)]/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-2 cursor-pointer"
                   >
                     <div className="space-y-1">
-                      <h4 className="text-sm font-bold text-[var(--text-primary)]">{t.name}</h4>
+                      <h4 className="text-sm font-bold text-[var(--text-primary)] group-hover:text-[var(--accent-primary)] transition-colors">
+                        {t.name}
+                      </h4>
                       <div className="text-xs text-[var(--text-secondary)] tabular-nums">
                         <span>
                           {t.status === 'qualifying'
-                            ? `Đang đua hạng · Sprint ${t.current_week || 1}`
-                            : 'Đang mở đăng ký & Vòng chạy đà'}
+                            ? `Thực chiến · Sprint ${t.current_week || 1}`
+                            : 'Mở đăng ký & Vòng chạy đà'}
                         </span>
                         <span aria-hidden="true"> · </span>
                         <span>
@@ -364,14 +379,9 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                         )}
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => onNavigate('tournaments')}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors cursor-pointer whitespace-nowrap shrink-0 self-start sm:self-center"
-                    >
-                      <Trophy className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
-                      Vào giải đấu
-                    </button>
+                    <span className="text-xs text-[var(--text-muted)] group-hover:text-[var(--text-primary)] transition-colors whitespace-nowrap shrink-0">
+                      Nhấn để mở
+                    </span>
                   </div>
                 ))}
               </div>
@@ -440,22 +450,30 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                   </thead>
                   <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
                     {recentMatches.slice(0, 6).map((m) => {
-                      const won = m.winner_id === user.id;
                       const isCompleted = m.status === 'completed';
-                      const isDraw = isCompleted && m.winner_id === null;
+                      const isDraw = isCompleted && !m.winner_id;
+                      const won = isCompleted && m.winner_id === user.id;
                       return (
                         <tr key={m.id} className="hover:bg-[var(--bg-hover)]/40 transition-colors">
                           <td className="py-3 pr-3 font-medium text-[var(--text-primary)]">
                             {m.player1} <span className="text-[var(--text-muted)]">vs</span> {m.player2}
                           </td>
                           <td className="py-3 px-3 text-[var(--text-secondary)]">
-                            {m.match_type === 'bot' ? '1v1 Bot' : '1v1 Người'}
+                            {m.match_type === 'bot' ? 'Bot Elo' : '1v1 Người'}
                           </td>
                           <td className="py-3 px-3">
                             {!isCompleted ? (
                               <span className="text-[var(--text-muted)]">{m.status}</span>
                             ) : (
-                              <span className={isDraw ? 'text-[var(--text-secondary)]' : won ? 'text-emerald-400 font-semibold' : 'text-red-400'}>
+                              <span
+                                className={
+                                  isDraw
+                                    ? 'text-amber-300 font-semibold'
+                                    : won
+                                    ? 'text-emerald-400 font-semibold'
+                                    : 'text-red-400'
+                                }
+                              >
                                 {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
                                 {m.elo_delta ? ` (${m.elo_delta > 0 ? '+' : ''}${m.elo_delta})` : ''}
                               </span>
@@ -530,15 +548,13 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                         }`}
                       >
                         <td className="py-2.5 pr-2 font-mono font-semibold text-[var(--text-secondary)]">
-                          <LeaderboardRank rank={idx + 1} />
+                          {String(idx + 1).padStart(2, '0')}
                         </td>
                         <td className="py-2.5 px-2 font-medium text-[var(--text-primary)]">
-                          <span className="inline-flex items-center gap-2">
-                            <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-white/10 bg-white/5 text-sm">
-                              {player.avatarId === 'ghost' ? '👻' : player.avatarId === 'bat' ? '🦇' : player.avatarId === 'knight' ? '🛡️' : player.avatarId === 'fox' ? '🦊' : player.avatarId === 'crown' ? '👑' : '🎃'}
-                            </span>
-                            {player.displayName}
+                          <span className="mr-1.5" aria-hidden="true">
+                            {player.avatarId === 'ghost' ? '👻' : player.avatarId === 'bat' ? '🦇' : player.avatarId === 'knight' ? '🛡️' : player.avatarId === 'fox' ? '🦊' : player.avatarId === 'crown' ? '👑' : '🎃'}
                           </span>
+                          <span>{player.displayName}</span>
                           {isMe && (
                             <span className="text-[var(--accent-primary)] ml-1.5">· Bạn</span>
                           )}

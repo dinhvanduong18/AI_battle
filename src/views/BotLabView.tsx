@@ -152,7 +152,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
 
   const executeSingleBotTurn = useCallback(async () => {
     const curr = stateRef.current;
-    if (curr.winner !== null || steppingRef.current) return;
+    if (OTTGameEngine.isGameOver(curr) || steppingRef.current) return;
     const seat = curr.turn;
     const ctrl = seat === 1 ? p1Controller : p2Controller;
     if (ctrl === 'human') return;
@@ -185,36 +185,22 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
         },
       ]);
 
-      if (next.winner !== null) {
+      if (OTTGameEngine.isGameOver(next)) {
         setRunning(false);
-        if (next.winner === 0) {
-          notify('Trận đấu kết thúc với kết quả Hòa cờ!', 'info');
-        } else {
-          soundFx.playVictory();
-        }
+        if (next.winner) soundFx.playVictory();
       }
     } catch (err: any) {
       setLoadingBots(false);
       setRunning(false);
-      // Quy chuẩn thi đấu: Bot gặp lỗi / TLE bị Xử Thua Kỹ Thuật (Forfeit), đối thủ Thắng
-      const loserSeat = seat;
-      const winnerSeat: 1 | 2 = loserSeat === 1 ? 2 : 1;
-      const forfeitedState: GameState = {
-        ...curr,
-        winner: winnerSeat,
-      };
-      stateRef.current = forfeitedState;
-      setGameState(forfeitedState);
       setLogs((prev) => [
         ...prev,
         {
           step: curr.stepCount + 1,
-          text: `P${loserSeat} phạm quy (${err.message}) → P${winnerSeat} THẮNG KỸ THUẬT!`,
+          text: `P${seat} lỗi/TLE: ${err.message}`,
           isError: true,
         },
       ]);
-      soundFx.playVictory();
-      notify(`P${loserSeat} lỗi (${err.message}) → P${winnerSeat} Thắng Kỹ Thuật!`, 'error');
+      notify(err.message || 'Bot gặp lỗi khi tính nước đi.', 'error');
     } finally {
       steppingRef.current = false;
     }
@@ -222,7 +208,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
 
   // Continuous loop while `running === true`
   useEffect(() => {
-    if (!running || gameState.winner !== null) return;
+    if (!running || OTTGameEngine.isGameOver(gameState)) return;
     const currentCtrl = gameState.turn === 1 ? p1Controller : p2Controller;
     if (currentCtrl === 'human') return;
 
@@ -235,7 +221,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
 
   const handleBoardClick = (idx: number) => {
     const curr = stateRef.current;
-    if (curr.winner !== null) return;
+    if (OTTGameEngine.isGameOver(curr)) return;
     const activeCtrl = curr.turn === 1 ? p1Controller : p2Controller;
     if (activeCtrl !== 'human') return;
 
@@ -262,13 +248,9 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             }`,
           },
         ]);
-        if (next.winner !== null) {
+        if (OTTGameEngine.isGameOver(next)) {
           setRunning(false);
-          if (next.winner === 0) {
-            notify('Trận đấu kết thúc với kết quả Hòa cờ!', 'info');
-          } else {
-            soundFx.playVictory();
-          }
+          if (next.winner) soundFx.playVictory();
         }
         return;
       }
@@ -311,6 +293,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
     setSavingServer(true);
     try {
       await onSaveBotToServer(editorCode);
+      // Force reload editor bot runner on next match run
       if (p1Controller === 'editor') {
         runner1Ref.current?.destroy();
         runner1Ref.current = null;
@@ -339,8 +322,9 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
   };
 
   const counts = OTTGameEngine.countPieces(gameState.board);
+  const gameFinished = OTTGameEngine.isGameOver(gameState);
   const isHumanTurnNow =
-    gameState.winner === null &&
+    !gameFinished &&
     ((gameState.turn === 1 && p1Controller === 'human') ||
       (gameState.turn === 2 && p2Controller === 'human'));
 
@@ -363,8 +347,9 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                disabled={loadingBots || gameState.winner !== null}
+                disabled={loadingBots || gameFinished}
                 onClick={() => {
+                  // Reset runners if code was edited before starting
                   if (!running) {
                     if (p1Controller === 'editor') {
                       runner1Ref.current?.destroy();
@@ -399,7 +384,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
 
               <button
                 type="button"
-                disabled={running || loadingBots || gameState.winner !== null || isHumanTurnNow}
+                disabled={running || loadingBots || gameFinished || isHumanTurnNow}
                 onClick={executeSingleBotTurn}
                 title="Chạy từng bước 1 nước của Bot"
                 className="inline-flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-40 transition-colors cursor-pointer whitespace-nowrap shrink-0"
@@ -495,7 +480,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             </div>
 
             <div>
-              <label className="block text-[11px] text-[var(--text-muted)] mb-1">Số quân / phe (Bội số 3)</label>
+              <label className="block text-[11px] text-[var(--text-muted)] mb-1">Số quân / phe</label>
               <select
                 value={pieceCount}
                 onChange={(e) => {
@@ -507,7 +492,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
               >
                 {[6, 9, 12, 15, 18].map((n) => (
                   <option key={n} value={n}>
-                    {n} quân ({n / 3} Đấm, {n / 3} Lá, {n / 3} Kéo)
+                    {n} quân
                   </option>
                 ))}
               </select>
@@ -543,10 +528,10 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
           {/* Status Strip + Random Seed */}
           <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-xs">
             <span className="font-medium text-[var(--text-primary)]">
-              {gameState.winner === 0
-                ? `Hòa cờ sau ${gameState.stepCount} nước (Stalemate / Chạm giới hạn 180 bước)!`
-                : gameState.winner !== null
-                ? `Kết thúc: Phe ${gameState.winner} chiến thắng sau ${gameState.stepCount} nước!`
+              {gameFinished
+                ? gameState.winner === 0
+                  ? `Kết thúc: Hòa cờ sau ${gameState.stepCount} nước!`
+                  : `Kết thúc: Phe ${gameState.winner} chiến thắng sau ${gameState.stepCount} nước!`
                 : isHumanTurnNow
                 ? `Lượt Phe ${gameState.turn} (Bạn) — Chọn quân cờ trên bàn để đi`
                 : running
@@ -587,7 +572,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             <div className="h-28 overflow-y-auto space-y-1 pr-1 font-mono text-xs tabular-nums">
               {logs.length === 0 ? (
                 <div className="text-[var(--text-muted)] py-6 text-center">
-                  Bấm &quot;Chạy thử&quot; hoặc &quot;1 Bước&quot; để kiểm tra tốc độ phản hồi của thuật toán.
+                  Bấm "Chạy thử" hoặc "1 Bước" để kiểm tra tốc độ phản hồi của thuật toán.
                 </div>
               ) : (
                 logs.slice(-30).map((item, i) => (
@@ -740,24 +725,21 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
                 </p>
                 <ul className="space-y-1.5 list-disc pl-4">
                   <li>
-                    <code className="text-[var(--text-primary)]">game_state[&apos;validMoves&apos;]</code>: Danh sách mọi nước đi hợp lệ trong lượt hiện tại. Mỗi phần tử gồm{' '}
+                    <code className="text-[var(--text-primary)]">game_state['validMoves']</code>: Danh sách mọi nước đi hợp lệ trong lượt hiện tại. Mỗi phần tử gồm{' '}
                     <code>fromRow, fromCol, toRow, toCol, from, to, isAttack, pieceType, targetType</code>.
                   </li>
                   <li>
-                    <code className="text-[var(--text-primary)]">game_state[&apos;myPieces&apos;]</code> &amp;{' '}
-                    <code className="text-[var(--text-primary)]">game_state[&apos;opponentPieces&apos;]</code>: Danh sách tọa độ quân còn trên bàn (<code>row, col, index, type</code> với <code>type</code> là <code>&apos;rock&apos; | &apos;paper&apos; | &apos;scissors&apos;</code>).
+                    <code className="text-[var(--text-primary)]">game_state['myPieces']</code> &{' '}
+                    <code className="text-[var(--text-primary)]">game_state['opponentPieces']</code>: Danh sách tọa độ quân còn trên bàn (<code>row, col, index, type</code> với <code>type</code> là <code>'rock' | 'paper' | 'scissors'</code>).
                   </li>
                   <li>
-                    <code className="text-[var(--text-primary)]">game_state[&apos;opponentPieceCounts&apos;]</code>: Số lượng từng hệ quân đối phương còn lại (<code>&#123; rock, paper, scissors, total &#125;</code>). Đưa bất kỳ hệ nào về <code>0</code> sẽ thắng ngay!
+                    <code className="text-[var(--text-primary)]">game_state['opponentPieceCounts']</code>: Số lượng từng hệ quân đối phương còn lại (<code>{'{ rock, paper, scissors, total }'}</code>). Đưa bất kỳ hệ nào về <code>0</code> sẽ thắng ngay!
                   </li>
                   <li>
-                    <code className="text-[var(--text-primary)]">game_state[&apos;specialCells&apos;]</code>: Ô căn cứ <code>a1 (72)</code> và <code>i9 (8)</code>. Đối với Phe 1, chiếm cứ điểm <code>i9</code> để thắng ngay; đối với Phe 2, chiếm cứ điểm <code>a1</code> để thắng ngay.
+                    <code className="text-[var(--text-primary)]">game_state['blockedCells']</code>: Mảng các chỉ số ô bị khóa trong giải đấu theo Sprint (ví dụ <code>[30, 31, 32, ...]</code>).
                   </li>
                   <li>
-                    <code className="text-[var(--text-primary)]">game_state[&apos;blockedCells&apos;]</code>: Mảng các chỉ số ô bị khóa trong giải đấu theo Sprint (ví dụ <code>[30, 31, 32, ...]</code>).
-                  </li>
-                  <li>
-                    Giá trị trả về hợp lệ: dictionary <code>&#123;&apos;fromRow&apos;: r1, &apos;fromCol&apos;: c1, &apos;toRow&apos;: r2, &apos;toCol&apos;: c2&#125;</code> hoặc <code>&#123;&apos;from&apos;: idx1, &apos;to&apos;: idx2&#125;</code>.
+                    Giá trị trả về hợp lệ: dictionary <code>{"{'fromRow': r1, 'fromCol': c1, 'toRow': r2, 'toCol': c2}"}</code> hoặc <code>{"{'from': idx1, 'to': idx2}"}</code>.
                   </li>
                 </ul>
               </div>

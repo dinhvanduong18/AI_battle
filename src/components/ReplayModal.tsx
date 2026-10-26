@@ -295,9 +295,15 @@ export const ReplayModal: React.FC<ReplayModalProps> = ({
                 <h3 className="text-sm font-semibold text-[var(--text-primary)]">
                   Biên bản nước đi
                 </h3>
-                {currentState?.winner !== null && currentState?.winner !== undefined && (
-                  <span className="text-xs font-semibold text-emerald-400">
-                    {currentState.winner === 0 ? 'Trận đấu hòa' : `${currentState.winner === 1 ? player1Name : player2Name} thắng`}
+                {currentState && OTTGameEngine.isGameOver(currentState) && (
+                  <span
+                    className={`text-xs font-semibold ${
+                      currentState.winner === 0 ? 'text-amber-300' : 'text-emerald-400'
+                    }`}
+                  >
+                    {currentState.winner === 0
+                      ? 'Kết quả Hòa'
+                      : `${currentState.winner === 1 ? player1Name : player2Name} thắng`}
                   </span>
                 )}
               </div>

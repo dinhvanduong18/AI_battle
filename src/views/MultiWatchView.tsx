@@ -119,7 +119,7 @@ const WatchQuadrantCard: React.FC<{
 
   // AI Exhibition Simulation Loop (when not connected to an external P2P room)
   useEffect(() => {
-    if (liveRoomCode || !autoSim || state.winner) return;
+    if (liveRoomCode || !autoSim || OTTGameEngine.isGameOver(state)) return;
     const timer = setTimeout(() => {
       const move = pickFastExhibitionMove(state);
       if (move) {
@@ -283,8 +283,10 @@ const WatchQuadrantCard: React.FC<{
       {/* Quadrant Footer: Status + Connect P2P Room Code */}
       <div className="pt-2.5 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="font-mono text-[var(--text-secondary)] tabular-nums">
-          {state.winner !== null
-            ? state.winner === 0 ? 'Hòa sau giới hạn 500 nước.' : `Kết thúc: ${state.winner === 1 ? p1Name : p2Name} thắng!`
+          {OTTGameEngine.isGameOver(state)
+            ? state.winner === 0
+              ? 'Kết thúc: Hòa cờ!'
+              : `Kết thúc: ${state.winner === 1 ? p1Name : p2Name} thắng!`
             : `Nước cuối: ${lastMoveDesc}`}
         </div>
 

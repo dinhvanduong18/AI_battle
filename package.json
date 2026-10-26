@@ -9,10 +9,12 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
+    "admin:local": "node scripts/set-local-admin.mjs",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "OTTV2_SKIP_AUTOSTART=1 tsx --test server/test/*.test.js"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

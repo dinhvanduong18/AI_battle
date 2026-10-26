@@ -67,7 +67,7 @@ export async function hashState(state: GameState): Promise<string> {
     board: Array.from(state.board),
     turn: state.turn,
     stepCount: state.stepCount,
-    winner: state.winner || null,
+    winner: state.winner === 0 ? 0 : state.winner || null,
     seed: state.seed,
     pieceCount: state.pieceCount,
     lastMove: state.lastMove || null,

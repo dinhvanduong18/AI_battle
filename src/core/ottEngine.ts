@@ -6,12 +6,9 @@
 export const COLS = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] as const;
 export const ROWS = 9;
 export const TOTAL_CELLS = 81;
-export const MAX_MATCH_STEPS = 180; // Trận đấu tự động Hòa nếu chạm 180 lượt
-export const NO_CAPTURE_DRAW_STEPS = 50;
-export const REPETITION_DRAW_COUNT = 3;
 
-export const SPECIAL_A1_INDEX = 72; // row 8, col 0 (Căn cứ P1, mục tiêu chiến thắng của P2)
-export const SPECIAL_I9_INDEX = 8;  // row 0, col 8 (Căn cứ P2, mục tiêu chiến thắng của P1)
+export const SPECIAL_A1_INDEX = 72; // row 8, col 0 (P2 target / bottom-left shrine)
+export const SPECIAL_I9_INDEX = 8;  // row 0, col 8 (P1 target / top-right shrine)
 
 export const PIECE = {
   EMPTY: 0,
@@ -109,17 +106,29 @@ export interface LastMoveInfo {
   captured: number | null;
 }
 
+export type DrawReason = 'threefold-repetition' | 'fifty-move-rule' | 'stalemate';
+
 export interface GameState {
   seed: number;
   pieceCount: number;
   board: Int8Array;
   turn: 1 | 2;
   stepCount: number;
-  winner: 1 | 2 | 0 | null; // 1: P1 thắng, 2: P2 thắng, 0: Hòa cờ (Draw), null: đang diễn ra
+  winner: 0 | 1 | 2 | null;
+  drawReason?: DrawReason | null;
+  noCapturePlies?: number;
+  positionCounts?: Record<string, number>;
   lastMove: LastMoveInfo | null;
   rules: BoardRules | null;
-  positionHistory: string[];
-  noCaptureCount: number;
+}
+
+export function isGameOver(state: Pick<GameState, 'winner'> | null | undefined): boolean {
+  if (!state) return false;
+  return state.winner === 0 || state.winner === 1 || state.winner === 2;
+}
+
+function computePositionKey(board: Int8Array, turn: 1 | 2): string {
+  return `${turn}:${Array.from(board).join(',')}`;
 }
 
 export interface ValidMove {
@@ -133,10 +142,6 @@ const DIRECTIONS: ReadonlyArray<[number, number]> = [
   [0, -1],           [0, 1],
   [1, -1],  [1, 0],  [1, 1],
 ];
-
-function positionKey(board: Int8Array, turn: 1 | 2): string {
-  return `${Array.from(board).join('')}:${turn}`;
-}
 
 export function mulberry32(seed: number) {
   let s = seed >>> 0 || 1;
@@ -169,8 +174,8 @@ export function computeFastHash(state: GameState): string {
   hash = Math.imul(hash, 0x01000193);
   hash ^= state.stepCount & 0xffff;
   hash = Math.imul(hash, 0x01000193);
-  const winVal = state.winner === null || state.winner === undefined ? 255 : state.winner & 0xff;
-  hash ^= winVal;
+  const winnerCode = state.winner === 0 ? 3 : state.winner || 0;
+  hash ^= winnerCode & 0xff;
   hash = Math.imul(hash, 0x01000193);
   if (state.rules) {
     const rules = state.rules;
@@ -184,10 +189,20 @@ export function computeFastHash(state: GameState): string {
 }
 
 export class OTTGameEngine {
-  static createGame(seed = 1234567, pieceCountPerSide = 9, rules: Partial<BoardRules> | null = null): GameState {
-    let requestedCount = Math.floor(pieceCountPerSide || 9);
-    requestedCount = Math.max(6, Math.min(24, Math.round(requestedCount / 3) * 3));
+  static isGameOver(state: Pick<GameState, 'winner'> | null | undefined): boolean {
+    return isGameOver(state);
+  }
 
+  static computeFastHash(state: GameState): string {
+    return computeFastHash(state);
+  }
+
+  static createInitialState(seed = 1234567, pieceCountPerSide = 9, rules: Partial<BoardRules> | null = null): GameState {
+    return this.createGame(seed, pieceCountPerSide, rules);
+  }
+
+  static createGame(seed = 1234567, pieceCountPerSide = 9, rules: Partial<BoardRules> | null = null): GameState {
+    const count = Math.max(3, Math.min(36, Math.floor(pieceCountPerSide || 9)));
     const board = new Int8Array(TOTAL_CELLS);
     const rng = mulberry32(seed);
 
@@ -216,24 +231,18 @@ export class OTTGameEngine {
     const p1Indices: number[] = [];
     for (let r = 0; r < 9; r++) {
       for (let c = 0; c < 9; c++) {
-        const idx1 = r * 9 + c;
-        const idx2 = c * 9 + r;
-        if (r > c && idx1 !== SPECIAL_A1_INDEX && idx2 !== SPECIAL_I9_INDEX && !blocked.has(idx1) && !blocked.has(idx2)) {
-          p1Indices.push(idx1);
+        if (r > c && !blocked.has(r * 9 + c) && !blocked.has(c * 9 + r)) {
+          p1Indices.push(r * 9 + c);
         }
       }
     }
 
-    let actualCount = Math.min(requestedCount, p1Indices.length);
-    actualCount = Math.max(3, Math.floor(actualCount / 3) * 3);
+    const actualCount = Math.min(count, p1Indices.length);
     if (actualCount < 3) throw new Error('Bộ luật tuần chặn quá nhiều ô khởi đầu.');
 
     const piecePool: number[] = [];
-    const countPerType = actualCount / 3;
-    for (let t = 1; t <= 3; t++) {
-      for (let j = 0; j < countPerType; j++) {
-        piecePool.push(t);
-      }
+    for (let i = 0; i < actualCount; i++) {
+      piecePool.push((i % 3) + 1);
     }
 
     const shuffledIndices = seededShuffle(p1Indices, rng).slice(0, actualCount);
@@ -248,20 +257,21 @@ export class OTTGameEngine {
       board[c * 9 + r] = pType + 3;
     }
 
-    const state: GameState = {
+    const initialPosKey = computePositionKey(board, 1);
+
+    return {
       seed,
       pieceCount: actualCount,
       board,
       turn: 1,
       stepCount: 0,
       winner: null,
+      drawReason: null,
+      noCapturePlies: 0,
+      positionCounts: { [initialPosKey]: 1 },
       lastMove: null,
       rules: normalizedRules,
-      positionHistory: [],
-      noCaptureCount: 0,
     };
-    state.positionHistory.push(positionKey(board, state.turn));
-    return state;
   }
 
   static canCapture(attackerPiece: number, defenderPiece: number): boolean {
@@ -280,7 +290,7 @@ export class OTTGameEngine {
   }
 
   static getValidMoves(state: GameState, fromIndex: number): ValidMove[] {
-    if (state.winner !== null) return [];
+    if (isGameOver(state)) return [];
     if (fromIndex < 0 || fromIndex >= TOTAL_CELLS) return [];
     const blocked = new Set(state.rules?.blockedCells || []);
     if (blocked.has(fromIndex)) return [];
@@ -300,7 +310,6 @@ export class OTTGameEngine {
       if (nr < 0 || nr >= 9 || nc < 0 || nc >= 9) continue;
       const toIndex = nr * 9 + nc;
       if (blocked.has(toIndex)) continue;
-
       const target = state.board[toIndex];
       if (target === PIECE.EMPTY) {
         valid.push({ from: fromIndex, to: toIndex, isAttack: false });
@@ -315,7 +324,7 @@ export class OTTGameEngine {
   }
 
   static getAllValidMoves(state: GameState): ValidMove[] {
-    if (state.winner !== null) return [];
+    if (isGameOver(state)) return [];
     const allMoves: ValidMove[] = [];
     for (let i = 0; i < TOTAL_CELLS; i++) {
       const piece = state.board[i];
@@ -330,13 +339,8 @@ export class OTTGameEngine {
   }
 
   static checkWinCondition(board: Int8Array, lastMove: LastMoveInfo | null, movingPlayer: 1 | 2): 1 | 2 | null {
-    if (lastMove) {
-      if (movingPlayer === 1 && lastMove.to === SPECIAL_I9_INDEX) {
-        return 1;
-      }
-      if (movingPlayer === 2 && lastMove.to === SPECIAL_A1_INDEX) {
-        return 2;
-      }
+    if (lastMove && (lastMove.to === SPECIAL_A1_INDEX || lastMove.to === SPECIAL_I9_INDEX)) {
+      return movingPlayer;
     }
     const opponent = movingPlayer === 1 ? 2 : 1;
     let oppRock = 0;
@@ -360,7 +364,7 @@ export class OTTGameEngine {
   }
 
   static applyMove(state: GameState, move: { from: number; to: number }): GameState {
-    if (state.winner !== null) throw new Error('Ván đấu đã kết thúc.');
+    if (isGameOver(state)) throw new Error('Ván đấu đã kết thúc.');
     if (!move || !Number.isInteger(move.from) || !Number.isInteger(move.to)) {
       throw new Error('Nước đi không hợp lệ.');
     }
@@ -384,7 +388,6 @@ export class OTTGameEngine {
     nextBoard[move.to] = piece;
     nextBoard[move.from] = PIECE.EMPTY;
     const nextStepCount = state.stepCount + 1;
-    const nextTurnCandidate: 1 | 2 = state.turn === 1 ? 2 : 1;
     const lastMoveInfo: LastMoveInfo = {
       from: move.from,
       to: move.to,
@@ -392,55 +395,39 @@ export class OTTGameEngine {
       piece,
       captured: captured || null,
     };
+    let winner: 0 | 1 | 2 | null = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
+    let drawReason: DrawReason | null = null;
+    const nextTurn: 1 | 2 = winner ? state.turn : state.turn === 1 ? 2 : 1;
+    const nextNoCapturePlies = isAttack ? 0 : (state.noCapturePlies || 0) + 1;
+    const nextPositionCounts: Record<string, number> = { ...(state.positionCounts || {}) };
 
-    let winner: GameState['winner'] = this.checkWinCondition(nextBoard, lastMoveInfo, state.turn);
-    const noCaptureCount = isAttack ? 0 : (state.noCaptureCount || 0) + 1;
-    const positionHistory = [
-      ...(state.positionHistory.length
-        ? state.positionHistory
-        : [positionKey(state.board, state.turn)]),
-      positionKey(nextBoard, nextTurnCandidate),
-    ];
-
-    // Draw check 1: Max steps reached
-    if (winner === null && nextStepCount >= MAX_MATCH_STEPS) {
-      winner = 0; // Hòa cờ (Draw)
-    }
-
-    // Draw check 2: Threefold repetition
-    if (
-      winner === null &&
-      positionHistory.filter((key) => key === positionHistory[positionHistory.length - 1]).length >=
-        REPETITION_DRAW_COUNT
-    ) {
-      winner = 0;
-    }
-
-    // Draw check 3: 50 consecutive moves without a capture
-    if (winner === null && noCaptureCount >= NO_CAPTURE_DRAW_STEPS) {
-      winner = 0;
-    }
-
-    // Draw check 4: Stalemate (Next player has no legal moves)
     if (winner === null) {
-      const probeState: GameState = {
+      const posKey = computePositionKey(nextBoard, nextTurn);
+      const seenCount = (nextPositionCounts[posKey] || 0) + 1;
+      nextPositionCounts[posKey] = seenCount;
+
+      const nextCandidate: GameState = {
         seed: state.seed,
         pieceCount: state.pieceCount,
         board: nextBoard,
-        turn: nextTurnCandidate,
+        turn: nextTurn,
         stepCount: nextStepCount,
         winner: null,
         lastMove: lastMoveInfo,
         rules: state.rules || null,
-        positionHistory,
-        noCaptureCount,
       };
-      if (this.getAllValidMoves(probeState).length === 0) {
-        winner = 0; // Hòa cờ do đối thủ hết nước đi (Stalemate)
+
+      if (this.getAllValidMoves(nextCandidate).length === 0) {
+        winner = 0;
+        drawReason = 'stalemate';
+      } else if (seenCount >= 3) {
+        winner = 0;
+        drawReason = 'threefold-repetition';
+      } else if (nextNoCapturePlies >= 100) {
+        winner = 0;
+        drawReason = 'fifty-move-rule';
       }
     }
-
-    const nextTurn: 1 | 2 = winner !== null ? state.turn : nextTurnCandidate;
 
     return {
       seed: state.seed,
@@ -449,10 +436,11 @@ export class OTTGameEngine {
       turn: nextTurn,
       stepCount: nextStepCount,
       winner,
+      drawReason,
+      noCapturePlies: nextNoCapturePlies,
+      positionCounts: nextPositionCounts,
       lastMove: lastMoveInfo,
       rules: state.rules || null,
-      positionHistory,
-      noCaptureCount,
     };
   }
 
@@ -485,34 +473,32 @@ export class OTTGameEngine {
       board: Array.from(state.board),
       turn: state.turn,
       stepCount: state.stepCount,
-      winner: state.winner,
+      winner: state.winner === 0 ? 0 : state.winner || null,
+      drawReason: state.drawReason || null,
+      noCapturePlies: state.noCapturePlies || 0,
+      positionCounts: state.positionCounts ? { ...state.positionCounts } : undefined,
       lastMove: state.lastMove,
       rules: state.rules || null,
-      positionHistory: state.positionHistory,
-      noCaptureCount: state.noCaptureCount,
       hash: computeFastHash(state),
     };
   }
 
   static deserialize(obj: any): GameState {
     const board = new Int8Array(obj.board);
-    const turn = obj.turn;
+    const turn: 1 | 2 = obj.turn === 2 ? 2 : 1;
+    const initialPosKey = computePositionKey(board, turn);
     return {
       seed: obj.seed,
       pieceCount: obj.pieceCount,
       board,
       turn,
-      stepCount: obj.stepCount,
-      winner: obj.winner === undefined ? null : obj.winner,
+      stepCount: obj.stepCount || 0,
+      winner: obj.winner === 0 ? 0 : obj.winner || null,
+      drawReason: obj.drawReason || null,
+      noCapturePlies: Number(obj.noCapturePlies) || 0,
+      positionCounts: obj.positionCounts ? { ...obj.positionCounts } : { [initialPosKey]: 1 },
       lastMove: obj.lastMove || null,
       rules: obj.rules || null,
-      positionHistory: Array.isArray(obj.positionHistory)
-        ? obj.positionHistory.filter((key: unknown): key is string => typeof key === 'string')
-        : [positionKey(board, turn)],
-      noCaptureCount:
-        Number.isInteger(obj.noCaptureCount) && obj.noCaptureCount >= 0
-          ? obj.noCaptureCount
-          : 0,
     };
   }
 
@@ -603,8 +589,8 @@ export class OTTGameEngine {
       specialCells: {
         a1: SPECIAL_A1_INDEX,
         i9: SPECIAL_I9_INDEX,
-        myWinIndex: myId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
-        opponentWinIndex: oppId === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX,
+        myWinIndex: myId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
+        opponentWinIndex: oppId === 1 ? SPECIAL_A1_INDEX : SPECIAL_I9_INDEX,
       },
       rules: state.rules || null,
       blockedCells: blockedArr,

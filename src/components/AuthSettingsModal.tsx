@@ -1,49 +1,33 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import {
-  Award,
-  Check,
-  Eye,
-  EyeOff,
-  Film,
-  KeyRound,
-  LogOut,
-  Shield,
-  Swords,
-  User,
-  X,
-} from 'lucide-react';
-import { backendClient, type BackendUser, type MatchSummary } from '../core/backendClient';
+import React, { useEffect, useState } from 'react';
+import { KeyRound, LogOut, X } from 'lucide-react';
+import { backendClient, type BackendUser, type PlayerAvatarId } from '../core/backendClient';
 import { useToast } from './ToastProvider';
 
 export type ModalTab = 'login' | 'register' | 'profile';
+
+export const PLAYER_AVATARS: { id: PlayerAvatarId; emoji: string; label: string }[] = [
+  { id: 'pumpkin', emoji: '🎃', label: 'Bí Ngô' },
+  { id: 'ghost', emoji: '👻', label: 'Bóng Ma' },
+  { id: 'bat', emoji: '🦇', label: 'Dơi Đêm' },
+  { id: 'knight', emoji: '🛡️', label: 'Kỵ Sĩ' },
+  { id: 'fox', emoji: '🦊', label: 'Cáo Lửa' },
+  { id: 'crown', emoji: '👑', label: 'Quân Vương' },
+];
 
 interface AuthSettingsModalProps {
   open: boolean;
   initialTab: ModalTab;
   user: BackendUser | null;
-  matches: MatchSummary[];
   onClose: () => void;
   onUserUpdated: (user: BackendUser | null) => void;
-  onWatchMatchReplay: (match: MatchSummary) => void;
 }
-
-export const PLAYER_AVATARS = [
-  { id: 'pumpkin', emoji: '🎃', label: 'Bí Ngô', color: 'from-orange-500/30 to-amber-900/30' },
-  { id: 'ghost', emoji: '👻', label: 'Bóng Ma', color: 'from-violet-500/30 to-indigo-900/30' },
-  { id: 'bat', emoji: '🦇', label: 'Dơi Đêm', color: 'from-slate-400/20 to-slate-900/50' },
-  { id: 'knight', emoji: '🛡️', label: 'Kỵ Sĩ', color: 'from-cyan-500/25 to-blue-900/40' },
-  { id: 'fox', emoji: '🦊', label: 'Cáo Lửa', color: 'from-rose-500/25 to-orange-900/40' },
-  { id: 'crown', emoji: '👑', label: 'Quân Vương', color: 'from-yellow-400/25 to-amber-900/40' },
-] as const;
 
 export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   open,
   initialTab,
   user,
-  matches,
   onClose,
   onUserUpdated,
-  onWatchMatchReplay,
 }) => {
   const { notify } = useToast();
   const [tab, setTab] = useState<ModalTab>(initialTab);
@@ -58,7 +42,6 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   const [newDisplayName, setNewDisplayName] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [emailVisible, setEmailVisible] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -66,9 +49,10 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       setNewDisplayName(user?.displayName || '');
       setCurrentPassword('');
       setNewPassword('');
-      setEmailVisible(false);
     }
   }, [open, initialTab, user]);
+
+  if (!open) return null;
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -129,78 +113,31 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     }
   };
 
-  const handleAvatarChange = async (avatarId: BackendUser['avatarId']) => {
-    if (!avatarId || avatarId === (user?.avatarId || 'pumpkin')) return;
+  const handleAvatarChange = async (avatarId: PlayerAvatarId) => {
+    if (avatarId === (user?.avatarId || 'pumpkin')) return;
     setLoading(true);
     try {
       const updated = await backendClient.updateProfile({ avatarId });
       onUserUpdated(updated);
-      notify('Đã cập nhật avatar kỳ thủ.', 'success');
+      notify('Đã cập nhật diện mạo kỳ thủ.', 'success');
     } catch (err: any) {
-      const message = String(err?.message || '');
-      if (/nhập tên mới/i.test(message)) {
-        notify(
-          'Máy chủ chưa được cập nhật tính năng đổi avatar. Hãy triển khai lại backend từ phiên bản mới nhất rồi thử lại.',
-          'error'
-        );
-      } else {
-        notify(message || 'Không thể cập nhật avatar.', 'error');
-      }
+      notify(err.message || 'Không thể cập nhật diện mạo.', 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  const profileStats = useMemo(() => {
-    const completed = matches.filter((match) => match.status === 'completed');
-    const wins = completed.filter((match) => match.winner_id === user?.id).length;
-    const draws = completed.filter((match) => match.winner_id === null).length;
-    const losses = completed.length - wins - draws;
-    const totalPlayed = user?.stats?.matchesPlayed ?? completed.length;
-    const totalWins = user?.stats?.wins ?? wins;
-    const totalDraws = user?.stats?.draws ?? draws;
-    const totalLosses = user?.stats?.losses ?? losses;
-    const winRate = totalPlayed ? Math.round((totalWins / totalPlayed) * 100) : 0;
-    let streak = 0;
-    for (const match of completed) {
-      if (match.winner_id !== user?.id) break;
-      streak++;
-    }
-    const rank = (user?.elo || 0) >= 1600 ? 'Vàng' : (user?.elo || 0) >= 1350 ? 'Bạc' : 'Đồng';
-    const nextRankElo = rank === 'Đồng' ? 1350 : rank === 'Bạc' ? 1600 : null;
-    const progress = nextRankElo
-      ? Math.min(100, Math.max(0, (((user?.elo ?? 0) - (rank === 'Đồng' ? 1000 : 1350)) / (nextRankElo - (rank === 'Đồng' ? 1000 : 1350))) * 100))
-      : 100;
-    return {
-      completed,
-      wins: totalWins,
-      draws: totalDraws,
-      losses: totalLosses,
-      totalPlayed,
-      winRate,
-      streak,
-      rank,
-      nextRankElo,
-      progress
-    };
-  }, [matches, user?.elo, user?.id, user?.stats]);
-
-  if (!open) return null;
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-      role="presentation"
+      onClick={onClose}
     >
       <div
-        className={`w-full ${user ? 'max-w-3xl' : 'max-w-lg'} max-h-[92vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-5 sm:p-6 shadow-2xl`}
+        className="w-full max-w-lg rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="auth-settings-modal-title"
       >
         <div className="flex items-center justify-between pb-4 border-b border-[var(--border-subtle)]">
-          <h2 id="auth-settings-modal-title" className="text-lg font-bold text-[var(--text-primary)]">
+          <h2 className="text-lg font-bold text-[var(--text-primary)]">
             {user ? 'Hồ sơ Kỳ thủ OTTv2' : 'Đăng nhập Đấu Trường OTTv2'}
           </h2>
           <button
@@ -272,13 +209,11 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                 />
               </div>
 
-              {import.meta.env.DEV && (
-                <div className="p-3 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)]">
-                  Tài khoản mẫu sẵn có ở Local:{' '}
-                  <code className="text-[var(--text-primary)]">admin@ottv2.local</code> · Mật khẩu:{' '}
-                  <code className="text-[var(--text-primary)]">halloween2026</code>
-                </div>
-              )}
+              <div className="p-3 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)]">
+                Tài khoản mẫu sẵn có ở Local:{' '}
+                <code className="text-[var(--text-primary)]">admin@ottv2.local</code> · Mật khẩu:{' '}
+                <code className="text-[var(--text-primary)]">halloween2026</code>
+              </div>
 
               <button
                 type="submit"
@@ -345,59 +280,38 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
 
           {user && (
             <div className="space-y-5">
-              <section className="relative overflow-hidden rounded-2xl border border-violet-300/15 bg-gradient-to-br from-[#281b3b] via-[#191327] to-[#11101a] p-5 sm:p-6">
-                <div className="absolute -right-10 -top-16 h-48 w-48 rounded-full bg-orange-500/10 blur-3xl" />
-                <div className="relative flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex items-center gap-4">
-                    <div className={`flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-gradient-to-br ${PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.color || 'from-orange-500/30 to-amber-900/30'} text-4xl shadow-lg`}>
-                      {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="truncate text-xl font-black text-white">{user.displayName}</h3>
-                        {user.isAdmin && <span className="rounded-full border border-orange-300/20 bg-orange-400/10 px-2 py-0.5 text-[10px] font-bold text-orange-200">BTC</span>}
-                      </div>
-                      <div className="mt-1 flex items-center gap-2 text-xs text-violet-200/70">
-                        <span>{emailVisible ? user.email : '••••••••••••••••'}</span>
-                        <button
-                          type="button"
-                          onClick={() => setEmailVisible((visible) => !visible)}
-                          aria-label={emailVisible ? 'Ẩn email đăng nhập' : 'Hiện email đăng nhập'}
-                          title={emailVisible ? 'Ẩn email' : 'Hiện email'}
-                          className="rounded p-1 hover:bg-white/10 hover:text-white"
-                        >
-                          {emailVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                        </button>
-                      </div>
-                      <p className="mt-1 font-mono text-[10px] text-white/40">MÃ KỲ THỦ · {user.id.slice(0, 8).toUpperCase()}</p>
-                    </div>
+              <div className="flex items-center justify-between p-4 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)]">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[var(--p1-bg)] border border-[var(--p1-border)] flex items-center justify-center text-2xl">
+                    {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="rounded-xl border border-amber-200/15 bg-amber-300/10 px-3 py-2 text-right">
-                      <div className="text-[10px] font-semibold uppercase tracking-widest text-amber-200/60">Hạng Elo</div>
-                      <div className="text-sm font-black text-amber-100">{profileStats.rank}</div>
+                  <div>
+                    <div className="font-semibold text-sm text-[var(--text-primary)]">
+                      {user.displayName}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        backendClient.clearSession();
-                        onUserUpdated(null);
-                        notify('Đã đăng xuất tài khoản.', 'info');
-                        onClose();
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/15"
-                    >
-                      <LogOut className="h-3.5 w-3.5" />
-                      Đăng xuất
-                    </button>
+                    <div className="text-xs text-[var(--text-secondary)] tabular-nums">
+                      {user.email} · Elo {user.elo} {user.isAdmin ? '· Quyền BTC' : ''}
+                    </div>
                   </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    backendClient.clearSession();
+                    onUserUpdated(null);
+                    notify('Đã đăng xuất tài khoản.', 'info');
+                    onClose();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-red-300 hover:bg-red-500/15 transition-colors cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  Đăng xuất
+                </button>
+              </div>
 
-                <div className="relative mt-5 border-t border-white/10 pt-4">
-                  <div className="mb-2 flex items-center justify-between">
-                    <span className="text-xs font-semibold text-white/70">Chọn diện mạo kỳ thủ</span>
-                    <span className="text-[10px] text-white/40">Avatar được lưu vào tài khoản</span>
-                  </div>
+              <form onSubmit={handleUpdateProfile} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs font-medium text-[var(--text-secondary)] mb-2">Chọn diện mạo kỳ thủ</label>
                   <div className="grid grid-cols-6 gap-2">
                     {PLAYER_AVATARS.map((avatar) => {
                       const selected = (user.avatarId || 'pumpkin') === avatar.id;
@@ -406,103 +320,17 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                           key={avatar.id}
                           type="button"
                           disabled={loading}
-                          onClick={() => handleAvatarChange(avatar.id)}
+                          onClick={() => void handleAvatarChange(avatar.id)}
                           aria-label={`Chọn avatar ${avatar.label}`}
                           title={avatar.label}
-                          className={`relative flex flex-col items-center gap-1 rounded-xl border p-2 transition-all disabled:opacity-50 ${selected ? 'border-orange-300/70 bg-orange-400/15 ring-1 ring-orange-300/20' : 'border-white/10 bg-black/15 hover:border-white/30 hover:bg-white/5'}`}
+                          className={`rounded-xl border p-2 text-xl transition-colors disabled:opacity-50 ${selected ? 'border-[var(--accent-primary)] bg-[var(--accent-primary)]/15' : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:border-[var(--accent-primary)]'}`}
                         >
-                          <span className="text-2xl">{avatar.emoji}</span>
-                          <span className="text-[9px] text-white/60">{avatar.label}</span>
-                          {selected && <Check className="absolute right-1 top-1 h-3 w-3 text-orange-200" />}
+                          {avatar.emoji}
                         </button>
                       );
                     })}
                   </div>
                 </div>
-              </section>
-
-              <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                {[
-                  { label: 'Elo hiện tại', value: user.elo.toLocaleString('vi-VN'), icon: Award, tone: 'text-amber-300' },
-                  { label: 'Tỷ lệ thắng', value: `${profileStats.winRate}%`, icon: Shield, tone: 'text-emerald-300' },
-                  { label: 'Trận đã đấu', value: profileStats.totalPlayed, icon: Swords, tone: 'text-sky-300' },
-                  { label: 'Chuỗi thắng', value: profileStats.streak, icon: Award, tone: 'text-orange-300' },
-                ].map((stat) => (
-                  <div key={stat.label} className="rounded-xl border border-white/10 bg-white/[0.035] p-3.5">
-                    <stat.icon className={`mb-2 h-4 w-4 ${stat.tone}`} />
-                    <div className="text-xl font-black text-white">{stat.value}</div>
-                    <div className="mt-0.5 text-[10px] text-white/50">{stat.label}</div>
-                  </div>
-                ))}
-              </section>
-
-              {profileStats.nextRankElo && (
-                <div className="rounded-xl border border-white/10 bg-black/15 px-4 py-3">
-                  <div className="mb-2 flex justify-between text-[11px]">
-                    <span className="text-white/65">Tiến độ lên hạng {profileStats.rank === 'Đồng' ? 'Bạc' : 'Vàng'}</span>
-                    <span className="font-semibold text-amber-200">{user.elo} / {profileStats.nextRankElo} Elo</span>
-                  </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-white/10">
-                    <div className="h-full rounded-full bg-gradient-to-r from-orange-400 to-amber-200 transition-all" style={{ width: `${profileStats.progress}%` }} />
-                  </div>
-                </div>
-              )}
-
-              <div className="flex flex-wrap gap-2">
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-violet-300/15 bg-violet-300/5 px-3 py-1.5 text-[10px] font-semibold text-violet-100/80">
-                  <Award className="h-3.5 w-3.5 text-violet-300" /> {profileStats.completed.length >= 20 ? 'Cựu binh đấu trường' : profileStats.completed.length >= 5 ? 'Chiến binh kỳ cựu' : 'Kỳ thủ mới'}
-                </span>
-                <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-300/15 bg-emerald-300/5 px-3 py-1.5 text-[10px] font-semibold text-emerald-100/80">
-                  <Swords className="h-3.5 w-3.5 text-emerald-300" /> {profileStats.wins} thắng · {profileStats.draws} hòa · {profileStats.losses} thua
-                </span>
-              </div>
-
-              <section className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)]">
-                <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-4 py-3">
-                  <div>
-                    <h3 className="text-sm font-bold text-[var(--text-primary)]">Lịch sử thi đấu</h3>
-                    <p className="text-[10px] text-[var(--text-muted)]">5 trận gần nhất · Tỷ lệ thắng tính trên các trận đã hoàn tất</p>
-                  </div>
-                  <span className="rounded-lg bg-white/5 px-2 py-1 text-[10px] text-[var(--text-secondary)]">{profileStats.totalPlayed} trận</span>
-                </div>
-                {profileStats.completed.length ? (
-                  <div className="divide-y divide-[var(--border-subtle)]">
-                    {profileStats.completed.slice(0, 5).map((match) => {
-                      const result = match.winner_id === null ? 'Hòa' : match.winner_id === user.id ? 'Thắng' : 'Thua';
-                      const resultClass = result === 'Thắng' ? 'text-emerald-300' : result === 'Thua' ? 'text-rose-300' : 'text-amber-200';
-                      return (
-                        <div key={match.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
-                          <div className="min-w-0">
-                            <div className="truncate text-xs font-medium text-[var(--text-primary)]">
-                              {match.match_type === 'bot' ? '1v1 Bot' : '1v1 Người'} <span className="text-[var(--text-muted)]">·</span> {new Date(match.created_at).toLocaleDateString('vi-VN')}
-                            </div>
-                            <div className="mt-0.5 text-[10px] text-[var(--text-muted)]">
-                              {match.elo_delta !== undefined && match.elo_delta !== 0 ? `Elo ${match.elo_delta > 0 ? '+' : ''}${match.elo_delta}` : 'Trận đã xác minh'}
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 items-center gap-3">
-                            <span className={`text-xs font-bold ${resultClass}`}>{result}</span>
-                            {match.replay_available && (
-                              <button
-                                type="button"
-                                onClick={() => onWatchMatchReplay(match)}
-                                aria-label="Mở replay trận đấu"
-                                className="rounded-md p-1 text-[var(--accent-primary)] hover:bg-white/10"
-                              >
-                                <Film className="h-4 w-4" />
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="px-4 py-6 text-center text-xs text-[var(--text-muted)]">Chưa có trận đã hoàn tất. Vào đấu trường để ghi dấu trận đầu tiên!</div>
-                )}
-              </section>
-
-              <form onSubmit={handleUpdateProfile} className="space-y-3.5">
                 <div>
                   <label className="block text-xs font-medium text-[var(--text-secondary)] mb-1">
                     Đổi tên hiển thị
@@ -542,7 +370,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                     />
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                <div className="flex justify-end pt-1">
                   <button
                     type="submit"
                     disabled={loading}

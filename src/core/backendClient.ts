@@ -1,15 +1,9 @@
-﻿export interface BackendUser {
+export interface BackendUser {
   id: string;
   email: string;
   displayName: string;
   elo: number;
   avatarId?: PlayerAvatarId;
-  stats?: {
-    matchesPlayed: number;
-    wins: number;
-    draws: number;
-    losses: number;
-  };
   isAdmin?: boolean;
   activeBotVersion?: number;
 }
@@ -22,6 +16,7 @@ export interface MatchSummary {
   status: string;
   match_type?: 'human' | 'bot';
   tournament_phase?: 'practice' | 'ranked' | null;
+  is_sparring?: boolean;
   winner_id: string | null;
   final_state_hash?: string | null;
   replay_sha256?: string | null;
@@ -45,6 +40,7 @@ export interface TournamentItem {
   ends_at: string;
   max_teams: number;
   current_week: number;
+  total_sprints: number;
   week_started_at: string | null;
   rules_json: any;
   rules_schedule?: string[];
@@ -207,25 +203,13 @@ export class BackendClient {
     return res.user as BackendUser;
   }
 
-  async updateProfile(changes: {
-    displayName?: string;
-    avatarId?: BackendUser['avatarId'];
-    currentPassword?: string;
-    newPassword?: string;
-  }) {
+  async updateProfile(changes: { displayName?: string; avatarId?: PlayerAvatarId; currentPassword?: string; newPassword?: string }) {
     const res = await this.request('/api/me', 'PATCH', changes, true);
     if (res.user) this.updateStoredUser(res.user);
     return res.user as BackendUser;
   }
 
-
-  async getLeaderboard(): Promise<Array<{
-    id: string;
-    displayName: string;
-    elo: number;
-    avatarId?: PlayerAvatarId;
-    isSystemBot?: boolean;
-  }>> {
+  async getLeaderboard(): Promise<Array<{ id: string; displayName: string; elo: number; avatarId?: PlayerAvatarId; isSystemBot?: boolean }>> {
     const res = await this.request('/api/leaderboard');
     return Array.isArray(res.players) ? res.players : [];
   }
@@ -260,12 +244,7 @@ export class BackendClient {
 
   async getTournaments(): Promise<TournamentItem[]> {
     const res = await this.request('/api/tournaments');
-    if (!Array.isArray(res.tournaments)) return [];
-
-    return res.tournaments.map((tournament: TournamentItem & { team_count?: number }) => ({
-      ...tournament,
-      participant_count: tournament.participant_count ?? tournament.team_count ?? 0,
-    }));
+    return Array.isArray(res.tournaments) ? res.tournaments : [];
   }
 
   async getTournamentDetail(id: string) {
@@ -276,8 +255,8 @@ export class BackendClient {
     name: string;
     format: string;
     description: string;
-    registrationClosesAt: string;
-    endsAt: string;
+    registrationDays: number;
+    sprintCount: number;
     maxTeams: number;
     sprintRules: string[];
   }) {
@@ -286,6 +265,14 @@ export class BackendClient {
 
   async startTournament(id: string) {
     return this.request(`/api/tournaments/${encodeURIComponent(id)}/start`, 'POST', {}, true);
+  }
+
+  async advanceTournamentSprint(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/advance-sprint`, 'POST', {}, true);
+  }
+
+  async completeTournament(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/complete`, 'POST', {}, true);
   }
 
   async registerTournament(id: string) {
@@ -298,11 +285,28 @@ export class BackendClient {
     return res;
   }
 
-  async submitConsensusDispute(report: unknown, evidence: unknown) {
-    return this.request('/api/match/consensus-dispute', 'POST', { report, evidence }, true);
+  async forfeitMatch(matchId: string) {
+    const res = await this.request('/api/match/forfeit', 'POST', { matchId }, true);
+    await this.refreshMe().catch(() => {});
+    return res;
   }
 
-  // ── WebSocket + Dual-Transport P2P Connection ─────────────────
+  async claimMatchTimeout(matchId: string, replay?: unknown) {
+    const body = replay ? { matchId, replay } : { matchId };
+    const res = await this.request('/api/match/claim-timeout', 'POST', body, true);
+    if (res?.resolved) {
+      await this.refreshMe().catch(() => {});
+    }
+    return res;
+  }
+
+  async submitConsensusDispute(payload: { report: unknown; evidence: unknown }) {
+    const res = await this.request('/api/match/consensus-dispute', 'POST', payload, true);
+    await this.refreshMe().catch(() => {});
+    return res;
+  }
+
+  // ── WebSocket + Authenticated Match Relay Connection ──────────
   async connectWs(): Promise<void> {
     if (!this.token) throw new Error('Vui lòng đăng nhập trước khi kết nối máy chủ thi đấu.');
     if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
@@ -330,9 +334,6 @@ export class BackendClient {
         if (packet.type === 'authenticated') {
           clearTimeout(timeout);
           if (packet.user) this.updateStoredUser(packet.user);
-          if (this.activeMatchId && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'rtc-connected', matchId: this.activeMatchId }));
-          }
           this.emit('ws-status', 'connected');
           resolve();
           return;
@@ -352,29 +353,10 @@ export class BackendClient {
   }
 
   private handleWsPacket(packet: any) {
-    if (
-      packet.type === 'match-forfeited' ||
-      packet.type === 'match-forfeited-win' ||
-      packet.type === 'match-forfeited-loss' ||
-      packet.type === 'match-aborted'
-    ) {
-      this.activeMatchId = null;
-    }
     if (packet.type === 'match-found') {
       this.activeMatchId = packet.match?.id || null;
-      const opponentId = packet.opponent?.id;
-      const isSparringMatch =
-        opponentId === '00000000-0000-4000-8000-000000000001' ||
-        packet.match?.player1?.id === '00000000-0000-4000-8000-000000000001' ||
-        packet.match?.player2?.id === '00000000-0000-4000-8000-000000000001';
-      if (isSparringMatch) {
-        this.closePeerChannel();
-      } else {
-        this.setupWebRtcChannel(packet).catch(() => {
-          // Fallback to WebSocket match-relay automatically
-        });
-      }
-      this.emit(packet.type, packet);
+      this.closePeerChannel();
+      this.emit('match-found', packet);
       return;
     }
     if (packet.type === 'signal') {
@@ -382,50 +364,10 @@ export class BackendClient {
       return;
     }
     if (packet.type === 'match-relay') {
-      // The server wraps relayed peer data with matchId/from metadata.
-      this.emit('peer-data', packet.payload?.payload ?? packet.payload);
+      this.emit('peer-data', packet.payload);
       return;
     }
     this.emit(packet.type, packet);
-  }
-
-  private async setupWebRtcChannel(packet: any) {
-    this.closePeerChannel();
-    if (typeof RTCPeerConnection === 'undefined') return;
-    const matchId = packet.match?.id;
-    if (!matchId) return;
-
-    const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-    });
-    this.pc = pc;
-
-    pc.onicecandidate = (ev) => {
-      if (ev.candidate && this.ws?.readyState === WebSocket.OPEN) {
-        this.sendWs({ type: 'signal', matchId, payload: { candidate: ev.candidate } });
-      }
-    };
-
-    const bindChannel = (ch: RTCDataChannel) => {
-      this.dc = ch;
-      ch.onopen = () => this.emit('datachannel-open', { matchId });
-      ch.onmessage = (ev) => {
-        try {
-          this.emit('peer-data', JSON.parse(ev.data));
-        } catch {
-          // ignore
-        }
-      };
-    };
-
-    if (packet.role === 'player1') {
-      bindChannel(pc.createDataChannel('ottv2-match', { ordered: true }));
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      this.sendWs({ type: 'signal', matchId, payload: { description: pc.localDescription } });
-    } else {
-      pc.ondatachannel = (ev) => bindChannel(ev.channel);
-    }
   }
 
   private async handleWebRtcSignal(payload: any) {
@@ -447,10 +389,10 @@ export class BackendClient {
   }
 
   /**
-   * Sends signed P2P consensus message via direct WebRTC DataChannel when open,
-   * or seamlessly falls back to authenticated WebSocket match-relay.
+   * Sends signed consensus message through authenticated WebSocket match-relay
+   * so server-side signature verification and timeout tracking stay authoritative.
    */
-  sendPeerMessage(matchId: string, payload: unknown, forceWsRelay = false) {
+  sendPeerMessage(matchId: string, payload: unknown, forceWsRelay = true) {
     if (!forceWsRelay && this.dc && this.dc.readyState === 'open') {
       this.dc.send(JSON.stringify(payload));
       return;
@@ -491,11 +433,10 @@ export class BackendClient {
     }
   }
 
-  leaveMatch(matchId: string) {
+  leaveMatchWs(matchId: string) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.sendWs({ type: 'leave-match', matchId });
     }
-    this.activeMatchId = null;
   }
 
   registerSessionKey(matchId: string, publicKey: JsonWebKey) {
@@ -508,9 +449,9 @@ export class BackendClient {
     }
   }
 
-  botForfeit(matchId: string, message: string) {
+  reportBotFault(matchId: string, message: string) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.sendWs({ type: 'bot-forfeit', matchId, message });
+      this.sendWs({ type: 'bot-fault', matchId, message });
     }
   }
 

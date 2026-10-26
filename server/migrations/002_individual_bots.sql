@@ -19,7 +19,7 @@ ALTER TABLE tournament_entries ADD COLUMN IF NOT EXISTS player_id UUID REFERENCE
 ALTER TABLE tournament_entries ADD COLUMN IF NOT EXISTS bot_version INTEGER;
 CREATE UNIQUE INDEX IF NOT EXISTS tournament_entries_team_unique ON tournament_entries(tournament_id, team_id) WHERE team_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS tournament_entries_player_unique ON tournament_entries(tournament_id, player_id) WHERE player_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS tournament_entries_player_rank_idx ON tournament_entries(tournament_id, tier, points DESC, tournament_elo DESC) WHERE player_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS tournament_entries_player_rank_idx ON tournament_entries(tournament_id, tier, points DESC) WHERE player_id IS NOT NULL;
 ALTER TABLE tournament_entries DROP CONSTRAINT IF EXISTS tournament_entries_one_participant_check;
 ALTER TABLE tournament_entries ADD CONSTRAINT tournament_entries_one_participant_check
   CHECK (num_nonnulls(team_id, player_id) = 1) NOT VALID;

@@ -100,8 +100,8 @@ function AppWorkspace() {
 
   // Active 1v1 Match Session (Backend or P2P)
   const [activeMatch, setActiveMatch] = useState<ActiveMatchSession | null>(null);
+  const [pendingTournamentId, setPendingTournamentId] = useState<string | null>(null);
   const p2pCleanupRef = useRef<(() => void) | null>(null);
-
 
   const handleEditorCodeChange = (nextCode: string) => {
     setEditorCode(nextCode);
@@ -160,42 +160,36 @@ function AppWorkspace() {
     const offMatchFound = backendClient.on('match-found', (pkt) => {
       const m = pkt.match;
       if (!m) return;
-      const currentUser = backendClient.user;
-      const isPlayer1 =
-        pkt.role === 'player1' || (currentUser?.id && m.player1_id === currentUser.id);
-      const isPlayer2 =
-        pkt.role === 'player2' || (currentUser?.id && m.player2_id === currentUser.id);
-      const mySeat: ActiveMatchSession['mySeat'] =
-        pkt.seat === 1 || pkt.seat === 2 ? pkt.seat : isPlayer1 ? 1 : isPlayer2 ? 2 : null;
-      const player1 = m.player1 || (mySeat === 1 ? currentUser : pkt.opponent);
-      const player2 = m.player2 || (mySeat === 2 ? currentUser : pkt.opponent);
-      const mode: ActiveMatchSession['mode'] =
-        m.match_type === 'human' || pkt.mode === 'human' || m.mode === 'human' ? 'human' : 'bot';
       const isSparring =
+        Boolean(m.isSparring) ||
         pendingSparringMatchId === m.id ||
         pkt.opponent?.id === '00000000-0000-4000-8000-000000000001';
+
       setActiveMatch({
         source: 'backend',
         matchId: m.id,
         seed: m.seed,
         pieceCount: m.pieceCount || 9,
-        mode,
-        mySeat,
-        player1Name: player1?.displayName || 'Player 1',
-        player2Name: player2?.displayName || 'Player 2',
-        player1Elo: player1?.elo,
-        player2Elo: player2?.elo,
+        mode: m.mode || 'bot',
+        mySeat: pkt.seat,
+        player1Name: m.player1?.displayName || 'Player 1',
+        player2Name: m.player2?.displayName || 'Player 2',
+        player1Elo: m.player1?.elo,
+        player2Elo: m.player2?.elo,
         rules: m.rules || null,
         tournamentId: m.tournamentId || null,
         tournamentPhase: m.tournamentPhase || null,
         isSparring,
+        lockedBotCode: pkt.myBotCode || pkt.tournamentBot?.code || null,
+        lockedBotVersion: pkt.myBotVersion || pkt.tournamentBot?.version || 0,
       });
     });
+
     return () => {
       offSpar();
       offMatchFound();
     };
-  }, [notify]);
+  }, []);
 
   const handleSaveBotToServer = async (code: string) => {
     try {
@@ -223,27 +217,15 @@ function AppWorkspace() {
     setAuthModalOpen(true);
   };
 
-  const handleExitActiveMatch = useCallback(() => {
-    const leavingMatch = activeMatch?.source === 'backend' ? activeMatch : null;
+  const handleExitActiveMatch = () => {
+    if (p2pCleanupRef.current) {
+      p2pCleanupRef.current();
+      p2pCleanupRef.current = null;
+    }
+    backendClient.closePeerChannel();
     setActiveMatch(null);
     refreshPublicAndUserData();
-
-    // Navigation must complete even if a stale P2P/WebSocket cleanup throws.
-    try {
-      if (leavingMatch) backendClient.leaveMatch(leavingMatch.matchId);
-    } catch (err) {
-      console.warn('Could not notify the server that the player left the match.', err);
-    }
-    try {
-      p2pCleanupRef.current?.();
-    } catch (err) {
-      console.warn('Could not clean up the private-room connection.', err);
-    } finally {
-      p2pCleanupRef.current = null;
-      backendClient.closePeerChannel();
-    }
-  }, [activeMatch, refreshPublicAndUserData]);
-
+  };
 
   return (
     <div className="relative min-h-screen flex text-[var(--text-primary)]">
@@ -251,7 +233,6 @@ function AppWorkspace() {
       <HalloweenBackdrop />
 
       {/* Desktop Persistent Sidebar */}
-      {!activeMatch && (
       <aside className="relative z-20 hidden lg:flex lg:flex-col lg:w-64 shrink-0 border-r border-[var(--border-subtle)] bg-[#120c1e]/85 backdrop-blur-md">
         <div className="h-16 px-6 flex items-center border-b border-[var(--border-subtle)]">
           <button
@@ -321,10 +302,9 @@ function AppWorkspace() {
           </button>
         </div>
       </aside>
-      )}
 
       {/* Mobile Navigation Drawer */}
-      {!activeMatch && mobileMenuOpen && (
+      {mobileMenuOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/75 lg:hidden"
           onClick={() => setMobileMenuOpen(false)}
@@ -405,7 +385,6 @@ function AppWorkspace() {
         {/* Clean Single-Row Top Header */}
         <header className="h-16 px-4 sm:px-8 border-b border-[var(--border-subtle)] bg-[#120c1e]/80 backdrop-blur-md flex items-center justify-between gap-4 sticky top-0 z-30">
           <div className="flex items-center gap-3 min-w-0">
-            {!activeMatch && (
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
@@ -414,7 +393,6 @@ function AppWorkspace() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            )}
             <h1 className="text-base sm:text-lg font-bold text-[var(--text-primary)] truncate">
               {activeMatch ? 'Bàn Thi Đấu Chiến Thuật 9×9' : VIEW_TITLES[activeView]}
             </h1>
@@ -424,19 +402,16 @@ function AppWorkspace() {
             <button
               type="button"
               onClick={() => handleOpenAuth(user ? 'profile' : 'login')}
-              aria-label={user ? `Tài khoản ${user.displayName}` : 'Đăng nhập'}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0 tabular-nums"
             >
               {user ? (
-                <span className="text-sm leading-none">
+                <span aria-hidden="true">
                   {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
                 </span>
               ) : (
                 <User className="w-3.5 h-3.5" />
               )}
-              <span className="hidden sm:inline">
-                {user ? `${user.displayName} · ${user.elo}` : 'Đăng nhập'}
-              </span>
+              {user ? `${user.displayName} · ${user.elo}` : 'Đăng nhập'}
             </button>
           </div>
         </header>
@@ -464,6 +439,10 @@ function AppWorkspace() {
                   tournaments={tournaments}
                   loadingData={loadingData}
                   onNavigate={(v) => setActiveView(v)}
+                  onOpenTournament={(id) => {
+                    setPendingTournamentId(id);
+                    setActiveView('tournaments');
+                  }}
                   onOpenAuth={(tab) => handleOpenAuth(tab || 'login')}
                   onWatchMatchReplay={(m) => handleWatchReplayById(m.id, m.player1, m.player2)}
                 />
@@ -495,10 +474,14 @@ function AppWorkspace() {
               {activeView === 'tournaments' && (
                 <TournamentsView
                   user={user}
+                  savedBotVersion={savedBotVersion}
                   themeMode="halloween"
                   tournaments={tournaments}
+                  initialSelectedId={pendingTournamentId}
+                  onClearInitialSelectedId={() => setPendingTournamentId(null)}
                   onRefreshTournaments={refreshPublicAndUserData}
                   onOpenAuth={(tab) => handleOpenAuth(tab || 'login')}
+                  onOpenBotLab={() => setActiveView('bot-lab')}
                   onWatchReplayById={handleWatchReplayById}
                 />
               )}
@@ -524,9 +507,7 @@ function AppWorkspace() {
         open={authModalOpen}
         initialTab={authModalTab}
         user={user}
-        matches={matches}
         onClose={() => setAuthModalOpen(false)}
-        onWatchMatchReplay={(match) => handleWatchReplayById(match.id, match.player1, match.player2)}
         onUserUpdated={(nextUser) => {
           setUser(nextUser);
           refreshPublicAndUserData();

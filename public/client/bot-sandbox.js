@@ -78,7 +78,7 @@ callable(globals().get('get_next_move'))
             pyodide.globals.set('__ott_player_id', msg.myPlayerId);
             pyodide.globals.set('__ott_game_state_json', JSON.stringify(msg.gameState));
             const jsonResult = pyodide.runPython(
-                'import json\njson.dumps(get_next_move(__ott_player_id, json.loads(__ott_game_state_json)))'
+                'json.dumps(get_next_move(__ott_player_id, json.loads(__ott_game_state_json)))'
             );
             const rawMove = JSON.parse(jsonResult);
             self.postMessage({ type: 'move-result', success: true, move: normalizeMove(rawMove, msg.gameState) });

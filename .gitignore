@@ -9,4 +9,4 @@ data/
 !.env.example
 !server/.env.example
 public/assets/aistudio/
-
+.aistudio
