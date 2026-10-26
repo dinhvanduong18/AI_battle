@@ -251,7 +251,7 @@ test('Profile settings: store uploaded avatar and require matching password conf
     const persistedProfile = await h.api('GET', '/api/me', player.token);
     assert.equal(persistedProfile.data.user.avatarUrl, pngDataUrl);
 
-    const largePngBytes = Buffer.alloc(1024 * 1024 + 1);
+    const largePngBytes = Buffer.alloc(5 * 1024 * 1024);
     Buffer.from('89504e470d0a1a0a', 'hex').copy(largePngBytes);
     const largeAvatarDataUrl = `data:image/png;base64,${largePngBytes.toString('base64')}`;
     const largeAvatarUpdate = await h.api('PATCH', '/api/me', player.token, {
@@ -260,6 +260,13 @@ test('Profile settings: store uploaded avatar and require matching password conf
     assert.equal(largeAvatarUpdate.status, 200, JSON.stringify(largeAvatarUpdate.data));
     assert.equal(largeAvatarUpdate.data.user.avatarUrl, largeAvatarDataUrl);
 
+    const oversizedPngBytes = Buffer.alloc(5 * 1024 * 1024 + 1);
+    Buffer.from('89504e470d0a1a0a', 'hex').copy(oversizedPngBytes);
+    const oversizedAvatarUpdate = await h.api('PATCH', '/api/me', player.token, {
+      avatarDataUrl: `data:image/png;base64,${oversizedPngBytes.toString('base64')}`,
+    });
+    assert.equal(oversizedAvatarUpdate.status, 400);
+
     const backgroundChoice = await h.api('PATCH', '/api/me', player.token, {
       profileBackgroundId: 'moonlight',
     });
@@ -267,6 +274,12 @@ test('Profile settings: store uploaded avatar and require matching password conf
     assert.equal(backgroundChoice.data.user.profileBackgroundId, 'moonlight');
     const persistedBackgroundChoice = await h.api('GET', '/api/me', player.token);
     assert.equal(persistedBackgroundChoice.data.user.profileBackgroundId, 'moonlight');
+
+    const changedBackgroundChoice = await h.api('PATCH', '/api/me', player.token, {
+      profileBackgroundId: 'aurora',
+    });
+    assert.equal(changedBackgroundChoice.status, 200, JSON.stringify(changedBackgroundChoice.data));
+    assert.equal(changedBackgroundChoice.data.user.profileBackgroundId, 'aurora');
 
     const invalidBackgroundChoice = await h.api('PATCH', '/api/me', player.token, {
       profileBackgroundId: 'not-a-background',
