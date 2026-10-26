@@ -314,6 +314,9 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                     <p className="mt-1 text-lg font-bold text-[var(--text-primary)]">
                       {rank} <span className="text-sm font-medium text-[var(--text-muted)]">· {user.elo} Elo</span>
                     </p>
+                    <p className="mt-1 text-[10px] text-[var(--text-muted)]">
+                      Thống kê dựa trên tối đa 50 trận gần nhất
+                    </p>
                   </div>
                   <span className="rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-3 py-1 text-xs font-semibold text-[var(--accent-primary)]">
                     Tỷ lệ thắng {winRate}%
