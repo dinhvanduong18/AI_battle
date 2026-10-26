@@ -7,7 +7,6 @@ import {
   LogIn,
   Play,
   Swords,
-  Trophy,
 } from 'lucide-react';
 import type { BackendUser, MatchSummary, TournamentItem } from '../core/backendClient';
 import {
@@ -548,7 +547,18 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                         }`}
                       >
                         <td className="py-2.5 pr-2 font-mono font-semibold text-[var(--text-secondary)]">
-                          {String(idx + 1).padStart(2, '0')}
+                          {idx < 3 ? (
+                            <span
+                              className="text-base"
+                              role="img"
+                              aria-label={`Hạng ${idx + 1}`}
+                              title={`Top ${idx + 1}`}
+                            >
+                              {['🥇', '🥈', '🥉'][idx]}
+                            </span>
+                          ) : (
+                            String(idx + 1).padStart(2, '0')
+                          )}
                         </td>
                         <td className="py-2.5 px-2 font-medium text-[var(--text-primary)]">
                           <span className="mr-1.5" aria-hidden="true">
