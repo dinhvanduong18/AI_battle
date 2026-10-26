@@ -1865,8 +1865,15 @@ const httpServer = createServer(async (req, res) => {
       const auth = authFromHeader(req);
       const result = await pool.query(`SELECT m.id,m.seed,m.status,m.match_type,m.tournament_phase,m.is_sparring,m.winner_id,m.final_state_hash,m.replay_sha256,m.created_at,m.completed_at,
         (m.replay_json IS NOT NULL OR (m.replay_key IS NOT NULL AND $2::boolean)) AS replay_available,
-        u1.display_name AS player1,u2.display_name AS player2
+        u1.display_name AS player1,u2.display_name AS player2,m.player1_id,m.player2_id,
+        (r.match_id IS NOT NULL AND m.match_type='bot' AND m.tournament_phase IS DISTINCT FROM 'practice' AND NOT m.is_sparring) AS elo_updated,
+        CASE
+          WHEN r.match_id IS NULL OR m.match_type<>'bot' OR m.tournament_phase='practice' OR m.is_sparring THEN 0
+          WHEN m.player1_id=$1 THEN r.player1_elo_after-r.player1_elo_before
+          ELSE r.player2_elo_after-r.player2_elo_before
+        END AS elo_delta
         FROM matches m JOIN users u1 ON u1.id=m.player1_id JOIN users u2 ON u2.id=m.player2_id
+        LEFT JOIN match_results r ON r.match_id=m.id
         WHERE m.player1_id=$1 OR m.player2_id=$1 ORDER BY m.created_at DESC LIMIT 50`, [auth.sub, replayStorage.enabled]);
       return json(res, 200, { matches: result.rows });
     }
