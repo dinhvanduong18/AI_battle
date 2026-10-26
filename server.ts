@@ -2840,11 +2840,23 @@ export async function startServer(options: ServerStartOptions = {}) {
           saveDb();
           sendWs(ws, 'session-key-accepted', { matchId: match.id });
           const peerId = match.player1_id === user.id ? match.player2_id : match.player1_id;
-          sendWs(liveSockets.get(peerId), 'peer-session-key', {
-            matchId: match.id,
-            playerId: user.id,
-            publicKey: key,
-          });
+          const peerWs = liveSockets.get(peerId);
+          if (peerWs && peerWs.readyState === WebSocket.OPEN) {
+            sendWs(peerWs, 'peer-session-key', {
+              matchId: match.id,
+              playerId: user.id,
+              publicKey: key,
+            });
+          }
+          // If opponent key is already registered in this match, immediately deliver it to this player
+          const existingPeerKey = match.player1_id === user.id ? match.player2_key : match.player1_key;
+          if (existingPeerKey) {
+            sendWs(ws, 'peer-session-key', {
+              matchId: match.id,
+              playerId: peerId,
+              publicKey: existingPeerKey,
+            });
+          }
         } else if (packet.type === 'signal' || packet.type === 'match-relay') {
           const match = db.matches.find((m) => m.id === packet.matchId && m.status === 'active');
           if (!match || (match.player1_id !== user.id && match.player2_id !== user.id)) return;

@@ -648,16 +648,21 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
       if (packet.type === 'CONSENSUS_HELLO' && packet.publicKey && packet.seat !== session.mySeat) {
         if (!peerPubKeyRef.current) {
-          peerPubKeyRef.current = await importPublicKey(packet.publicKey);
-          if (identityRef.current) setConsensusReady(true);
-          if (identityRef.current && session.mySeat !== null) {
-            sendMessageToPeer({
-              type: 'CONSENSUS_HELLO',
-              seat: session.mySeat,
-              publicKey: identityRef.current.publicJwk,
-              autoStart: !isBotMatch,
-            });
+          try {
+            peerPubKeyRef.current = await importPublicKey(packet.publicKey);
+            if (identityRef.current) setConsensusReady(true);
+          } catch (err) {
+            console.error('Failed to import peer public key from CONSENSUS_HELLO:', err);
           }
+        }
+        if (identityRef.current && session.mySeat !== null && !packet.isAck) {
+          sendMessageToPeer({
+            type: 'CONSENSUS_HELLO',
+            seat: session.mySeat,
+            publicKey: identityRef.current.publicJwk,
+            autoStart: !isBotMatch,
+            isAck: true,
+          });
         }
         return;
       }

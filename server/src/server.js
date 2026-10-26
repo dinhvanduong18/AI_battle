@@ -910,6 +910,10 @@ async function registerSessionKey(userId, packet) {
   await pool.query(`UPDATE matches SET ${column}=$1::jsonb WHERE id=$2`, [JSON.stringify(key), packet.matchId]);
   const otherId = match.player1_id === userId ? match.player2_id : match.player1_id;
   await deliverToUser(otherId, 'peer-session-key', { matchId: packet.matchId, playerId: userId, publicKey: key });
+  const otherKey = match.player1_id === userId ? match.player2_key : match.player1_key;
+  if (otherKey) {
+    await deliverToUser(userId, 'peer-session-key', { matchId: packet.matchId, playerId: otherId, publicKey: otherKey });
+  }
 }
 
 async function updateTournamentEntriesForResult(client, match, score1) {

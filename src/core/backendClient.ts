@@ -106,6 +106,7 @@ export class BackendClient {
   private dc: RTCDataChannel | null = null;
   private handlers = new Map<string, Set<EventHandler>>();
   private activeMatchId: string | null = null;
+  private pendingIceCandidates: any[] = [];
 
   constructor() {
     try {
@@ -422,6 +423,14 @@ export class BackendClient {
     if (!this.pc || !payload || !this.activeMatchId) return;
     if (payload.description) {
       await this.pc.setRemoteDescription(payload.description);
+      for (const cand of this.pendingIceCandidates) {
+        try {
+          await this.pc.addIceCandidate(cand);
+        } catch {
+          // ignore
+        }
+      }
+      this.pendingIceCandidates = [];
       if (payload.description.type === 'offer') {
         const answer = await this.pc.createAnswer();
         await this.pc.setLocalDescription(answer);
@@ -431,8 +440,16 @@ export class BackendClient {
           payload: { description: this.pc.localDescription },
         });
       }
-    } else if (payload.candidate && this.pc.remoteDescription) {
-      await this.pc.addIceCandidate(payload.candidate);
+    } else if (payload.candidate) {
+      if (this.pc.remoteDescription) {
+        try {
+          await this.pc.addIceCandidate(payload.candidate);
+        } catch {
+          // ignore
+        }
+      } else {
+        this.pendingIceCandidates.push(payload.candidate);
+      }
     }
   }
 
@@ -504,6 +521,7 @@ export class BackendClient {
   }
 
   closePeerChannel() {
+    this.pendingIceCandidates = [];
     if (this.dc) {
       try {
         this.dc.close();
