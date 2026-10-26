@@ -314,6 +314,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                   const completed = m.status === 'completed';
                   const isDraw = completed && !m.winner_id;
                   const won = completed && m.winner_id === user.id;
+                  const eloLabel = getMatchEloLabel(m, user.id);
                   const timeStr = new Date(m.created_at).toLocaleString('vi-VN', {
                     day: '2-digit',
                     month: '2-digit',
@@ -344,9 +345,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                             }
                           >
                             {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
-                            {user && getMatchEloLabel(m, user.id)
-                              ? ` (${getMatchEloLabel(m, user.id)})`
-                              : ''}
+                            {eloLabel ? ` (${eloLabel})` : ''}
                           </span>
                         )}
                       </td>

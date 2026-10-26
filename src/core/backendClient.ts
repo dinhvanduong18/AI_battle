@@ -84,15 +84,24 @@ export function getMatchFormatLabel(match: MatchSummary): string {
 }
 
 export function getMatchEloLabel(match: MatchSummary, userId: string): string | null {
-  if (
-    match.elo_updated !== true ||
-    typeof match.elo_delta !== 'number' ||
-    !Number.isFinite(match.elo_delta)
-  ) {
-    return null;
-  }
+  const eloBefore =
+    typeof match.elo_before === 'number' &&
+    Number.isFinite(match.elo_before)
+      ? match.elo_before
+      : null;
+  const eloAfter =
+    typeof match.elo_after === 'number' && Number.isFinite(match.elo_after)
+      ? match.elo_after
+      : null;
+  const hasEloRatings = eloBefore !== null && eloAfter !== null;
+  const delta =
+    typeof match.elo_delta === 'number' && Number.isFinite(match.elo_delta)
+      ? match.elo_delta
+      : hasEloRatings
+      ? eloAfter - eloBefore
+      : null;
+  if (delta === null) return null;
 
-  const delta = match.elo_delta;
   const signedDelta =
     delta > 0
       ? `+${delta}`
@@ -103,13 +112,7 @@ export function getMatchEloLabel(match: MatchSummary, userId: string): string | 
       : match.winner_id
       ? '-0'
       : '0';
-  const ratingChange =
-    typeof match.elo_before === 'number' &&
-    Number.isFinite(match.elo_before) &&
-    typeof match.elo_after === 'number' &&
-    Number.isFinite(match.elo_after)
-      ? ` (${match.elo_before} → ${match.elo_after})`
-      : '';
+  const ratingChange = hasEloRatings ? ` (${eloBefore} → ${eloAfter})` : '';
   return `${signedDelta} Elo${ratingChange}`;
 }
 
