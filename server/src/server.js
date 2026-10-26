@@ -2217,7 +2217,7 @@ wss.on('connection', ws => {
         await handleSparringRelay(sparringSessions.get(packet.matchId), ws, packet.payload);
       } else if (packet.type === 'signal' || packet.type === 'match-relay') {
         if (!packet.matchId || !packet.payload) throw new Error('Missing signaling payload');
-        const result = await pool.query('SELECT id,player1_id,player2_id,player1_key,player2_key,match_type,status,consensus_state FROM matches WHERE id=$1', [packet.matchId]);
+        const result = await pool.query('SELECT id,player1_id,player2_id,player1_key,player2_key,match_type,status FROM matches WHERE id=$1', [packet.matchId]);
         const match = result.rows[0];
         if (!match || match.status !== 'active' || !canonicalMatchIds(match).includes(userId)) throw new Error('Not authorized to signal this match');
         const senderSeat = match.player1_id === userId ? 1 : 2;
@@ -2248,40 +2248,61 @@ wss.on('connection', ws => {
               return;
             }
           }
-          const cs = match.consensus_state || createInitialConsensusState(match.match_type);
-          const now = Date.now();
-          cs.lastActivityAt = now;
-          if (p.type === 'BOT_READY' || (p.type === 'CONSENSUS_HELLO' && p.autoStart)) {
-            if (senderSeat === 1 && !cs.p1ReadyAt) cs.p1ReadyAt = now;
-            if (senderSeat === 2 && !cs.p2ReadyAt) cs.p2ReadyAt = now;
-            if (cs.p1ReadyAt && cs.p2ReadyAt && !cs.bothReadyAt) {
-              cs.bothReadyAt = now;
-              cs.stepStartedAt = now;
-            }
-          } else if (p.type === 'CONSENSUS_REVEAL' && p.attestation?.payload) {
-            cs.lastRevealStep = p.attestation.payload.stepCount;
-            cs.lastRevealSeat = senderSeat;
-            cs.lastRevealAt = now;
-            cs.lastRevealCommit = p.attestation.payload.commit;
-          } else if (p.type === 'CONSENSUS_ACK' && p.attestation?.payload) {
-            const ackStep = p.attestation.payload.stepCount;
-            if (ackStep === Number(cs.currentStep || 0) + 1) {
-              cs.acksForPendingStep = cs.acksForPendingStep || {};
-              cs.acksForPendingStep[senderSeat] = p.attestation.payload.stateHash;
-              if (cs.acksForPendingStep[1] && cs.acksForPendingStep[2] && cs.acksForPendingStep[1] === cs.acksForPendingStep[2]) {
-                cs.currentStep = ackStep;
-                cs.acksForPendingStep = {};
-                cs.lastRevealStep = null;
-                cs.stepStartedAt = now;
+          const client = await pool.connect();
+          try {
+            await client.query('BEGIN');
+            const locked = await client.query(
+              'SELECT match_type,status,consensus_state FROM matches WHERE id=$1 FOR UPDATE',
+              [match.id]
+            );
+            const lockedMatch = locked.rows[0];
+            if (lockedMatch?.status === 'active') {
+              const cs = lockedMatch.consensus_state || createInitialConsensusState(lockedMatch.match_type);
+              const now = Date.now();
+              cs.lastActivityAt = now;
+              if (p.type === 'BOT_READY' || (p.type === 'CONSENSUS_HELLO' && p.autoStart)) {
+                if (senderSeat === 1 && !cs.p1ReadyAt) cs.p1ReadyAt = now;
+                if (senderSeat === 2 && !cs.p2ReadyAt) cs.p2ReadyAt = now;
+                if (cs.p1ReadyAt && cs.p2ReadyAt && !cs.bothReadyAt) {
+                  cs.bothReadyAt = now;
+                  cs.stepStartedAt = now;
+                }
+              } else if (p.type === 'CONSENSUS_REVEAL' && p.attestation?.payload) {
+                cs.lastRevealStep = p.attestation.payload.stepCount;
+                cs.lastRevealSeat = senderSeat;
+                cs.lastRevealAt = now;
+                cs.lastRevealCommit = p.attestation.payload.commit;
+              } else if (p.type === 'CONSENSUS_ACK' && p.attestation?.payload) {
+                const ackStep = p.attestation.payload.stepCount;
+                if (ackStep === Number(cs.currentStep || 0) + 1) {
+                  cs.acksForPendingStep = cs.acksForPendingStep || {};
+                  cs.acksForPendingStep[senderSeat] = p.attestation.payload.stateHash;
+                  if (
+                    cs.acksForPendingStep[1] &&
+                    cs.acksForPendingStep[2] &&
+                    cs.acksForPendingStep[1] === cs.acksForPendingStep[2]
+                  ) {
+                    cs.currentStep = ackStep;
+                    cs.acksForPendingStep = {};
+                    cs.lastRevealStep = null;
+                    cs.stepStartedAt = now;
+                  }
+                }
+              } else if (p.type === 'FINAL_PROOF' && p.proof) {
+                cs.finalProofs = cs.finalProofs || {};
+                cs.finalProofAt = cs.finalProofAt || {};
+                cs.finalProofs[senderSeat] = { proof: p.proof, signature: p.signature };
+                cs.finalProofAt[senderSeat] = now;
               }
+              await client.query('UPDATE matches SET consensus_state=$1::jsonb WHERE id=$2', [JSON.stringify(cs), match.id]);
             }
-          } else if (p.type === 'FINAL_PROOF' && p.proof) {
-            cs.finalProofs = cs.finalProofs || {};
-            cs.finalProofAt = cs.finalProofAt || {};
-            cs.finalProofs[senderSeat] = { proof: p.proof, signature: p.signature };
-            cs.finalProofAt[senderSeat] = now;
+            await client.query('COMMIT');
+          } catch (err) {
+            await client.query('ROLLBACK');
+            throw err;
+          } finally {
+            client.release();
           }
-          await pool.query('UPDATE matches SET consensus_state=$1::jsonb WHERE id=$2', [JSON.stringify(cs), match.id]);
         }
         const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
         const online = await redis.get(`ottv2:presence:${peerId}`);
