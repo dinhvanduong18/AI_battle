@@ -77,7 +77,8 @@ async function createTestHarness() {
       setupTimeoutMs: 180,
       setupPeerReadyTimeoutMs: 120,
       ackTimeoutMs: 120,
-      botTurnTimeoutMs: 180,
+      botAckTimeoutMs: 260,
+      botTurnTimeoutMs: 1000,
       sweepIntervalMs: 40,
     },
   });
@@ -921,10 +922,16 @@ test('Bot-vs-Bot E2E: hash mismatch, illegal reveal, and withheld ACK / stall ti
     const claimAck = await h.api('POST', '/api/match/claim-timeout', mAck.seat1.user.token, {
       matchId: mAck.matchId,
     });
-    assert.equal(claimAck.status, 200);
-    assert.equal(claimAck.data.resolved, true);
-    assert.equal(claimAck.data.reason, 'withheld-ack');
-    assert.equal(claimAck.data.winnerId, mAck.seat1.user.user.id);
+    assert.equal(claimAck.status, 202);
+    assert.equal(claimAck.data.waiting, true);
+    await sleep(130);
+    const expiredAck = await h.api('POST', '/api/match/claim-timeout', mAck.seat1.user.token, {
+      matchId: mAck.matchId,
+    });
+    assert.equal(expiredAck.status, 200);
+    assert.equal(expiredAck.data.resolved, true);
+    assert.equal(expiredAck.data.reason, 'withheld-ack');
+    assert.equal(expiredAck.data.winnerId, mAck.seat1.user.user.id);
 
     // 4. Turn timeout when active turn bot freezes without revealing
     const t1 = await h.registerUser('TurnFrozenBot');
@@ -932,7 +939,7 @@ test('Bot-vs-Bot E2E: hash mismatch, illegal reveal, and withheld ACK / stall ti
     const mTurn = await h.pairBotMatch(t1, t2);
     await h.markBothBotsReady(mTurn);
     // Seat 1's turn (step 0), Seat 1 stalls completely
-    await sleep(210);
+    await sleep(1030);
     const claimTurn = await h.api('POST', '/api/match/claim-timeout', mTurn.seat2.user.token, {
       matchId: mTurn.matchId,
     });

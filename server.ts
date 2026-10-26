@@ -638,6 +638,7 @@ export interface ServerTimeoutOptions {
   setupTimeoutMs?: number;
   setupPeerReadyTimeoutMs?: number;
   ackTimeoutMs?: number;
+  botAckTimeoutMs?: number;
   botTurnTimeoutMs?: number;
   sweepIntervalMs?: number;
 }
@@ -656,6 +657,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   const setupTimeoutMs = options.timeouts?.setupTimeoutMs ?? 15000;
   const setupPeerReadyTimeoutMs = options.timeouts?.setupPeerReadyTimeoutMs ?? 10000;
   const ackTimeoutMs = options.timeouts?.ackTimeoutMs ?? 4500;
+  const botAckTimeoutMs = options.timeouts?.botAckTimeoutMs ?? 30000;
   const botTurnTimeoutMs = options.timeouts?.botTurnTimeoutMs ?? 30000;
   const sweepIntervalMs = options.timeouts?.sweepIntervalMs ?? 500;
   const dbPath =
@@ -2026,6 +2028,7 @@ export async function startServer(options: ServerStartOptions = {}) {
       const opponentId = opponentSeat === 1 ? match.player1_id : match.player2_id;
       const cs = match.consensus_state || createInitialConsensusState(match.match_type);
       const now = Date.now();
+      const consensusAckTimeoutMs = match.match_type === 'bot' ? botAckTimeoutMs : ackTimeoutMs;
 
       // 1. Setup / Readiness timeout
       if (!cs.bothReadyAt) {
@@ -2050,7 +2053,7 @@ export async function startServer(options: ServerStartOptions = {}) {
       if (
         cs.finalProofs?.[claimantSeat] &&
         !cs.finalProofs?.[opponentSeat] &&
-        now - (cs.finalProofAt?.[claimantSeat] || now) >= ackTimeoutMs
+        now - (cs.finalProofAt?.[claimantSeat] || now) >= consensusAckTimeoutMs
       ) {
         if (req.body?.replay) {
           verifyReplay(req.body.replay, match.seed, match.id, match.tournament_rules || null);
@@ -2072,7 +2075,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         cs.lastRevealStep === currentStep &&
         cs.acksForPendingStep?.[claimantSeat] &&
         !cs.acksForPendingStep?.[opponentSeat] &&
-        now - (cs.lastRevealAt || now) >= ackTimeoutMs
+        now - (cs.lastRevealAt || now) >= consensusAckTimeoutMs
       ) {
         const out = adjudicateMatchForfeit(
           match.id,

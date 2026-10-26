@@ -1971,6 +1971,7 @@ const httpServer = createServer(async (req, res) => {
       const opponentId = opponentSeat === 1 ? match.player1_id : match.player2_id;
       const cs = match.consensus_state || createInitialConsensusState(match.match_type);
       const now = Date.now();
+      const consensusAckTimeoutMs = match.match_type === 'bot' ? 30000 : 4500;
 
       if (!cs.bothReadyAt) {
         const oppReady = opponentSeat === 1 ? cs.p1ReadyAt : cs.p2ReadyAt;
@@ -1988,7 +1989,7 @@ const httpServer = createServer(async (req, res) => {
         return json(res, 202, { resolved: false, waiting: true });
       }
 
-      if (cs.finalProofs?.[claimantSeat] && !cs.finalProofs?.[opponentSeat] && now - (cs.finalProofAt?.[claimantSeat] || now) >= 4500) {
+      if (cs.finalProofs?.[claimantSeat] && !cs.finalProofs?.[opponentSeat] && now - (cs.finalProofAt?.[claimantSeat] || now) >= consensusAckTimeoutMs) {
         if (body.replay) {
           verifyReplay(body.replay, match.seed, match.id, match.tournament_rules || null);
         }
@@ -2003,7 +2004,7 @@ const httpServer = createServer(async (req, res) => {
       }
 
       const currentStep = Number(cs.currentStep || 0);
-      if (cs.lastRevealStep === currentStep && cs.acksForPendingStep?.[claimantSeat] && !cs.acksForPendingStep?.[opponentSeat] && now - (cs.lastRevealAt || now) >= 4500) {
+      if (cs.lastRevealStep === currentStep && cs.acksForPendingStep?.[claimantSeat] && !cs.acksForPendingStep?.[opponentSeat] && now - (cs.lastRevealAt || now) >= consensusAckTimeoutMs) {
         const out = await adjudicateMatchForfeit(
           match.id,
           opponentId,

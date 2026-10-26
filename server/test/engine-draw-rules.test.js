@@ -20,7 +20,7 @@ const canonical = (value) =>
     : JSON.stringify(value);
 const sha256 = (value) => createHash('sha256').update(canonical(value)).digest('hex');
 
-test('Elo history labels require a server-provided delta and show exact before/after ratings', () => {
+test('Elo history labels show exact rating changes from stored deltas or before/after ratings', () => {
   const match = {
     match_type: 'bot',
     tournament_phase: 'ranked',
@@ -37,8 +37,14 @@ test('Elo history labels require a server-provided delta and show exact before/a
     getMatchEloLabel({ ...match, winner_id: 'player-2', elo_delta: -12, elo_after: 1169 }, 'player-1'),
     '-12 Elo (1181 → 1169)'
   );
-  assert.equal(getMatchEloLabel({ ...match, elo_delta: undefined }, 'player-1'), null);
-  assert.equal(getMatchEloLabel({ ...match, elo_updated: false }, 'player-1'), null);
+  assert.equal(
+    getMatchEloLabel({ ...match, elo_delta: undefined }, 'player-1'),
+    '+12 Elo (1181 → 1193)'
+  );
+  assert.equal(
+    getMatchEloLabel({ ...match, elo_delta: undefined, elo_before: null, elo_after: null }, 'player-1'),
+    null
+  );
 });
 
 function statePayload(state) {
