@@ -3,7 +3,9 @@ export interface BackendUser {
   email: string;
   displayName: string;
   elo: number;
+  highestElo?: number;
   avatarId?: PlayerAvatarId;
+  avatarUrl?: string | null;
   isAdmin?: boolean;
   activeBotVersion?: number;
 }
@@ -222,13 +224,20 @@ export class BackendClient {
     return res.user as BackendUser;
   }
 
-  async updateProfile(changes: { displayName?: string; avatarId?: PlayerAvatarId; currentPassword?: string; newPassword?: string }) {
+  async updateProfile(changes: {
+    displayName?: string;
+    avatarId?: PlayerAvatarId;
+    avatarDataUrl?: string | null;
+    currentPassword?: string;
+    newPassword?: string;
+    confirmNewPassword?: string;
+  }) {
     const res = await this.request('/api/me', 'PATCH', changes, true);
     if (res.user) this.updateStoredUser(res.user);
     return res.user as BackendUser;
   }
 
-  async getLeaderboard(): Promise<Array<{ id: string; displayName: string; elo: number; avatarId?: PlayerAvatarId; isSystemBot?: boolean }>> {
+  async getLeaderboard(): Promise<Array<{ id: string; displayName: string; elo: number; avatarId?: PlayerAvatarId; avatarUrl?: string | null; isSystemBot?: boolean }>> {
     const res = await this.request('/api/leaderboard');
     return Array.isArray(res.players) ? res.players : [];
   }

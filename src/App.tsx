@@ -82,7 +82,13 @@ function AppWorkspace() {
   const [savedBotVersion, setSavedBotVersion] = useState<number>(user?.activeBotVersion || 0);
 
   const [leaderboard, setLeaderboard] = useState<
-    Array<{ id: string; displayName: string; elo: number; avatarId?: BackendUser['avatarId']; isSystemBot?: boolean }>
+    Array<{
+      id: string;
+      displayName: string;
+      elo: number;
+      avatarId?: BackendUser['avatarId'];
+      isSystemBot?: boolean;
+    }>
   >([]);
   const [matches, setMatches] = useState<MatchSummary[]>([]);
   const [tournaments, setTournaments] = useState<TournamentItem[]>([]);
@@ -405,9 +411,13 @@ function AppWorkspace() {
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0 tabular-nums"
             >
               {user ? (
-                <span aria-hidden="true">
-                  {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
-                </span>
+                user.avatarUrl ? (
+                  <img src={user.avatarUrl} alt="" className="h-7 w-7 rounded-full object-cover" />
+                ) : (
+                  <span aria-hidden="true">
+                    {PLAYER_AVATARS.find((avatar) => avatar.id === (user.avatarId || 'pumpkin'))?.emoji || '🎃'}
+                  </span>
+                )
               ) : (
                 <User className="w-3.5 h-3.5" />
               )}

@@ -148,7 +148,9 @@ interface UserRecord {
   password_hash: string;
   display_name: string;
   avatar_id?: string;
+  avatar_url?: string;
   elo: number;
+  elo_peak?: number;
   is_admin: boolean;
   active_bot_version: number;
   is_system_bot?: boolean;
@@ -535,15 +537,33 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
 }
 
 function publicUser(u: UserRecord) {
+  const highestElo = Math.max(u.elo, u.elo_peak || u.elo);
   return {
     id: u.id,
     email: u.email,
     displayName: u.display_name,
     elo: u.elo,
     avatarId: u.avatar_id || 'pumpkin',
+    avatarUrl: u.avatar_url || null,
+    highestElo,
     isAdmin: Boolean(u.is_admin),
     activeBotVersion: u.active_bot_version || 0,
   };
+}
+
+function isAllowedAvatarDataUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 1_500_000) return false;
+  const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (!match) return false;
+
+  const bytes = Buffer.from(match[2], 'base64');
+  if (bytes.length > 1024 * 1024 || bytes.toString('base64') !== match[2]) return false;
+  if (match[1] === 'png') return bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
+  if (match[1] === 'jpeg') return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  return (
+    bytes.toString('ascii', 0, 4) === 'RIFF' &&
+    bytes.toString('ascii', 8, 12) === 'WEBP'
+  );
 }
 
 function pickTacticalBotMove(state: any, botSeat: 1 | 2) {
@@ -634,13 +654,54 @@ export async function startServer(options: ServerStartOptions = {}) {
     }
   }
 
+  function recordEloPeak(user: UserRecord, rating: number) {
+    user.elo_peak = Math.max(user.elo_peak || user.elo, rating);
+  }
+
   async function initDb() {
     try {
       if (fs.existsSync(dbPath)) {
         const parsed = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
         if (parsed && Array.isArray(parsed.users) && Array.isArray(parsed.tournaments)) {
           db = parsed;
+          db.matches = Array.isArray(db.matches) ? db.matches : [];
+          db.matchResults = Array.isArray(db.matchResults) ? db.matchResults : [];
           db.matchDisputes = Array.isArray(db.matchDisputes) ? db.matchDisputes : [];
+          const rankedMatchesById = new Map(
+            db.matches
+              .filter(
+                (match) =>
+                  match.match_type === 'bot' &&
+                  match.tournament_phase !== 'practice' &&
+                  !match.is_sparring
+              )
+              .map((match) => [match.id, match])
+          );
+          const historicalPeakByUser = new Map<string, number>();
+          for (const result of db.matchResults) {
+            const match = rankedMatchesById.get(result.match_id);
+            if (!match) continue;
+            const player1Peak = Math.max(result.player1_elo_before, result.player1_elo_after);
+            const player2Peak = Math.max(result.player2_elo_before, result.player2_elo_after);
+            historicalPeakByUser.set(
+              match.player1_id,
+              Math.max(historicalPeakByUser.get(match.player1_id) || 0, player1Peak)
+            );
+            historicalPeakByUser.set(
+              match.player2_id,
+              Math.max(historicalPeakByUser.get(match.player2_id) || 0, player2Peak)
+            );
+          }
+          let eloPeaksMigrated = false;
+          for (const user of db.users) {
+            const highestElo = Math.max(
+              user.elo,
+              user.elo_peak || user.elo,
+              historicalPeakByUser.get(user.id) || 0
+            );
+            if (user.elo_peak !== highestElo) eloPeaksMigrated = true;
+            user.elo_peak = highestElo;
+          }
           for (const t of db.tournaments) {
             if (t.last_reset_week === undefined) {
               t.last_reset_week = t.status === 'qualifying' ? Math.max(1, t.current_week || 1) : 0;
@@ -682,6 +743,7 @@ export async function startServer(options: ServerStartOptions = {}) {
               }
             }
           }
+          if (eloPeaksMigrated) saveDb();
           return;
         }
       }
@@ -908,6 +970,8 @@ export async function startServer(options: ServerStartOptions = {}) {
     if (eloUpdated) {
       u1.elo = p1After;
       u2.elo = p2After;
+      recordEloPeak(u1, p1After);
+      recordEloPeak(u2, p2After);
     }
 
     const tournamentUpdates = applyTournamentScoreForMatch(match, score1);
@@ -1124,6 +1188,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         elo: 1200,
         is_admin: false,
         active_bot_version: 0,
+        elo_peak: 1200,
         created_at: new Date().toISOString(),
       };
       db.users.push(user);
@@ -1166,9 +1231,20 @@ export async function startServer(options: ServerStartOptions = {}) {
       const avatarId = req.body?.avatarId === undefined ? null : String(req.body.avatarId);
       const currentPassword = String(req.body?.currentPassword || '');
       const newPassword = String(req.body?.newPassword || '');
+      const confirmNewPassword = String(req.body?.confirmNewPassword || '');
 
       if (displayName !== null && !displayName) {
         res.status(400).json({ error: 'Tên hiển thị không được để trống.' });
+        return;
+      }
+      const avatarDataUrl =
+        req.body?.avatarDataUrl === undefined ? undefined : req.body.avatarDataUrl;
+      if (
+        avatarDataUrl !== undefined &&
+        avatarDataUrl !== null &&
+        !isAllowedAvatarDataUrl(avatarDataUrl)
+      ) {
+        res.status(400).json({ error: 'Ảnh đại diện cần là PNG, JPEG hoặc WebP và tối đa 1 MB.' });
         return;
       }
       if (avatarId !== null && !['pumpkin', 'ghost', 'bat', 'knight', 'fox', 'crown'].includes(avatarId)) {
@@ -1179,11 +1255,15 @@ export async function startServer(options: ServerStartOptions = {}) {
         res.status(400).json({ error: 'Mật khẩu mới cần ít nhất 10 ký tự.' });
         return;
       }
+      if (newPassword && newPassword !== confirmNewPassword) {
+        res.status(400).json({ error: 'Mật khẩu mới nhập lại không khớp.' });
+        return;
+      }
       if (Boolean(currentPassword) !== Boolean(newPassword)) {
         res.status(400).json({ error: 'Cần nhập cả mật khẩu hiện tại và mật khẩu mới.' });
         return;
       }
-      if (displayName === null && avatarId === null && !newPassword) {
+      if (displayName === null && avatarId === null && avatarDataUrl === undefined && !newPassword) {
         res.status(400).json({ error: 'Hãy chọn nội dung cần cập nhật.' });
         return;
       }
@@ -1192,7 +1272,12 @@ export async function startServer(options: ServerStartOptions = {}) {
         return;
       }
       if (displayName !== null) user.display_name = displayName;
-      if (avatarId !== null) user.avatar_id = avatarId;
+      if (avatarId !== null) {
+        user.avatar_id = avatarId;
+        user.avatar_url = undefined;
+      } else if (avatarDataUrl !== undefined) {
+        user.avatar_url = avatarDataUrl || undefined;
+      }
       if (newPassword) user.password_hash = await hashPassword(newPassword);
       saveDb();
       res.json({ user: publicUser(user) });
@@ -1776,6 +1861,8 @@ export async function startServer(options: ServerStartOptions = {}) {
       if (eloUpdated) {
         u1.elo = u1After;
         u2.elo = u2After;
+        recordEloPeak(u1, u1After);
+        recordEloPeak(u2, u2After);
       }
 
       const tournamentUpdates = applyTournamentScoreForMatch(match, score1);
@@ -2102,6 +2189,8 @@ export async function startServer(options: ServerStartOptions = {}) {
       if (eloUpdated) {
         u1.elo = p1After;
         u2.elo = p2After;
+        recordEloPeak(u1, p1After);
+        recordEloPeak(u2, p2After);
       }
 
       const tournamentUpdates = applyTournamentScoreForMatch(match, score1);

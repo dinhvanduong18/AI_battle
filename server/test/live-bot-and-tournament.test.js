@@ -235,6 +235,55 @@ async function createTestHarness() {
   return { api, registerUser, loginAdmin, connectWs, pairBotMatch, markBothBotsReady, dbPath, cleanup };
 }
 
+test('Profile settings: store uploaded avatar and require matching password confirmation', async () => {
+  const h = await createTestHarness();
+  try {
+    const player = await h.registerUser('ProfileSettings', false);
+    const pngDataUrl =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jPzsAAAAASUVORK5CYII=';
+
+    const avatarUpdate = await h.api('PATCH', '/api/me', player.token, {
+      avatarDataUrl: pngDataUrl,
+    });
+    assert.equal(avatarUpdate.status, 200, JSON.stringify(avatarUpdate.data));
+    assert.equal(avatarUpdate.data.user.avatarUrl, pngDataUrl);
+    const persistedProfile = await h.api('GET', '/api/me', player.token);
+    assert.equal(persistedProfile.data.user.avatarUrl, pngDataUrl);
+
+    const invalidAvatar = await h.api('PATCH', '/api/me', player.token, {
+      avatarDataUrl: 'data:image/png;base64,SGVsbG8=',
+    });
+    assert.equal(invalidAvatar.status, 400);
+
+    const mismatchedPassword = await h.api('PATCH', '/api/me', player.token, {
+      currentPassword: 'password12345',
+      newPassword: 'changed-password',
+      confirmNewPassword: 'different-password',
+    });
+    assert.equal(mismatchedPassword.status, 400);
+
+    const changedPassword = await h.api('PATCH', '/api/me', player.token, {
+      currentPassword: 'password12345',
+      newPassword: 'changed-password',
+      confirmNewPassword: 'changed-password',
+    });
+    assert.equal(changedPassword.status, 200, JSON.stringify(changedPassword.data));
+
+    const oldPasswordLogin = await h.api('POST', '/api/auth/login', null, {
+      email: player.user.email,
+      password: 'password12345',
+    });
+    assert.equal(oldPasswordLogin.status, 401);
+    const newPasswordLogin = await h.api('POST', '/api/auth/login', null, {
+      email: player.user.email,
+      password: 'changed-password',
+    });
+    assert.equal(newPasswordLogin.status, 200);
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo updates', async () => {
   const h = await createTestHarness();
   try {
@@ -550,6 +599,11 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
     assert.equal(
       recordedWin.elo_delta,
       submitWin.data.elo.player1.after - submitWin.data.elo.player1.before
+    );
+    const updatedProfile = await h.api('GET', '/api/me', pairedWin.seat1.user.token);
+    assert.equal(
+      updatedProfile.data.user.highestElo,
+      Math.max(submitWin.data.elo.player1.before, submitWin.data.elo.player1.after)
     );
 
     const replayFetch = await h.api(

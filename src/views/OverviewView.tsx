@@ -25,7 +25,13 @@ import type { PieceTypeName } from '../core/ottEngine';
 interface OverviewViewProps {
   user: BackendUser | null;
   botVersion: number;
-  leaderboard: Array<{ id: string; displayName: string; elo: number; avatarId?: BackendUser['avatarId']; isSystemBot?: boolean }>;
+  leaderboard: Array<{
+    id: string;
+    displayName: string;
+    elo: number;
+    avatarId?: BackendUser['avatarId'];
+    isSystemBot?: boolean;
+  }>;
   recentMatches: MatchSummary[];
   tournaments: TournamentItem[];
   loadingData: boolean;
