@@ -221,9 +221,11 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     const background = PROFILE_BACKGROUNDS.find(
       (option) => option.id === (user?.profileBackgroundId || 'castle')
     ) || PROFILE_BACKGROUNDS[0];
-    return background.id === 'castle'
-      ? { backgroundImage: `linear-gradient(120deg, rgba(16,11,27,.72), rgba(16,11,27,.22)), url("${profileBackdrop}")` }
-      : { background: background.background };
+    return {
+      backgroundImage: `linear-gradient(120deg, rgba(16,11,27,.72), rgba(16,11,27,.22)), url("${background.image}")`,
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+    };
   };
 
   const completedMatches = user
@@ -551,9 +553,9 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                                 const selected =
                                   !user.profileBackgroundUrl &&
                                   (user.profileBackgroundId || 'castle') === background.id;
-                                const style = background.id === 'castle'
-                                  ? { backgroundImage: `linear-gradient(120deg, rgba(16,11,27,.45), rgba(16,11,27,.1)), url("${profileBackdrop}")` }
-                                  : { background: background.background };
+                                const style = {
+                                  backgroundImage: `linear-gradient(180deg, rgba(10,7,18,.05), rgba(10,7,18,.35)), url("${background.image}")`,
+                                };
                                 return (
                                   <button
                                     key={background.id}

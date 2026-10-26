@@ -46,14 +46,14 @@ export const PLAYER_AVATARS: { id: PlayerAvatarId; emoji: string; label: string 
 ];
 
 export const PROFILE_BACKGROUNDS = [
-  { id: 'castle', label: 'Lâu đài bí ngô', background: 'linear-gradient(120deg, #171326 8%, #281a3f 52%, #6b3428 100%)' },
-  { id: 'moonlight', label: 'Đêm trăng', background: 'radial-gradient(ellipse at 75% 20%, #6476b8 0, transparent 35%), linear-gradient(135deg, #080d28, #25214b 55%, #513660)' },
-  { id: 'emerald', label: 'Rừng huyền bí', background: 'radial-gradient(ellipse at 15% 75%, #3b8b68 0, transparent 42%), linear-gradient(135deg, #071b1a, #123b38 55%, #386144)' },
-  { id: 'ocean', label: 'Vực sâu', background: 'radial-gradient(ellipse at 80% 15%, #45a5c7 0, transparent 38%), linear-gradient(135deg, #071827, #123d64 55%, #305078)' },
-  { id: 'sunset', label: 'Hoàng hôn', background: 'radial-gradient(ellipse at 75% 25%, #f2a04f 0, transparent 38%), linear-gradient(135deg, #35152d, #843d53 55%, #d87543)' },
-  { id: 'aurora', label: 'Cực quang', background: 'radial-gradient(ellipse at 15% 20%, #45c4a4 0, transparent 40%), radial-gradient(ellipse at 80% 80%, #8758ce 0, transparent 42%), linear-gradient(135deg, #071929, #172d49)' },
-  { id: 'crimson', label: 'Hỏa ngục', background: 'radial-gradient(ellipse at 70% 25%, #e55745 0, transparent 40%), linear-gradient(135deg, #210d20, #54213d 55%, #8b372e)' },
-  { id: 'ice', label: 'Băng giá', background: 'radial-gradient(ellipse at 70% 20%, #a4e5ed 0, transparent 38%), linear-gradient(135deg, #14263b, #35617b 55%, #6f8eaa)' },
+  { id: 'castle', label: 'Lâu đài bí ngô', image: '/backgrounds/castle.svg' },
+  { id: 'moonlight', label: 'Đêm trăng', image: '/backgrounds/moonlight.svg' },
+  { id: 'emerald', label: 'Rừng huyền bí', image: '/backgrounds/emerald.svg' },
+  { id: 'ocean', label: 'Vực sâu', image: '/backgrounds/ocean.svg' },
+  { id: 'sunset', label: 'Hoàng hôn', image: '/backgrounds/sunset.svg' },
+  { id: 'aurora', label: 'Cực quang', image: '/backgrounds/aurora.svg' },
+  { id: 'crimson', label: 'Hỏa ngục', image: '/backgrounds/crimson.svg' },
+  { id: 'ice', label: 'Băng giá', image: '/backgrounds/ice.svg' },
 ] as const;
 
 export interface MatchSummary {
