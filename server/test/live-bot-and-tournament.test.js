@@ -249,6 +249,36 @@ test('Profile settings: store uploaded avatar and require matching password conf
     assert.equal(avatarUpdate.data.user.avatarUrl, pngDataUrl);
     const persistedProfile = await h.api('GET', '/api/me', player.token);
     assert.equal(persistedProfile.data.user.avatarUrl, pngDataUrl);
+
+    const largePngBytes = Buffer.alloc(1024 * 1024 + 1);
+    Buffer.from('89504e470d0a1a0a', 'hex').copy(largePngBytes);
+    const largeAvatarDataUrl = `data:image/png;base64,${largePngBytes.toString('base64')}`;
+    const largeAvatarUpdate = await h.api('PATCH', '/api/me', player.token, {
+      avatarDataUrl: largeAvatarDataUrl,
+    });
+    assert.equal(largeAvatarUpdate.status, 200, JSON.stringify(largeAvatarUpdate.data));
+    assert.equal(largeAvatarUpdate.data.user.avatarUrl, largeAvatarDataUrl);
+
+    const backgroundChoice = await h.api('PATCH', '/api/me', player.token, {
+      profileBackgroundId: 'moonlight',
+    });
+    assert.equal(backgroundChoice.status, 200, JSON.stringify(backgroundChoice.data));
+    assert.equal(backgroundChoice.data.user.profileBackgroundId, 'moonlight');
+    const persistedBackgroundChoice = await h.api('GET', '/api/me', player.token);
+    assert.equal(persistedBackgroundChoice.data.user.profileBackgroundId, 'moonlight');
+
+    const invalidBackgroundChoice = await h.api('PATCH', '/api/me', player.token, {
+      profileBackgroundId: 'not-a-background',
+    });
+    assert.equal(invalidBackgroundChoice.status, 400);
+
+    const addedAvatarChoice = await h.api('PATCH', '/api/me', player.token, {
+      avatarId: 'dragon',
+    });
+    assert.equal(addedAvatarChoice.status, 200, JSON.stringify(addedAvatarChoice.data));
+    assert.equal(addedAvatarChoice.data.user.avatarId, 'dragon');
+    assert.equal(addedAvatarChoice.data.user.avatarUrl, null);
+
     const backgroundUpdate = await h.api('PATCH', '/api/me', player.token, {
       profileBackgroundDataUrl: pngDataUrl,
     });

@@ -11,6 +11,7 @@ import {
 import {
   getMatchEloLabel,
   getMatchFormatLabel,
+  PLAYER_AVATARS,
   type BackendUser,
   type MatchSummary,
   type TournamentItem,
@@ -30,6 +31,7 @@ interface OverviewViewProps {
     displayName: string;
     elo: number;
     avatarId?: BackendUser['avatarId'];
+    avatarUrl?: BackendUser['avatarUrl'];
     isSystemBot?: boolean;
   }>;
   recentMatches: MatchSummary[];
@@ -576,9 +578,17 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                           )}
                         </td>
                         <td className="py-2.5 px-2 font-medium text-[var(--text-primary)]">
-                          <span className="mr-1.5" aria-hidden="true">
-                            {player.avatarId === 'ghost' ? '👻' : player.avatarId === 'bat' ? '🦇' : player.avatarId === 'knight' ? '🛡️' : player.avatarId === 'fox' ? '🦊' : player.avatarId === 'crown' ? '👑' : '🎃'}
-                          </span>
+                          {player.avatarUrl ? (
+                            <img
+                              src={player.avatarUrl}
+                              alt=""
+                              className="mr-1.5 inline-block h-5 w-5 rounded-full object-cover align-middle"
+                            />
+                          ) : (
+                            <span className="mr-1.5" aria-hidden="true">
+                              {PLAYER_AVATARS.find((avatar) => avatar.id === player.avatarId)?.emoji || '🎃'}
+                            </span>
+                          )}
                           <span>{player.displayName}</span>
                           {isMe && (
                             <span className="text-[var(--accent-primary)] ml-1.5">· Bạn</span>

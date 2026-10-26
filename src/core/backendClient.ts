@@ -7,11 +7,54 @@ export interface BackendUser {
   avatarId?: PlayerAvatarId;
   avatarUrl?: string | null;
   profileBackgroundUrl?: string | null;
+  profileBackgroundId?: (typeof PROFILE_BACKGROUNDS)[number]['id'];
   isAdmin?: boolean;
   activeBotVersion?: number;
 }
 
-export type PlayerAvatarId = 'pumpkin' | 'ghost' | 'bat' | 'knight' | 'fox' | 'crown';
+export type PlayerAvatarId =
+  | 'pumpkin'
+  | 'ghost'
+  | 'bat'
+  | 'knight'
+  | 'fox'
+  | 'crown'
+  | 'dragon'
+  | 'cat'
+  | 'wizard'
+  | 'alien'
+  | 'skull'
+  | 'robot'
+  | 'spider'
+  | 'unicorn';
+
+export const PLAYER_AVATARS: { id: PlayerAvatarId; emoji: string; label: string }[] = [
+  { id: 'pumpkin', emoji: '🎃', label: 'Bí Ngô' },
+  { id: 'ghost', emoji: '👻', label: 'Bóng Ma' },
+  { id: 'bat', emoji: '🦇', label: 'Dơi Đêm' },
+  { id: 'knight', emoji: '🛡️', label: 'Kỵ Sĩ' },
+  { id: 'fox', emoji: '🦊', label: 'Cáo Lửa' },
+  { id: 'crown', emoji: '👑', label: 'Quân Vương' },
+  { id: 'dragon', emoji: '🐉', label: 'Rồng Lửa' },
+  { id: 'cat', emoji: '🐱', label: 'Mèo Bí Ẩn' },
+  { id: 'wizard', emoji: '🧙', label: 'Pháp Sư' },
+  { id: 'alien', emoji: '👽', label: 'Sinh Vật Ngoài Hành Tinh' },
+  { id: 'skull', emoji: '💀', label: 'Đầu Lâu' },
+  { id: 'robot', emoji: '🤖', label: 'Người Máy' },
+  { id: 'spider', emoji: '🕷️', label: 'Nhện Đêm' },
+  { id: 'unicorn', emoji: '🦄', label: 'Kỳ Lân' },
+];
+
+export const PROFILE_BACKGROUNDS = [
+  { id: 'castle', label: 'Lâu đài bí ngô', image: '/backgrounds/castle.svg' },
+  { id: 'moonlight', label: 'Đêm trăng', image: '/backgrounds/moonlight.svg' },
+  { id: 'emerald', label: 'Rừng huyền bí', image: '/backgrounds/emerald.svg' },
+  { id: 'ocean', label: 'Vực sâu', image: '/backgrounds/ocean.svg' },
+  { id: 'sunset', label: 'Hoàng hôn', image: '/backgrounds/sunset.svg' },
+  { id: 'aurora', label: 'Cực quang', image: '/backgrounds/aurora.svg' },
+  { id: 'crimson', label: 'Hỏa ngục', image: '/backgrounds/crimson.svg' },
+  { id: 'ice', label: 'Băng giá', image: '/backgrounds/ice.svg' },
+] as const;
 
 export interface MatchSummary {
   id: string;
@@ -249,6 +292,7 @@ export class BackendClient {
     avatarId?: PlayerAvatarId;
     avatarDataUrl?: string | null;
     profileBackgroundDataUrl?: string | null;
+    profileBackgroundId?: (typeof PROFILE_BACKGROUNDS)[number]['id'];
     currentPassword?: string;
     newPassword?: string;
     confirmNewPassword?: string;
