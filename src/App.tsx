@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import {
   backendClient,
+  PLAYER_AVATARS,
   type BackendUser,
   type MatchSummary,
   type TournamentItem,
@@ -23,7 +24,7 @@ import { SAMPLE_BOTS } from './core/sampleBots';
 import { soundFx } from './core/soundFx';
 import { ToastProvider, useToast } from './components/ToastProvider';
 import { HalloweenBackdrop } from './components/HalloweenBackdrop';
-import { AuthSettingsModal, PLAYER_AVATARS, type ModalTab } from './components/AuthSettingsModal';
+import { AuthSettingsModal, type ModalTab } from './components/AuthSettingsModal';
 import { ReplayModal } from './components/ReplayModal';
 import { ActiveMatchArena, type ActiveMatchSession } from './components/ActiveMatchArena';
 import { OverviewView } from './views/OverviewView';
@@ -87,6 +88,7 @@ function AppWorkspace() {
       displayName: string;
       elo: number;
       avatarId?: BackendUser['avatarId'];
+      avatarUrl?: BackendUser['avatarUrl'];
       isSystemBot?: boolean;
     }>
   >([]);

@@ -51,6 +51,21 @@ const SPRINT_RULE_LAYOUTS: Record<string, { title: string; blockedCells: number[
 };
 
 const DEFAULT_SPRINT_RULES = ['standard', 'center_blockers', 'clipped_corners', 'corridor'];
+const PROFILE_BACKGROUND_IDS = [
+  'castle',
+  'moonlight',
+  'emerald',
+  'ocean',
+  'sunset',
+  'aurora',
+  'crimson',
+  'ice',
+] as const;
+const PLAYER_AVATAR_IDS = [
+  'pumpkin', 'ghost', 'bat', 'knight', 'fox', 'crown',
+  'dragon', 'cat', 'wizard', 'alien', 'skull', 'robot', 'spider', 'unicorn',
+] as const;
+const MAX_AVATAR_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 function weeklyRules(week: number, schedule: string[] = DEFAULT_SPRINT_RULES) {
   const sprint = Math.max(1, Number(week) || 1);
@@ -150,6 +165,7 @@ interface UserRecord {
   avatar_id?: string;
   avatar_url?: string;
   profile_background_url?: string;
+  profile_background_id?: string;
   elo: number;
   elo_peak?: number;
   is_admin: boolean;
@@ -547,6 +563,9 @@ function publicUser(u: UserRecord) {
     avatarId: u.avatar_id || 'pumpkin',
     avatarUrl: u.avatar_url || null,
     profileBackgroundUrl: u.profile_background_url || null,
+    profileBackgroundId: PROFILE_BACKGROUND_IDS.includes(
+      u.profile_background_id as (typeof PROFILE_BACKGROUND_IDS)[number]
+    ) ? u.profile_background_id : 'castle',
     highestElo,
     isAdmin: Boolean(u.is_admin),
     activeBotVersion: u.active_bot_version || 0,
@@ -554,12 +573,12 @@ function publicUser(u: UserRecord) {
 }
 
 function isAllowedAvatarDataUrl(value: unknown): value is string {
-  if (typeof value !== 'string' || value.length > 1_500_000) return false;
+  if (typeof value !== 'string' || value.length > Math.ceil(MAX_AVATAR_UPLOAD_BYTES * 4 / 3) + 64) return false;
   const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
   if (!match) return false;
 
   const bytes = Buffer.from(match[2], 'base64');
-  if (bytes.length > 1024 * 1024 || bytes.toString('base64') !== match[2]) return false;
+  if (bytes.length > MAX_AVATAR_UPLOAD_BYTES || bytes.toString('base64') !== match[2]) return false;
   if (match[1] === 'png') return bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'));
   if (match[1] === 'jpeg') return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
   return (
@@ -1143,7 +1162,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   const app = express();
   const httpServer = http.createServer(app);
 
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '8mb' }));
 
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
@@ -1241,12 +1260,21 @@ export async function startServer(options: ServerStartOptions = {}) {
       }
       const avatarDataUrl =
         req.body?.avatarDataUrl === undefined ? undefined : req.body.avatarDataUrl;
+      const profileBackgroundId =
+        req.body?.profileBackgroundId === undefined ? undefined : req.body.profileBackgroundId;
       if (
         avatarDataUrl !== undefined &&
         avatarDataUrl !== null &&
         !isAllowedAvatarDataUrl(avatarDataUrl)
       ) {
-        res.status(400).json({ error: 'Ảnh đại diện cần là PNG, JPEG hoặc WebP và tối đa 1 MB.' });
+        res.status(400).json({ error: 'Ảnh đại diện cần là PNG, JPEG hoặc WebP và tối đa 5 MB.' });
+        return;
+      }
+      if (
+        profileBackgroundId !== undefined &&
+        !PROFILE_BACKGROUND_IDS.includes(profileBackgroundId)
+      ) {
+        res.status(400).json({ error: 'Ảnh nền hồ sơ không hợp lệ.' });
         return;
       }
       const profileBackgroundDataUrl =
@@ -1258,10 +1286,13 @@ export async function startServer(options: ServerStartOptions = {}) {
         profileBackgroundDataUrl !== null &&
         !isAllowedAvatarDataUrl(profileBackgroundDataUrl)
       ) {
-        res.status(400).json({ error: 'Ảnh nền cần là PNG, JPEG hoặc WebP và tối đa 1 MB.' });
+        res.status(400).json({ error: 'Ảnh nền cần là PNG, JPEG hoặc WebP và tối đa 5 MB.' });
         return;
       }
-      if (avatarId !== null && !['pumpkin', 'ghost', 'bat', 'knight', 'fox', 'crown'].includes(avatarId)) {
+      if (
+        avatarId !== null &&
+        !PLAYER_AVATAR_IDS.includes(avatarId as (typeof PLAYER_AVATAR_IDS)[number])
+      ) {
         res.status(400).json({ error: 'Diện mạo kỳ thủ không hợp lệ.' });
         return;
       }
@@ -1281,6 +1312,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         displayName === null &&
         avatarId === null &&
         avatarDataUrl === undefined &&
+        profileBackgroundId === undefined &&
         profileBackgroundDataUrl === undefined &&
         !newPassword
       ) {
@@ -1300,6 +1332,10 @@ export async function startServer(options: ServerStartOptions = {}) {
       }
       if (profileBackgroundDataUrl !== undefined) {
         user.profile_background_url = profileBackgroundDataUrl || undefined;
+      }
+      if (profileBackgroundId !== undefined) {
+        user.profile_background_id = profileBackgroundId;
+        user.profile_background_url = undefined;
       }
       if (newPassword) user.password_hash = await hashPassword(newPassword);
       saveDb();
@@ -1385,6 +1421,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         displayName: u.display_name,
         elo: u.elo,
         avatarId: u.avatar_id || 'pumpkin',
+        avatarUrl: u.avatar_url || null,
         isSystemBot: Boolean(u.is_system_bot),
       }));
     res.json({ players });

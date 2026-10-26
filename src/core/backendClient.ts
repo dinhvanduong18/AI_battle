@@ -7,11 +7,54 @@ export interface BackendUser {
   avatarId?: PlayerAvatarId;
   avatarUrl?: string | null;
   profileBackgroundUrl?: string | null;
+  profileBackgroundId?: (typeof PROFILE_BACKGROUNDS)[number]['id'];
   isAdmin?: boolean;
   activeBotVersion?: number;
 }
 
-export type PlayerAvatarId = 'pumpkin' | 'ghost' | 'bat' | 'knight' | 'fox' | 'crown';
+export type PlayerAvatarId =
+  | 'pumpkin'
+  | 'ghost'
+  | 'bat'
+  | 'knight'
+  | 'fox'
+  | 'crown'
+  | 'dragon'
+  | 'cat'
+  | 'wizard'
+  | 'alien'
+  | 'skull'
+  | 'robot'
+  | 'spider'
+  | 'unicorn';
+
+export const PLAYER_AVATARS: { id: PlayerAvatarId; emoji: string; label: string }[] = [
+  { id: 'pumpkin', emoji: '🎃', label: 'Bí Ngô' },
+  { id: 'ghost', emoji: '👻', label: 'Bóng Ma' },
+  { id: 'bat', emoji: '🦇', label: 'Dơi Đêm' },
+  { id: 'knight', emoji: '🛡️', label: 'Kỵ Sĩ' },
+  { id: 'fox', emoji: '🦊', label: 'Cáo Lửa' },
+  { id: 'crown', emoji: '👑', label: 'Quân Vương' },
+  { id: 'dragon', emoji: '🐉', label: 'Rồng Lửa' },
+  { id: 'cat', emoji: '🐱', label: 'Mèo Bí Ẩn' },
+  { id: 'wizard', emoji: '🧙', label: 'Pháp Sư' },
+  { id: 'alien', emoji: '👽', label: 'Sinh Vật Ngoài Hành Tinh' },
+  { id: 'skull', emoji: '💀', label: 'Đầu Lâu' },
+  { id: 'robot', emoji: '🤖', label: 'Người Máy' },
+  { id: 'spider', emoji: '🕷️', label: 'Nhện Đêm' },
+  { id: 'unicorn', emoji: '🦄', label: 'Kỳ Lân' },
+];
+
+export const PROFILE_BACKGROUNDS = [
+  { id: 'castle', label: 'Lâu đài bí ngô', background: 'linear-gradient(120deg, #171326 8%, #281a3f 52%, #6b3428 100%)' },
+  { id: 'moonlight', label: 'Đêm trăng', background: 'radial-gradient(ellipse at 75% 20%, #6476b8 0, transparent 35%), linear-gradient(135deg, #080d28, #25214b 55%, #513660)' },
+  { id: 'emerald', label: 'Rừng huyền bí', background: 'radial-gradient(ellipse at 15% 75%, #3b8b68 0, transparent 42%), linear-gradient(135deg, #071b1a, #123b38 55%, #386144)' },
+  { id: 'ocean', label: 'Vực sâu', background: 'radial-gradient(ellipse at 80% 15%, #45a5c7 0, transparent 38%), linear-gradient(135deg, #071827, #123d64 55%, #305078)' },
+  { id: 'sunset', label: 'Hoàng hôn', background: 'radial-gradient(ellipse at 75% 25%, #f2a04f 0, transparent 38%), linear-gradient(135deg, #35152d, #843d53 55%, #d87543)' },
+  { id: 'aurora', label: 'Cực quang', background: 'radial-gradient(ellipse at 15% 20%, #45c4a4 0, transparent 40%), radial-gradient(ellipse at 80% 80%, #8758ce 0, transparent 42%), linear-gradient(135deg, #071929, #172d49)' },
+  { id: 'crimson', label: 'Hỏa ngục', background: 'radial-gradient(ellipse at 70% 25%, #e55745 0, transparent 40%), linear-gradient(135deg, #210d20, #54213d 55%, #8b372e)' },
+  { id: 'ice', label: 'Băng giá', background: 'radial-gradient(ellipse at 70% 20%, #a4e5ed 0, transparent 38%), linear-gradient(135deg, #14263b, #35617b 55%, #6f8eaa)' },
+] as const;
 
 export interface MatchSummary {
   id: string;
@@ -248,6 +291,7 @@ export class BackendClient {
     avatarId?: PlayerAvatarId;
     avatarDataUrl?: string | null;
     profileBackgroundDataUrl?: string | null;
+    profileBackgroundId?: (typeof PROFILE_BACKGROUNDS)[number]['id'];
     currentPassword?: string;
     newPassword?: string;
     confirmNewPassword?: string;

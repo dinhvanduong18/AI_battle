@@ -8,7 +8,6 @@ import {
   KeyRound,
   LockKeyhole,
   LogOut,
-  Palette,
   Shield,
   Swords,
   Trophy,
@@ -20,6 +19,8 @@ import {
   backendClient,
   getMatchEloLabel,
   getMatchFormatLabel,
+  PLAYER_AVATARS,
+  PROFILE_BACKGROUNDS,
   type BackendUser,
   type MatchSummary,
   type PlayerAvatarId,
@@ -28,14 +29,7 @@ import { useToast } from './ToastProvider';
 
 export type ModalTab = 'login' | 'register' | 'profile';
 
-export const PLAYER_AVATARS: { id: PlayerAvatarId; emoji: string; label: string }[] = [
-  { id: 'pumpkin', emoji: '🎃', label: 'Bí Ngô' },
-  { id: 'ghost', emoji: '👻', label: 'Bóng Ma' },
-  { id: 'bat', emoji: '🦇', label: 'Dơi Đêm' },
-  { id: 'knight', emoji: '🛡️', label: 'Kỵ Sĩ' },
-  { id: 'fox', emoji: '🦊', label: 'Cáo Lửa' },
-  { id: 'crown', emoji: '👑', label: 'Quân Vương' },
-];
+const MAX_AVATAR_UPLOAD_BYTES = 5 * 1024 * 1024;
 
 interface AuthSettingsModalProps {
   open: boolean;
@@ -73,7 +67,6 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   const [newPassword, setNewPassword] = useState('');
   const [confirmNewPassword, setConfirmNewPassword] = useState('');
   const avatarFileInputRef = React.useRef<HTMLInputElement>(null);
-  const backgroundFileInputRef = React.useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -170,7 +163,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
 
   const handleProfileImageUpload = (
     event: React.ChangeEvent<HTMLInputElement>,
-    kind: 'avatar' | 'background'
+    kind: 'avatar'
   ) => {
     const file = event.target.files?.[0];
     event.target.value = '';
@@ -179,8 +172,8 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       notify('Ảnh chỉ hỗ trợ PNG, JPEG hoặc WebP.', 'error');
       return;
     }
-    if (file.size > 1024 * 1024) {
-      notify('Ảnh cần có dung lượng tối đa 1 MB.', 'error');
+    if (file.size > MAX_AVATAR_UPLOAD_BYTES) {
+      notify('Ảnh đại diện cần có dung lượng tối đa 5 MB.', 'error');
       return;
     }
 
@@ -193,14 +186,10 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       }
       setLoading(true);
       try {
-        const updated = await backendClient.updateProfile(
-          kind === 'avatar'
-            ? { avatarDataUrl: reader.result }
-            : { profileBackgroundDataUrl: reader.result }
-        );
+        const updated = await backendClient.updateProfile({ avatarDataUrl: reader.result });
         onUserUpdated(updated);
         setProfileLayer(null);
-        notify(kind === 'avatar' ? 'Đã cập nhật ảnh đại diện.' : 'Đã cập nhật ảnh nền hồ sơ.', 'success');
+        notify('Đã cập nhật ảnh đại diện.', 'success');
       } catch (err: any) {
         notify(err.message || 'Không thể lưu ảnh.', 'error');
       } finally {
@@ -208,6 +197,33 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
       }
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleBackgroundChange = async (backgroundId: (typeof PROFILE_BACKGROUNDS)[number]['id']) => {
+    if (backgroundId === (user?.profileBackgroundId || 'castle')) return;
+    setLoading(true);
+    try {
+      const updated = await backendClient.updateProfile({ profileBackgroundId: backgroundId });
+      onUserUpdated(updated);
+      setProfileLayer(null);
+      notify('Đã cập nhật ảnh nền hồ sơ.', 'success');
+    } catch (err: any) {
+      notify(err.message || 'Không thể cập nhật ảnh nền.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getProfileBackgroundStyle = () => {
+    if (user?.profileBackgroundUrl) {
+      return { backgroundImage: `url("${user.profileBackgroundUrl}")` };
+    }
+    const background = PROFILE_BACKGROUNDS.find(
+      (option) => option.id === (user?.profileBackgroundId || 'castle')
+    ) || PROFILE_BACKGROUNDS[0];
+    return background.id === 'castle'
+      ? { backgroundImage: `linear-gradient(120deg, rgba(16,11,27,.72), rgba(16,11,27,.22)), url("${profileBackdrop}")` }
+      : { background: background.background };
   };
 
   const completedMatches = user
@@ -399,10 +415,10 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
           {user && (
             <div className="space-y-5">
               <section className="relative isolate min-h-56 overflow-hidden rounded-2xl border border-white/10 bg-[#171326]">
-                <img
-                  src={user.profileBackgroundUrl || profileBackdrop}
-                  alt=""
-                  className="absolute inset-0 -z-20 h-full w-full object-cover object-center opacity-65"
+                <div
+                  aria-hidden="true"
+                  className="absolute inset-0 -z-20 bg-cover bg-center opacity-90"
+                  style={getProfileBackgroundStyle()}
                 />
                 <div className="absolute inset-0 -z-10 bg-gradient-to-r from-[#100b1b] via-[#100b1b]/85 to-[#100b1b]/30" />
                 <button
@@ -484,7 +500,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
 
                           {profileLayer === 'avatar' && (
                             <div>
-                              <div className="grid grid-cols-3 gap-3 sm:grid-cols-6">
+                              <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
                                 {PLAYER_AVATARS.map((avatar) => {
                                   const selected = !user.avatarUrl && (user.avatarId || 'pumpkin') === avatar.id;
                                   return (
@@ -495,13 +511,14 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                                       onClick={() => void handleAvatarChange(avatar.id)}
                                       aria-label={`Chọn avatar ${avatar.label}`}
                                       title={avatar.label}
-                                      className={`rounded-xl border p-3 text-3xl transition-colors disabled:opacity-50 ${
+                                      className={`flex min-h-24 flex-col items-center justify-center gap-1 rounded-xl border p-2 transition-colors disabled:opacity-50 ${
                                         selected
                                           ? 'border-[var(--accent-primary)] bg-[var(--accent-primary)]/15'
                                           : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:border-[var(--accent-primary)]'
                                       }`}
                                     >
-                                      {avatar.emoji}
+                                      <span className="text-3xl">{avatar.emoji}</span>
+                                      <span className="text-[10px] text-[var(--text-secondary)]">{avatar.label}</span>
                                     </button>
                                   );
                                 })}
@@ -523,66 +540,40 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
                                 Tải avatar từ máy
                               </button>
                               <p className="mt-2 text-[10px] text-[var(--text-muted)]">
-                                PNG, JPEG hoặc WebP, tối đa 1 MB.
+                                PNG, JPEG hoặc WebP, tối đa 5 MB.
                               </p>
                             </div>
                           )}
 
                           {profileLayer === 'background' && (
-                            <div>
-                              <div className="overflow-hidden rounded-xl border border-[var(--border-subtle)]">
-                                <img
-                                  src={user.profileBackgroundUrl || profileBackdrop}
-                                  alt="Ảnh nền hồ sơ hiện tại"
-                                  className="h-40 w-full object-cover"
-                                />
-                              </div>
-                              <input
-                                ref={backgroundFileInputRef}
-                                type="file"
-                                accept="image/png,image/jpeg,image/webp"
-                                onChange={(event) => handleProfileImageUpload(event, 'background')}
-                                className="hidden"
-                              />
-                              <div className="mt-4 flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  disabled={loading}
-                                  onClick={() => backgroundFileInputRef.current?.click()}
-                                  className="inline-flex items-center gap-2 rounded-lg bg-[var(--accent-primary)] px-3 py-2 text-xs font-semibold text-white hover:bg-[var(--accent-primary-hover)] disabled:opacity-50"
-                                >
-                                  <ImagePlus className="h-4 w-4" />
-                                  Chọn ảnh nền từ máy
-                                </button>
-                                {user.profileBackgroundUrl && (
+                            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                              {PROFILE_BACKGROUNDS.map((background) => {
+                                const selected =
+                                  !user.profileBackgroundUrl &&
+                                  (user.profileBackgroundId || 'castle') === background.id;
+                                const style = background.id === 'castle'
+                                  ? { backgroundImage: `linear-gradient(120deg, rgba(16,11,27,.45), rgba(16,11,27,.1)), url("${profileBackdrop}")` }
+                                  : { background: background.background };
+                                return (
                                   <button
+                                    key={background.id}
                                     type="button"
                                     disabled={loading}
-                                    onClick={async () => {
-                                      setLoading(true);
-                                      try {
-                                        const updated = await backendClient.updateProfile({
-                                          profileBackgroundDataUrl: null,
-                                        });
-                                        onUserUpdated(updated);
-                                        setProfileLayer(null);
-                                        notify('Đã khôi phục ảnh nền mặc định.', 'success');
-                                      } catch (err: any) {
-                                        notify(err.message || 'Không thể khôi phục ảnh nền.', 'error');
-                                      } finally {
-                                        setLoading(false);
-                                      }
-                                    }}
-                                    className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50"
+                                    onClick={() => void handleBackgroundChange(background.id)}
+                                    aria-pressed={selected}
+                                    className={`relative flex h-24 items-end overflow-hidden rounded-xl border bg-cover bg-center p-2 text-left text-xs font-semibold text-white transition disabled:opacity-50 ${
+                                      selected
+                                        ? 'border-[var(--accent-primary)] ring-2 ring-[var(--accent-primary)]/50'
+                                        : 'border-[var(--border-subtle)] hover:border-[var(--accent-primary)]'
+                                    }`}
+                                    style={style}
                                   >
-                                    <Palette className="h-4 w-4" />
-                                    Dùng nền mặc định
+                                    <span className="rounded-md bg-black/50 px-2 py-1 backdrop-blur-sm">
+                                      {background.label}
+                                    </span>
                                   </button>
-                                )}
-                              </div>
-                              <p className="mt-2 text-[10px] text-[var(--text-muted)]">
-                                PNG, JPEG hoặc WebP, tối đa 1 MB.
-                              </p>
+                                );
+                              })}
                             </div>
                           )}
 
