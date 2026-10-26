@@ -71,6 +71,7 @@ async function createTestHarness() {
     port: 0,
     dbPath,
     skipVite: true,
+    testAdminEmails: ['admin@ottv2.local'],
     timeouts: {
       disconnectForfeitMs: 140,
       setupTimeoutMs: 180,
@@ -991,7 +992,12 @@ test('2-Stage Individual Tournament E2E: Stage A practice (0 Star/0 Elo), Stage 
     // Create a second harness pre-populated with 22 Challenger entries to test all 4 Challenger brackets (1..7, 8..12, 13..20, 21+) & completion reveal!
     const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'ottv2-challenger-'));
     const dbPath2 = path.join(tmpDir2, 'challenger-db.json');
-    const boot = await startServer({ port: 0, dbPath: dbPath2, skipVite: true });
+    const boot = await startServer({
+      port: 0,
+      dbPath: dbPath2,
+      skipVite: true,
+      testAdminEmails: ['admin@ottv2.local'],
+    });
     await boot.close();
 
     const rawDb = JSON.parse(fs.readFileSync(dbPath2, 'utf8'));
@@ -1073,7 +1079,7 @@ test('2-Stage Individual Tournament E2E: Stage A practice (0 Star/0 Elo), Stage 
       assert.equal(revealed.data.finalStandings.length, 23); // 22 seeded Challengers + Minh Quân · BTC
       assert.equal(revealed.data.finalStandings[0].display_name, 'Challenger #1');
       assert.equal(revealed.data.finalStandings[21].display_name, 'Challenger #22');
-      assert.equal(revealed.data.finalStandings[22].display_name, 'Minh Quân · BTC');
+      assert.equal(revealed.data.finalStandings[22].display_name, 'Minh Quân');
     } finally {
       await srv2.close();
       fs.rmSync(tmpDir2, { recursive: true, force: true });

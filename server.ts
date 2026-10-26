@@ -605,6 +605,7 @@ export interface ServerStartOptions {
   port?: number;
   dbPath?: string;
   skipVite?: boolean;
+  testAdminEmails?: string[];
   timeouts?: ServerTimeoutOptions;
 }
 
@@ -688,6 +689,9 @@ export async function startServer(options: ServerStartOptions = {}) {
       // Recreate on corrupt JSON
     }
     db = await createSeedDatabase();
+    for (const user of db.users) {
+      if (options.testAdminEmails?.includes(user.email)) user.is_admin = true;
+    }
     saveDb();
   }
 
@@ -1595,6 +1599,10 @@ export async function startServer(options: ServerStartOptions = {}) {
           error:
             'Giải đấu đã đóng cổng đăng ký (đang ở Giai đoạn Thực chiến hoặc đã kết thúc). Hãy chọn giải đang Mở đăng ký!',
         });
+        return;
+      }
+      if (!getActiveUserBot(user.id)) {
+        res.status(400).json({ error: 'Cần lưu một Bot hợp lệ trước khi đăng ký giải đấu.' });
         return;
       }
       const count = db.tournamentEntries.filter((e) => e.tournament_id === t.id).length;
