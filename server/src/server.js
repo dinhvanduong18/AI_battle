@@ -1500,7 +1500,12 @@ const httpServer = createServer(async (req, res) => {
     return res.end();
   }
   try {
-    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true });
+    if (req.method === 'GET' && url.pathname === '/health') {
+      return json(res, 200, {
+        ok: true,
+        revision: process.env.RENDER_GIT_COMMIT || 'unknown'
+      });
+    }
     if (req.method === 'POST' && url.pathname === '/api/auth/register') {
       const body = await readBody(req);
       const email = String(body.email || '').trim().toLowerCase();

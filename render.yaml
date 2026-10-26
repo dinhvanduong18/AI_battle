@@ -17,6 +17,8 @@ services:
     name: ottv2-backend
     runtime: docker
     plan: free
+    branch: main
+    autoDeployTrigger: commit
     dockerContext: .
     dockerfilePath: ./server/Dockerfile
     healthCheckPath: /health
