@@ -541,6 +541,16 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
     assert.ok(submitWin.data.elo.player1.after > submitWin.data.elo.player1.before);
     assert.ok(submitWin.data.elo.player2.after < submitWin.data.elo.player2.before);
 
+    const matchHistory = await h.api('GET', '/api/matches', pairedWin.seat1.user.token);
+    assert.equal(matchHistory.status, 200);
+    const recordedWin = matchHistory.data.matches.find((match) => match.id === pairedWin.matchId);
+    assert.equal(recordedWin.elo_updated, true);
+    assert.equal(recordedWin.is_sparring, false);
+    assert.equal(
+      recordedWin.elo_delta,
+      submitWin.data.elo.player1.after - submitWin.data.elo.player1.before
+    );
+
     const replayFetch = await h.api(
       'GET',
       `/api/matches/${pairedWin.matchId}/replay`,

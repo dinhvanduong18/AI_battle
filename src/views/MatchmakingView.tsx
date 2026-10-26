@@ -11,7 +11,13 @@ import {
   UserCheck,
   XCircle,
 } from 'lucide-react';
-import { backendClient, type BackendUser, type MatchSummary } from '../core/backendClient';
+import {
+  backendClient,
+  getMatchEloLabel,
+  getMatchFormatLabel,
+  type BackendUser,
+  type MatchSummary,
+} from '../core/backendClient';
 import { useToast } from '../components/ToastProvider';
 
 interface MatchmakingViewProps {
@@ -113,6 +119,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
   const eloWindow = Math.min(400, 100 + Math.floor(elapsedSec / 10) * 50);
 
   const filteredMatches = matches.filter((m) => {
+    if (m.is_sparring) return false;
     if (filterType !== 'all' && m.match_type !== filterType) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -170,7 +177,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
             </div>
             <h2 className="text-xl font-bold text-[var(--text-primary)] flex items-center gap-2.5">
               <Bot className="w-5 h-5 text-[var(--accent-primary)]" />
-              Đấu Trường Bot vs Bot
+              Đấu Trường Bot VS Bot
             </h2>
             <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
               Hai Bot Python 3 thi đấu tự động hoàn toàn với hạt giống ngẫu nhiên đồng bộ. Mọi nước đi được ký cam kết chữ ký số ECDSA P-256 và xác minh lại toàn bộ biên bản trên máy chủ trước khi cộng điểm Elo.
@@ -218,7 +225,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
             </div>
             <h2 className="text-xl font-bold text-[var(--text-primary)] flex items-center gap-2.5">
               <UserCheck className="w-5 h-5 text-[var(--p2-main)]" />
-              Cầm Quân Trực Tiếp 1v1 (PvP)
+              Người VS Người (PvP)
             </h2>
             <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
               Tự tay điều khiển từng quân Đấm, Lá, Kéo trên bàn cờ 9×9 đối đầu người chơi khác để rèn luyện cảm quan vị trí, thử nghiệm bẫy khắc hệ và lưu lại biên bản Replay chuẩn xác.
@@ -284,8 +291,8 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                 {(
                   [
                     { id: 'all', label: 'Tất cả' },
-                    { id: 'bot', label: 'Đấu Bot' },
-                    { id: 'human', label: 'Đấu Người' },
+                    { id: 'bot', label: 'Bot VS Bot' },
+                    { id: 'human', label: 'Người VS Người' },
                   ] as const
                 ).map((tab) => (
                   <button
@@ -363,7 +370,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                         {m.player1} <span className="text-[var(--text-muted)]">vs</span> {m.player2}
                       </td>
                       <td className="py-3 px-3 text-[var(--text-secondary)]">
-                        {m.match_type === 'bot' ? 'Bot Elo' : '1v1 Người'}
+                        {getMatchFormatLabel(m)}
                       </td>
                       <td className="py-3 px-3 font-mono text-[var(--text-muted)]">{m.seed}</td>
                       <td className="py-3 px-3">
@@ -380,7 +387,9 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                             }
                           >
                             {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
-                            {m.elo_delta ? ` (${m.elo_delta > 0 ? '+' : ''}${m.elo_delta} Elo)` : ''}
+                            {user && getMatchEloLabel(m, user.id)
+                              ? ` (${getMatchEloLabel(m, user.id)})`
+                              : ''}
                           </span>
                         )}
                       </td>

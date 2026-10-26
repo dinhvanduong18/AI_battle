@@ -507,6 +507,7 @@ function AppWorkspace() {
         open={authModalOpen}
         initialTab={authModalTab}
         user={user}
+        matches={matches}
         onClose={() => setAuthModalOpen(false)}
         onUserUpdated={(nextUser) => {
           setUser(nextUser);

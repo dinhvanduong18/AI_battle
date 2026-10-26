@@ -1013,7 +1013,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         if (!code) {
           throw new Error('Không tìm thấy mã nguồn Bot đã nộp cho giải đấu.');
         }
-        const runner = new BotRunner('TournamentBot', 1500);
+        const runner = new BotRunner('TournamentBot', 7000);
         await runner.loadBot(
           code,
           session.lockedBotVersion ? `Tournament v${session.lockedBotVersion}` : 'Tournament Bot'
@@ -1260,7 +1260,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         throw new Error('Không tìm thấy mã nguồn Python cho lựa chọn này.');
       }
 
-      const runner = new BotRunner('MatchBot', 1500);
+      const runner = new BotRunner('MatchBot', 7000);
       await runner.loadBot(code, selectedBotSource);
       botRunnerRef.current = runner;
       setMyBotReady(true);

@@ -1,6 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import { KeyRound, LogOut, X } from 'lucide-react';
-import { backendClient, type BackendUser, type PlayerAvatarId } from '../core/backendClient';
+import {
+  backendClient,
+  getMatchEloLabel,
+  getMatchFormatLabel,
+  type BackendUser,
+  type MatchSummary,
+  type PlayerAvatarId,
+} from '../core/backendClient';
 import { useToast } from './ToastProvider';
 
 export type ModalTab = 'login' | 'register' | 'profile';
@@ -18,6 +25,7 @@ interface AuthSettingsModalProps {
   open: boolean;
   initialTab: ModalTab;
   user: BackendUser | null;
+  matches: MatchSummary[];
   onClose: () => void;
   onUserUpdated: (user: BackendUser | null) => void;
 }
@@ -26,6 +34,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   open,
   initialTab,
   user,
+  matches,
   onClose,
   onUserUpdated,
 }) => {
@@ -127,13 +136,31 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
     }
   };
 
+  const completedMatches = user
+    ? matches.filter(
+        (match) =>
+          match.status === 'completed' &&
+          !match.is_sparring &&
+          match.tournament_phase !== 'practice'
+      )
+    : [];
+  const wins = completedMatches.filter((match) => match.winner_id === user?.id).length;
+  const draws = completedMatches.filter((match) => !match.winner_id).length;
+  const losses = completedMatches.length - wins - draws;
+  const winRate = completedMatches.length
+    ? Math.round((wins / completedMatches.length) * 100)
+    : 0;
+  const rank =
+    (user?.elo ?? 0) >= 1600 ? 'Vàng' : (user?.elo ?? 0) >= 1350 ? 'Bạc' : 'Đồng';
+  const recentCompletedMatches = completedMatches.slice(0, 5);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-6 shadow-2xl"
+        className="w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between pb-4 border-b border-[var(--border-subtle)]">
@@ -280,6 +307,81 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
 
           {user && (
             <div className="space-y-5">
+              <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs text-[var(--text-secondary)]">Hạng kỳ thủ</p>
+                    <p className="mt-1 text-lg font-bold text-[var(--text-primary)]">
+                      {rank} <span className="text-sm font-medium text-[var(--text-muted)]">· {user.elo} Elo</span>
+                    </p>
+                  </div>
+                  <span className="rounded-full border border-[var(--accent-primary)]/40 bg-[var(--accent-primary)]/10 px-3 py-1 text-xs font-semibold text-[var(--accent-primary)]">
+                    Tỷ lệ thắng {winRate}%
+                  </span>
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {[
+                    ['Số trận', completedMatches.length],
+                    ['Thắng', wins],
+                    ['Thua', losses],
+                    ['Hòa', draws],
+                  ].map(([label, value]) => (
+                    <div key={label} className="rounded-lg bg-[var(--bg-panel)] px-3 py-2 text-center">
+                      <p className="text-[10px] text-[var(--text-muted)]">{label}</p>
+                      <p className="mt-0.5 text-sm font-bold tabular-nums text-[var(--text-primary)]">{value}</p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-[var(--text-primary)]">Lịch sử thi đấu</h3>
+                  <span className="text-[10px] text-[var(--text-muted)]">5 trận gần nhất</span>
+                </div>
+                {recentCompletedMatches.length ? (
+                  <div className="space-y-2">
+                    {recentCompletedMatches.map((match) => {
+                      const isDraw = !match.winner_id;
+                      const won = match.winner_id === user.id;
+                      const eloLabel = getMatchEloLabel(match, user.id);
+                      return (
+                        <div
+                          key={match.id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--bg-panel)] px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-medium text-[var(--text-primary)]">
+                              {match.player1} <span className="text-[var(--text-muted)]">vs</span> {match.player2}
+                            </p>
+                            <p className="mt-0.5 text-[10px] text-[var(--text-muted)]">
+                              {getMatchFormatLabel(match)} ·{' '}
+                              {new Date(match.created_at).toLocaleDateString('vi-VN')}
+                            </p>
+                          </div>
+                          <p
+                            className={`text-xs font-semibold tabular-nums ${
+                              isDraw
+                                ? 'text-amber-300'
+                                : won
+                                ? 'text-emerald-400'
+                                : 'text-red-400'
+                            }`}
+                          >
+                            {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
+                            {eloLabel ? ` · ${eloLabel}` : ''}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="py-3 text-center text-xs text-[var(--text-muted)]">
+                    Chưa có trận xếp hạng nào được ghi nhận.
+                  </p>
+                )}
+              </section>
+
               <div className="flex items-center justify-between p-4 rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)]">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-xl bg-[var(--p1-bg)] border border-[var(--p1-border)] flex items-center justify-center text-2xl">

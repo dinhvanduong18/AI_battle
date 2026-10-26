@@ -8,7 +8,13 @@ import {
   Play,
   Swords,
 } from 'lucide-react';
-import type { BackendUser, MatchSummary, TournamentItem } from '../core/backendClient';
+import {
+  getMatchEloLabel,
+  getMatchFormatLabel,
+  type BackendUser,
+  type MatchSummary,
+  type TournamentItem,
+} from '../core/backendClient';
 import {
   HalloweenMascotPiece,
   HalloweenObstacleGlyph,
@@ -213,6 +219,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   onWatchMatchReplay,
 }) => {
   const openTournaments = tournaments.filter((t) => t.status !== 'completed');
+  const visibleMatches = recentMatches.filter((match) => !match.is_sparring);
 
   return (
     <div className="space-y-8">
@@ -422,7 +429,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                   Đăng nhập ngay
                 </button>
               </div>
-            ) : recentMatches.length === 0 ? (
+            ) : visibleMatches.length === 0 ? (
               <div className="py-8 text-center space-y-3">
                 <p className="text-sm text-[var(--text-secondary)]">
                   Bạn chưa có trận đấu nào. Hãy khởi động một trận đấu xếp hạng đầu tiên!
@@ -448,7 +455,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
-                    {recentMatches.slice(0, 6).map((m) => {
+                    {visibleMatches.slice(0, 6).map((m) => {
                       const isCompleted = m.status === 'completed';
                       const isDraw = isCompleted && !m.winner_id;
                       const won = isCompleted && m.winner_id === user.id;
@@ -458,7 +465,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                             {m.player1} <span className="text-[var(--text-muted)]">vs</span> {m.player2}
                           </td>
                           <td className="py-3 px-3 text-[var(--text-secondary)]">
-                            {m.match_type === 'bot' ? 'Bot Elo' : '1v1 Người'}
+                            {getMatchFormatLabel(m)}
                           </td>
                           <td className="py-3 px-3">
                             {!isCompleted ? (
@@ -474,7 +481,9 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                                 }
                               >
                                 {isDraw ? 'Hòa' : won ? 'Thắng' : 'Thua'}
-                                {m.elo_delta ? ` (${m.elo_delta > 0 ? '+' : ''}${m.elo_delta})` : ''}
+                                {user && getMatchEloLabel(m, user.id)
+                                  ? ` (${getMatchEloLabel(m, user.id)})`
+                                  : ''}
                               </span>
                             )}
                           </td>

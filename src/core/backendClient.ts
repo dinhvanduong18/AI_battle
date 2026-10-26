@@ -28,6 +28,25 @@ export interface MatchSummary {
   player1_id?: string;
   player2_id?: string;
   elo_delta?: number;
+  elo_updated?: boolean;
+}
+
+export function getMatchFormatLabel(match: MatchSummary): string {
+  return match.match_type === 'bot' ? 'Bot VS Bot' : 'Người VS Người';
+}
+
+export function getMatchEloLabel(match: MatchSummary, userId: string): string | null {
+  const eloUpdated =
+    match.elo_updated ??
+    (match.match_type === 'bot' &&
+      match.tournament_phase !== 'practice' &&
+      !match.is_sparring);
+  if (!eloUpdated) return null;
+
+  const delta = match.elo_delta ?? 0;
+  const signedDelta =
+    delta > 0 ? `+${delta}` : delta < 0 ? `${delta}` : match.winner_id === userId ? '+0' : '-0';
+  return `${signedDelta} Elo`;
 }
 
 export interface TournamentItem {
