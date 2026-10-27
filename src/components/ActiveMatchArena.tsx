@@ -172,6 +172,8 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     attestation: SignedAttestation;
   } | null>(null);
   const consensusStepsRef = useRef<ConsensusStepRecord[]>([]);
+  const pendingPeerAcksRef = useRef(new Map<number, SignedAttestation>());
+  const reconcilePendingPeerAckRef = useRef<(stepCount: number) => void>(() => {});
   const [ackedStepCount, setAckedStepCount] = useState<number>(0);
   const replayMovesRef = useRef<any[]>([]);
   const myFinalProofRef = useRef<{ proof: any; signature: string } | null>(null);
@@ -541,6 +543,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         revealAttestation,
         acknowledgements: [myAckAttestation],
       });
+      reconcilePendingPeerAckRef.current(nextState.stepCount);
 
       replayMovesRef.current.push({
         stepCount: nextState.stepCount,
@@ -792,6 +795,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           revealAttestation: packet.attestation,
           acknowledgements,
         });
+        reconcilePendingPeerAckRef.current(nextState.stepCount);
         pendingPeerCommitRef.current = null;
 
         replayMovesRef.current.push({
@@ -833,21 +837,34 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
       if (packet.type === 'CONSENSUS_ACK' && packet.attestation) {
         const ackPayload = packet.attestation.payload;
-        if (!ackPayload || ackPayload.player === session.mySeat) return;
+        const peerSeat = session.mySeat === 1 ? 2 : 1;
+        if (
+          !ackPayload ||
+          ackPayload.matchId !== session.matchId ||
+          ackPayload.player !== peerSeat ||
+          !Number.isSafeInteger(ackPayload.stepCount) ||
+          ackPayload.stepCount < 1 ||
+          typeof ackPayload.moveCommit !== 'string' ||
+          typeof ackPayload.stateHash !== 'string' ||
+          typeof packet.attestation.signature !== 'string' ||
+          !peerPubKeyRef.current
+        ) return;
 
-        if (peerPubKeyRef.current) {
-          const validSig = await verifyPayload(
-            peerPubKeyRef.current,
-            ackPayload,
-            packet.attestation.signature
-          );
-          if (!validSig) return;
-        }
+        const validSig = await verifyPayload(
+          peerPubKeyRef.current,
+          ackPayload,
+          packet.attestation.signature
+        );
+        if (!validSig) return;
 
         const stepEntry = consensusStepsRef.current.find(
           (s) => s.stepCount === ackPayload.stepCount
         );
-        if (!stepEntry) return;
+        if (!stepEntry) {
+          pendingPeerAcksRef.current.set(ackPayload.stepCount, packet.attestation);
+          return;
+        }
+        if (ackPayload.moveCommit !== stepEntry.commit) return;
 
         if (ackPayload.stateHash !== stepEntry.stateHash) {
           const combinedAcks = [
@@ -870,9 +887,22 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         if (!stepEntry.acknowledgements.some((a) => a.payload?.player === ackPayload.player)) {
           stepEntry.acknowledgements.push(packet.attestation);
         }
-        if (stepEntry.acknowledgements.length === 2) {
-          setAckedStepCount((prev) => Math.max(prev, stepEntry.stepCount));
-        }
+        setAckedStepCount((previous) => {
+          let contiguousStepCount = previous;
+          while (true) {
+            const nextStep = consensusStepsRef.current.find(
+              (entry) => entry.stepCount === contiguousStepCount + 1
+            );
+            if (
+              !nextStep?.acknowledgements.some((ack) => ack.payload?.player === 1) ||
+              !nextStep.acknowledgements.some((ack) => ack.payload?.player === 2)
+            ) {
+              break;
+            }
+            contiguousStepCount += 1;
+          }
+          return contiguousStepCount;
+        });
         return;
       }
 
@@ -919,6 +949,12 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       packetQueueRef.current = packetQueueRef.current
         .then(() => processPeerPacket(pkt))
         .catch((err) => console.error('Consensus packet processing error:', err));
+    };
+    reconcilePendingPeerAckRef.current = (stepCount) => {
+      const attestation = pendingPeerAcksRef.current.get(stepCount);
+      if (!attestation) return;
+      pendingPeerAcksRef.current.delete(stepCount);
+      enqueuePeerPacket({ type: 'CONSENSUS_ACK', attestation });
     };
 
     const unsubPeerData =
@@ -1002,6 +1038,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
     return () => {
       active = false;
+      reconcilePendingPeerAckRef.current = () => {};
       if (helloInterval) clearInterval(helloInterval);
       unsubPeerData();
       unsubPeerKey();

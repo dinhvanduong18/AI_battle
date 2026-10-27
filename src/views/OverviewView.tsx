@@ -463,7 +463,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
-                    {visibleMatches.slice(0, 6).map((m) => {
+                    {visibleMatches.slice(0, 10).map((m) => {
                       const isCompleted = m.status === 'completed';
                       const isDraw = isCompleted && !m.winner_id;
                       const won = isCompleted && m.winner_id === user.id;
