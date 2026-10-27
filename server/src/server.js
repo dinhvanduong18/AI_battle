@@ -91,6 +91,7 @@ const publicUser = user => ({
   elo: user.elo,
   avatarId: user.avatar_id || 'pumpkin',
   avatarUrl: user.avatar_url || null,
+  profileBackgroundUrl: user.profile_background_url || null,
   profileBackgroundId: PROFILE_BACKGROUND_IDS.includes(user.profile_background_id)
     ? user.profile_background_id
     : 'castle',
@@ -1513,14 +1514,14 @@ const httpServer = createServer(async (req, res) => {
       const displayName = String(body.displayName || '').trim().slice(0, 40);
       if (!/^\S+@\S+\.\S+$/.test(email) || password.length < 10 || !displayName) return json(res, 400, { error: 'Provide a valid email, display name and password of at least 10 characters' });
       const passwordHash = await hashPassword(password);
-      const created = await pool.query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,elo,avatar_id,avatar_url,profile_background_id,is_admin,active_bot_version', [email, passwordHash, displayName]);
+      const created = await pool.query('INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) RETURNING id,email,display_name,elo,avatar_id,avatar_url,profile_background_url,profile_background_id,is_admin,active_bot_version', [email, passwordHash, displayName]);
       const user = created.rows[0];
       return json(res, 201, { token: createToken(user, config.jwtSecret), user: publicUser(user) });
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/login') {
       const body = await readBody(req);
       const email = String(body.email || '').trim().toLowerCase();
-      const result = await pool.query('SELECT id,email,password_hash,display_name,elo,avatar_id,avatar_url,profile_background_id,is_admin,active_bot_version FROM users WHERE email=$1', [email]);
+      const result = await pool.query('SELECT id,email,password_hash,display_name,elo,avatar_id,avatar_url,profile_background_url,profile_background_id,is_admin,active_bot_version FROM users WHERE email=$1', [email]);
       const user = result.rows[0];
       if (!user || !await verifyPassword(String(body.password || ''), user.password_hash)) return json(res, 401, { error: 'Email or password is incorrect' });
       return json(res, 200, { token: createToken(user, config.jwtSecret), user: publicUser(user) });
@@ -1855,7 +1856,7 @@ const httpServer = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname === '/api/me') {
       const auth = authFromHeader(req);
-      const result = await pool.query('SELECT id,email,display_name,elo,avatar_id,avatar_url,profile_background_id,is_admin,active_bot_version FROM users WHERE id=$1', [auth.sub]);
+      const result = await pool.query('SELECT id,email,display_name,elo,avatar_id,avatar_url,profile_background_url,profile_background_id,is_admin,active_bot_version FROM users WHERE id=$1', [auth.sub]);
       if (!result.rows[0]) return json(res, 401, { error: 'Account not found' });
       return json(res, 200, { user: publicUser(result.rows[0]) });
     }
@@ -1865,18 +1866,20 @@ const httpServer = createServer(async (req, res) => {
       const displayName = body.displayName === undefined ? null : String(body.displayName).trim().slice(0, 40);
       const avatarId = body.avatarId === undefined ? null : String(body.avatarId);
       const avatarDataUrl = body.avatarDataUrl;
+      const profileBackgroundDataUrl = body.profileBackgroundDataUrl;
       const profileBackgroundId = body.profileBackgroundId === undefined ? null : String(body.profileBackgroundId);
       const currentPassword = String(body.currentPassword || '');
       const newPassword = String(body.newPassword || '');
       if (displayName !== null && !displayName) return json(res, 400, { error: 'Tên hiển thị không được để trống.' });
       if (avatarId !== null && !PLAYER_AVATAR_IDS.includes(avatarId)) return json(res, 400, { error: 'Diện mạo kỳ thủ không hợp lệ.' });
       if (avatarDataUrl !== undefined && avatarDataUrl !== null && !isAllowedAvatarDataUrl(avatarDataUrl)) return json(res, 400, { error: 'Ảnh đại diện cần là PNG, JPEG hoặc WebP và tối đa 5 MB.' });
+      if (profileBackgroundDataUrl !== undefined && profileBackgroundDataUrl !== null && !isAllowedAvatarDataUrl(profileBackgroundDataUrl)) return json(res, 400, { error: 'Ảnh nền cần là PNG, JPEG hoặc WebP và tối đa 5 MB.' });
       if (profileBackgroundId !== null && !PROFILE_BACKGROUND_IDS.includes(profileBackgroundId)) return json(res, 400, { error: 'Ảnh nền hồ sơ không hợp lệ.' });
       if (newPassword && newPassword.length < 10) return json(res, 400, { error: 'Mật khẩu mới cần ít nhất 10 ký tự.' });
       if (Boolean(currentPassword) !== Boolean(newPassword)) return json(res, 400, { error: 'Cần nhập cả mật khẩu hiện tại và mật khẩu mới.' });
-      if (displayName === null && avatarId === null && avatarDataUrl === undefined && profileBackgroundId === null && !newPassword) return json(res, 400, { error: 'Hãy chọn nội dung cần cập nhật.' });
+      if (displayName === null && avatarId === null && avatarDataUrl === undefined && profileBackgroundId === null && profileBackgroundDataUrl === undefined && !newPassword) return json(res, 400, { error: 'Hãy chọn nội dung cần cập nhật.' });
 
-      const found = await pool.query('SELECT id,email,password_hash,display_name,elo,avatar_id,avatar_url,profile_background_id,is_admin FROM users WHERE id=$1', [auth.sub]);
+      const found = await pool.query('SELECT id,email,password_hash,display_name,elo,avatar_id,avatar_url,profile_background_url,profile_background_id,is_admin FROM users WHERE id=$1', [auth.sub]);
       const user = found.rows[0];
       if (!user) return json(res, 401, { error: 'Account not found' });
       if (newPassword && !await verifyPassword(currentPassword, user.password_hash)) {
@@ -1890,13 +1893,18 @@ const httpServer = createServer(async (req, res) => {
         ? user.avatar_url
         : avatarDataUrl || null;
       const nextBackgroundId = profileBackgroundId ?? user.profile_background_id ?? 'castle';
+      const nextBackgroundUrl = profileBackgroundId !== null
+        ? null
+        : profileBackgroundDataUrl === undefined
+        ? user.profile_background_url
+        : profileBackgroundDataUrl || null;
       if (newPassword) {
         const passwordHash = await hashPassword(newPassword);
-        await pool.query('UPDATE users SET display_name=$1,avatar_id=$2,avatar_url=$3,profile_background_id=$4,password_hash=$5 WHERE id=$6', [nextName, nextAvatarId, nextAvatarUrl, nextBackgroundId, passwordHash, auth.sub]);
+        await pool.query('UPDATE users SET display_name=$1,avatar_id=$2,avatar_url=$3,profile_background_id=$4,profile_background_url=$5,password_hash=$6 WHERE id=$7', [nextName, nextAvatarId, nextAvatarUrl, nextBackgroundId, nextBackgroundUrl, passwordHash, auth.sub]);
       } else {
-        await pool.query('UPDATE users SET display_name=$1,avatar_id=$2,avatar_url=$3,profile_background_id=$4 WHERE id=$5', [nextName, nextAvatarId, nextAvatarUrl, nextBackgroundId, auth.sub]);
+        await pool.query('UPDATE users SET display_name=$1,avatar_id=$2,avatar_url=$3,profile_background_id=$4,profile_background_url=$5 WHERE id=$6', [nextName, nextAvatarId, nextAvatarUrl, nextBackgroundId, nextBackgroundUrl, auth.sub]);
       }
-      const updated = await pool.query('SELECT id,email,display_name,elo,avatar_id,avatar_url,profile_background_id,is_admin,active_bot_version FROM users WHERE id=$1', [auth.sub]);
+      const updated = await pool.query('SELECT id,email,display_name,elo,avatar_id,avatar_url,profile_background_url,profile_background_id,is_admin,active_bot_version FROM users WHERE id=$1', [auth.sub]);
       return json(res, 200, { user: publicUser(updated.rows[0]) });
     }
     if (req.method === 'GET' && url.pathname === '/api/leaderboard') {
@@ -2426,6 +2434,7 @@ async function main() {
   await pool.query(await readFile(new URL('../migrations/011_tournament_and_dispute_upgrades.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/012_admin_sprints_and_user_elo.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/013_profile_appearance.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/014_profile_background_url.sql', import.meta.url), 'utf8'));
   await updateTournamentLifecycle();
   tournamentLifecycleTimer = setInterval(() => updateTournamentLifecycle().catch(error => {
     console.error('Tournament lifecycle update failed:', error.message);

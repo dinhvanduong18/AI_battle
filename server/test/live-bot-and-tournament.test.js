@@ -301,6 +301,13 @@ test('Profile settings: store uploaded avatar and require matching password conf
     const persistedBackground = await h.api('GET', '/api/me', player.token);
     assert.equal(persistedBackground.data.user.profileBackgroundUrl, pngDataUrl);
 
+    const resetBackgroundChoice = await h.api('PATCH', '/api/me', player.token, {
+      profileBackgroundId: 'aurora',
+    });
+    assert.equal(resetBackgroundChoice.status, 200, JSON.stringify(resetBackgroundChoice.data));
+    assert.equal(resetBackgroundChoice.data.user.profileBackgroundId, 'aurora');
+    assert.equal(resetBackgroundChoice.data.user.profileBackgroundUrl, null);
+
     const invalidAvatar = await h.api('PATCH', '/api/me', player.token, {
       avatarDataUrl: 'data:image/png;base64,SGVsbG8=',
     });

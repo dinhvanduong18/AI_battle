@@ -200,7 +200,7 @@ export const AuthSettingsModal: React.FC<AuthSettingsModalProps> = ({
   };
 
   const handleBackgroundChange = async (backgroundId: (typeof PROFILE_BACKGROUNDS)[number]['id']) => {
-    if (backgroundId === (user?.profileBackgroundId || 'castle')) return;
+    if (backgroundId === (user?.profileBackgroundId || 'castle') && !user?.profileBackgroundUrl) return;
     setLoading(true);
     try {
       const updated = await backendClient.updateProfile({ profileBackgroundId: backgroundId });
