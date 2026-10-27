@@ -2261,6 +2261,7 @@ wss.on('connection', ws => {
               return;
             }
           }
+          let ackReceipt = null;
           const client = await pool.connect();
           try {
             await client.query('BEGIN');
@@ -2286,8 +2287,21 @@ wss.on('connection', ws => {
                 cs.lastRevealAt = now;
                 cs.lastRevealCommit = p.attestation.payload.commit;
               } else if (p.type === 'CONSENSUS_ACK' && p.attestation?.payload) {
-                const ackStep = p.attestation.payload.stepCount;
-                if (ackStep === Number(cs.currentStep || 0) + 1) {
+                const ackStep = Number(p.attestation.payload.stepCount);
+                const currentStep = Number(cs.currentStep || 0);
+                if (
+                  Number.isSafeInteger(ackStep) &&
+                  ackStep >= 1 &&
+                  ackStep <= currentStep + 1 &&
+                  typeof p.attestation.payload.stateHash === 'string'
+                ) {
+                  ackReceipt = {
+                    matchId: match.id,
+                    stepCount: ackStep,
+                    stateHash: p.attestation.payload.stateHash,
+                  };
+                }
+                if (ackStep === currentStep + 1) {
                   cs.acksForPendingStep = cs.acksForPendingStep || {};
                   cs.acksForPendingStep[senderSeat] = p.attestation.payload.stateHash;
                   if (
@@ -2316,6 +2330,7 @@ wss.on('connection', ws => {
           } finally {
             client.release();
           }
+          if (ackReceipt) send(ws, 'consensus-ack-received', ackReceipt);
         }
         const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
         const online = await redis.get(`ottv2:presence:${peerId}`);

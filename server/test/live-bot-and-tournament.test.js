@@ -446,6 +446,8 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
         paired.seat2.client.waitFor(
           (m) => m.type === 'match-relay' && m.payload?.type === 'CONSENSUS_ACK'
         ),
+        paired.seat1.client.waitFor('consensus-ack-received'),
+        paired.seat2.client.waitFor('consensus-ack-received'),
       ]);
 
       replayMoves.push({
@@ -936,7 +938,17 @@ test('Bot-vs-Bot E2E: hash mismatch, illegal reveal, and withheld ACK / stall ti
       matchId: mAck.matchId,
       payload: { type: 'CONSENSUS_ACK', attestation: aAtt0 },
     });
+    const firstAckReceipt = await mAck.seat1.client.waitFor('consensus-ack-received');
+    assert.equal(firstAckReceipt.stepCount, 1);
+    assert.equal(firstAckReceipt.stateHash, hashAfter0);
     await mAck.seat2.client.waitFor((m) => m.type === 'match-relay' && m.payload?.type === 'CONSENSUS_ACK');
+    mAck.seat1.client.send({
+      type: 'match-relay',
+      matchId: mAck.matchId,
+      payload: { type: 'CONSENSUS_ACK', attestation: aAtt0 },
+    });
+    const retriedAckReceipt = await mAck.seat1.client.waitFor('consensus-ack-received');
+    assert.equal(retriedAckReceipt.stepCount, 1);
     // Seat 2 intentionally withholds its CONSENSUS_ACK!
     await sleep(150);
     const claimAck = await h.api('POST', '/api/match/claim-timeout', mAck.seat1.user.token, {

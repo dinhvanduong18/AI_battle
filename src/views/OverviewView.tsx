@@ -503,7 +503,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                                 className="inline-flex items-center gap-1 text-xs font-medium text-[var(--accent-primary)] hover:underline cursor-pointer whitespace-nowrap"
                               >
                                 <Film className="w-3.5 h-3.5" />
-                                Xem Replay
+                                Mở Replay
                               </button>
                             ) : (
                               <span className="text-[var(--text-muted)]">—</span>
