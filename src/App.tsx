@@ -6,11 +6,10 @@ import {
   LayoutDashboard,
   Menu,
   Radio,
+  Settings,
   Swords,
   Trophy,
   User,
-  Volume2,
-  VolumeX,
   X,
 } from 'lucide-react';
 import {
@@ -22,8 +21,10 @@ import {
 } from './core/backendClient';
 import { SAMPLE_BOTS } from './core/sampleBots';
 import { soundFx } from './core/soundFx';
+import { backgroundMusic } from './core/backgroundMusic';
 import { ToastProvider, useToast } from './components/ToastProvider';
 import { HalloweenBackdrop } from './components/HalloweenBackdrop';
+import { AppSettingsModal, type AppFont } from './components/AppSettingsModal';
 import { AuthSettingsModal, type ModalTab } from './components/AuthSettingsModal';
 import { ReplayModal } from './components/ReplayModal';
 import { ActiveMatchArena, type ActiveMatchSession } from './components/ActiveMatchArena';
@@ -65,6 +66,57 @@ function AppWorkspace() {
 
   // Sound FX state
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => soundFx.enabled);
+  const [soundVolume, setSoundVolume] = useState<number>(() => soundFx.volume);
+  const [musicEnabled, setMusicEnabled] = useState<boolean>(() => backgroundMusic.enabled);
+  const [musicVolume, setMusicVolume] = useState<number>(() => backgroundMusic.volume);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [appFont, setAppFont] = useState<AppFont>(() => {
+    try {
+      const saved = localStorage.getItem('ottv2-font');
+      return saved === 'outfit' || saved === 'system' ? saved : 'jakarta';
+    } catch {
+      return 'jakarta';
+    }
+  });
+
+  useEffect(() => {
+    const fontFamily =
+      appFont === 'outfit'
+        ? "'Outfit', system-ui, sans-serif"
+        : appFont === 'system'
+          ? "system-ui, -apple-system, 'Segoe UI', sans-serif"
+          : "'Plus Jakarta Sans', system-ui, sans-serif";
+    document.documentElement.style.setProperty('--app-font-family', fontFamily);
+    try {
+      localStorage.setItem('ottv2-font', appFont);
+    } catch {
+      // ignore storage quota
+    }
+  }, [appFont]);
+
+  useEffect(() => {
+    if (!musicEnabled) return;
+    const unlockMusic = () => backgroundMusic.setEnabled(true);
+    window.addEventListener('pointerdown', unlockMusic, { once: true });
+    return () => window.removeEventListener('pointerdown', unlockMusic);
+  }, [musicEnabled]);
+
+  const handleSoundEnabledChange = (enabled: boolean) => {
+    soundFx.setEnabled(enabled);
+    setSoundEnabled(enabled);
+  };
+  const handleSoundVolumeChange = (volume: number) => {
+    soundFx.setVolume(volume);
+    setSoundVolume(volume);
+  };
+  const handleMusicEnabledChange = (enabled: boolean) => {
+    backgroundMusic.setEnabled(enabled);
+    setMusicEnabled(enabled);
+  };
+  const handleMusicVolumeChange = (volume: number) => {
+    backgroundMusic.setVolume(volume);
+    setMusicVolume(volume);
+  };
 
   // Navigation & Responsive Drawer
   const [activeView, setActiveView] = useState<NavView>('overview');
@@ -286,27 +338,15 @@ function AppWorkspace() {
           })}
         </nav>
 
-        {/* Bottom Audio Control in Sidebar */}
+        {/* App settings at the bottom of the sidebar */}
         <div className="p-4 border-t border-[var(--border-subtle)]">
           <button
             type="button"
-            onClick={() => {
-              const next = soundFx.toggle();
-              setSoundEnabled(next);
-            }}
+            onClick={() => setSettingsOpen(true)}
             className="w-full inline-flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors cursor-pointer whitespace-nowrap"
           >
-            {soundEnabled ? (
-              <>
-                <Volume2 className="w-4 h-4 text-[var(--accent-primary)]" />
-                Âm thanh hiệu ứng: Bật
-              </>
-            ) : (
-              <>
-                <VolumeX className="w-4 h-4" />
-                Âm thanh hiệu ứng: Tắt
-              </>
-            )}
+            <Settings className="w-4 h-4 text-[var(--accent-primary)]" />
+            Cài đặt
           </button>
         </div>
       </aside>
@@ -366,22 +406,13 @@ function AppWorkspace() {
               <button
                 type="button"
                 onClick={() => {
-                  const next = soundFx.toggle();
-                  setSoundEnabled(next);
+                  setMobileMenuOpen(false);
+                  setSettingsOpen(true);
                 }}
                 className="w-full inline-flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-primary)]"
               >
-                {soundEnabled ? (
-                  <>
-                    <Volume2 className="w-4 h-4 text-[var(--accent-primary)]" />
-                    Âm thanh: Bật
-                  </>
-                ) : (
-                  <>
-                    <VolumeX className="w-4 h-4" />
-                    Âm thanh: Tắt
-                  </>
-                )}
+                <Settings className="w-4 h-4 text-[var(--accent-primary)]" />
+                Cài đặt
               </button>
             </div>
           </div>
@@ -540,6 +571,21 @@ function AppWorkspace() {
         player2Name={replayState.p2}
         themeMode="halloween"
         onClose={() => setReplayState((prev) => ({ ...prev, open: false }))}
+      />
+
+      <AppSettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        font={appFont}
+        onFontChange={setAppFont}
+        musicEnabled={musicEnabled}
+        onMusicEnabledChange={handleMusicEnabledChange}
+        musicVolume={musicVolume}
+        onMusicVolumeChange={handleMusicVolumeChange}
+        soundEnabled={soundEnabled}
+        onSoundEnabledChange={handleSoundEnabledChange}
+        soundVolume={soundVolume}
+        onSoundVolumeChange={handleSoundVolumeChange}
       />
     </div>
   );

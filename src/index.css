@@ -35,13 +35,13 @@
   body {
     background-color: #090610;
     color: var(--text-primary);
-    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    font-family: var(--app-font-family, 'Plus Jakarta Sans'), system-ui, -apple-system, sans-serif;
     letter-spacing: 0.005em;
     overflow-x: hidden;
   }
 
   h1, h2, h3, h4, .font-display {
-    font-family: 'Outfit', system-ui, -apple-system, sans-serif;
+    font-family: var(--app-font-family, 'Outfit'), system-ui, -apple-system, sans-serif;
   }
 
   code, pre, textarea.code-editor, .font-mono {

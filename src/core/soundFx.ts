@@ -1,13 +1,27 @@
 class SoundEngine {
   private ctx: AudioContext | null = null;
   public enabled = true;
+  public volume = 0.6;
 
   constructor() {
     try {
       const saved = localStorage.getItem('ottv2-sound');
       if (saved !== null) this.enabled = saved !== 'off';
+      const savedVolume = localStorage.getItem('ottv2-sound-volume');
+      if (savedVolume !== null && Number.isFinite(Number(savedVolume))) {
+        this.volume = Math.min(1, Math.max(0, Number(savedVolume)));
+      }
     } catch {
       this.enabled = true;
+    }
+  }
+
+  setVolume(value: number) {
+    this.volume = Math.min(1, Math.max(0, value));
+    try {
+      localStorage.setItem('ottv2-sound-volume', String(this.volume));
+    } catch {
+      // ignore storage quota
     }
   }
 
@@ -47,7 +61,7 @@ class SoundEngine {
     osc.type = type;
     osc.frequency.setValueAtTime(freq, now);
     gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(gainPeak, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(gainPeak * this.volume, now + 0.012);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
     osc.connect(gain);
     gain.connect(ctx.destination);

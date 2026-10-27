@@ -5,7 +5,6 @@ import {
   Eye,
   Film,
   LogIn,
-  Medal,
   Play,
   Swords,
 } from 'lucide-react';
@@ -231,12 +230,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   const visibleMatches = recentMatches.filter((match) => !match.is_sparring);
   const elo = user?.elo ?? 1200;
   const eloRank = elo >= 1600 ? 'Vàng' : elo >= 1350 ? 'Bạc' : 'Đồng';
-  const eloRankIconClass =
-    eloRank === 'Vàng'
-      ? 'text-yellow-300 fill-yellow-300/20'
-      : eloRank === 'Bạc'
-        ? 'text-slate-200 fill-slate-200/20'
-        : 'text-orange-400 fill-orange-400/20';
+  const eloRankColor = eloRank === 'Vàng' ? '#facc15' : eloRank === 'Bạc' ? '#cbd5e1' : '#d97706';
 
   return (
     <div className="space-y-8">
@@ -296,15 +290,21 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
           <div className="text-xs text-[var(--text-secondary)]">Hệ số Elo hiện tại</div>
           <div className="mt-2 flex items-center gap-2 text-2xl sm:text-3xl font-bold font-display text-[var(--text-primary)] tabular-nums">
             <span>{elo}</span>
-            <span
-              role="img"
-              aria-label={`Hạng Elo ${eloRank}`}
-              title={`Hạng ${eloRank}`}
-            >
-              <Medal
-                aria-hidden="true"
-                className={`h-5 w-5 sm:h-6 sm:w-6 ${eloRankIconClass}`}
-              />
+            <span role="img" aria-label={`Hạng Elo ${eloRank}`} title={`Hạng ${eloRank}`}>
+              <svg viewBox="0 0 32 32" className="h-6 w-6 sm:h-7 sm:w-7">
+                <polygon
+                  points="16,2 28,8 25,23 16,30 7,23 4,8"
+                  fill={eloRankColor}
+                  fillOpacity="0.16"
+                  stroke={eloRankColor}
+                  strokeWidth="1.8"
+                />
+                <polygon
+                  points="16,8 20,14 16,22 12,14"
+                  fill={eloRankColor}
+                  fillOpacity="0.85"
+                />
+              </svg>
             </span>
           </div>
           <div className="mt-1 text-xs text-[var(--text-muted)]">
