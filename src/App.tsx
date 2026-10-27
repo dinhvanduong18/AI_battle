@@ -311,12 +311,12 @@ function AppWorkspace() {
   }, [refreshPublicAndUserData]);
 
   return (
-    <div className="relative min-h-screen flex text-[var(--text-primary)]">
+    <div className="relative h-screen flex overflow-hidden text-[var(--text-primary)]">
       {/* Full-Viewport Dark Fantasy Castle, Pumpkin Lanterns & Drifting Fireflies */}
       <HalloweenBackdrop />
 
       {/* Desktop Persistent Sidebar */}
-      <aside className="relative z-20 hidden lg:flex lg:flex-col lg:w-64 shrink-0 border-r border-[var(--border-subtle)] bg-[#120c1e]/85 backdrop-blur-md">
+      <aside className="relative z-20 hidden h-screen shrink-0 border-r border-[var(--border-subtle)] bg-[#120c1e]/85 backdrop-blur-md lg:sticky lg:top-0 lg:flex lg:w-64 lg:flex-col">
         <div className="h-16 px-6 flex items-center border-b border-[var(--border-subtle)]">
           <button
             type="button"
@@ -334,7 +334,7 @@ function AppWorkspace() {
           </button>
         </div>
 
-        <nav className="flex-1 p-4 space-y-1">
+        <nav className="min-h-0 flex-1 overflow-y-auto p-4 space-y-1">
           {NAV_ITEMS.map((item) => {
             const Icon = item.icon;
             const active = !activeMatch && activeView === item.id;
@@ -443,9 +443,9 @@ function AppWorkspace() {
       )}
 
       {/* Main Content Area */}
-      <div className="relative z-10 flex-1 flex flex-col min-w-0">
+      <div className="relative z-10 flex h-screen min-h-0 min-w-0 flex-1 flex-col">
         {/* Clean Single-Row Top Header */}
-        <header className="h-16 px-4 sm:px-8 border-b border-[var(--border-subtle)] bg-[#120c1e]/80 backdrop-blur-md flex items-center justify-between gap-4 sticky top-0 z-30">
+        <header className="h-16 shrink-0 px-4 sm:px-8 border-b border-[var(--border-subtle)] bg-[#120c1e]/80 backdrop-blur-md flex items-center justify-between gap-4 sticky top-0 z-30">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
@@ -494,7 +494,7 @@ function AppWorkspace() {
         </header>
 
         {/* Page Viewport */}
-        <main className="flex-1 w-full max-w-[1320px] mx-auto px-4 sm:px-8 py-6 sm:py-8">
+        <main className="min-h-0 flex-1 overflow-y-auto w-full max-w-[1320px] mx-auto px-4 sm:px-8 py-6 sm:py-8">
           {activeMatch ? (
             <ActiveMatchArena
               session={activeMatch}
