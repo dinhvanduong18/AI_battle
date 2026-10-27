@@ -3,18 +3,23 @@ class BackgroundMusicEngine {
   private masterGain: GainNode | null = null;
   private chordTimer: ReturnType<typeof setInterval> | null = null;
   private melodyTimer: ReturnType<typeof setInterval> | null = null;
+  private beatIndex = 0;
   private chordIndex = 0;
-  private melodyIndex = 0;
   public enabled = false;
   public volume = 0.25;
 
   private readonly chords = [
-    [220, 261.63, 329.63],
-    [196, 246.94, 293.66],
-    [174.61, 220, 261.63],
-    [196, 246.94, 293.66],
+    [130.81, 164.81, 196],
+    [98, 123.47, 146.83],
+    [110, 130.81, 164.81],
+    [87.31, 110, 130.81],
   ];
-  private readonly melody = [392, 440, 523.25, 440, 349.23, 392, 440, 329.63];
+  private readonly melody: Array<number | null> = [
+    392, 440, 523.25, null,
+    659.25, 587.33, 523.25, null,
+    440, 523.25, 587.33, null,
+    783.99, 659.25, 523.25, null,
+  ];
 
   constructor() {
     try {
@@ -87,19 +92,25 @@ class BackgroundMusicEngine {
 
     this.updateGain();
     this.playChord();
-    this.playMelodyNote();
+    this.playBeat();
 
     if (!this.chordTimer) {
       this.chordTimer = setInterval(() => {
         this.chordIndex = (this.chordIndex + 1) % this.chords.length;
         this.playChord();
-      }, 3200);
+      }, 4000);
     }
     if (!this.melodyTimer) {
       this.melodyTimer = setInterval(() => {
-        this.playMelodyNote();
-      }, 800);
+        this.playBeat();
+      }, 250);
     }
+  }
+
+  private playBeat() {
+    const frequency = this.melody[this.beatIndex % this.melody.length];
+    this.beatIndex += 1;
+    if (frequency !== null) this.playMelodyNote(frequency);
   }
 
   private playChord() {
@@ -126,17 +137,16 @@ class BackgroundMusicEngine {
     }
   }
 
-  private playMelodyNote() {
+  private playMelodyNote(frequency: number) {
     if (!this.ctx || !this.masterGain) return;
     const now = this.ctx.currentTime;
     const oscillator = this.ctx.createOscillator();
     const envelope = this.ctx.createGain();
     oscillator.type = 'triangle';
-    oscillator.frequency.value = this.melody[this.melodyIndex];
-    this.melodyIndex = (this.melodyIndex + 1) % this.melody.length;
+    oscillator.frequency.value = frequency;
     envelope.gain.setValueAtTime(0.0001, now);
     envelope.gain.exponentialRampToValueAtTime(0.22, now + 0.025);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.62);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
     oscillator.connect(envelope);
     envelope.connect(this.masterGain);
     oscillator.start(now);
