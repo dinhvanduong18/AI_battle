@@ -9,7 +9,8 @@ interface AppSettingsModalProps {
   font: AppFont;
   onFontChange: (font: AppFont) => void;
   musicEnabled: boolean;
-  onMusicEnabledChange: (enabled: boolean) => void;
+  onMusicEnabledChange: (enabled: boolean) => void | Promise<void>;
+  musicError: string | null;
   musicVolume: number;
   onMusicVolumeChange: (volume: number) => void;
   soundEnabled: boolean;
@@ -25,6 +26,7 @@ export const AppSettingsModal: React.FC<AppSettingsModalProps> = ({
   onFontChange,
   musicEnabled,
   onMusicEnabledChange,
+  musicError,
   musicVolume,
   onMusicVolumeChange,
   soundEnabled,
@@ -97,6 +99,11 @@ export const AppSettingsModal: React.FC<AppSettingsModalProps> = ({
             onEnabledChange={onMusicEnabledChange}
             onVolumeChange={onMusicVolumeChange}
           />
+          {musicError && (
+            <p role="alert" className="text-xs leading-relaxed text-red-300">
+              {musicError}
+            </p>
+          )}
           <AudioSetting
             icon={<Volume2 className="h-4 w-4 text-[var(--accent-primary)]" />}
             label="Hiệu ứng âm thanh"
@@ -139,14 +146,12 @@ const AudioSetting: React.FC<AudioSettingProps> = ({
         role="switch"
         aria-checked={enabled}
         onClick={() => onEnabledChange(!enabled)}
-        className={`relative h-6 w-11 rounded-full transition-colors ${
-          enabled ? 'bg-[var(--accent-primary)]' : 'bg-slate-600'
-        }`}
+        className="relative h-6 w-11 shrink-0 rounded-full"
+        style={{ backgroundColor: enabled ? 'var(--accent-primary)' : '#475569' }}
       >
         <span
-          className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
-            enabled ? 'translate-x-5' : 'translate-x-0.5'
-          }`}
+          className="absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white"
+          style={{ transform: `translateX(${enabled ? 20 : 0}px)` }}
         />
         <span className="sr-only">{enabled ? 'Bật' : 'Tắt'} {label}</span>
       </button>

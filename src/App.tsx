@@ -69,6 +69,7 @@ function AppWorkspace() {
   const [soundVolume, setSoundVolume] = useState<number>(() => soundFx.volume);
   const [musicEnabled, setMusicEnabled] = useState<boolean>(() => backgroundMusic.enabled);
   const [musicVolume, setMusicVolume] = useState<number>(() => backgroundMusic.volume);
+  const [musicError, setMusicError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appFont, setAppFont] = useState<AppFont>(() => {
     try {
@@ -96,7 +97,14 @@ function AppWorkspace() {
 
   useEffect(() => {
     if (!musicEnabled) return;
-    const unlockMusic = () => backgroundMusic.setEnabled(true);
+    const unlockMusic = () => {
+      backgroundMusic.setEnabled(true).catch((error: unknown) => {
+        const message =
+          error instanceof Error ? error.message : 'Không thể khởi chạy nhạc nền.';
+        setMusicEnabled(false);
+        setMusicError(message);
+      });
+    };
     window.addEventListener('pointerdown', unlockMusic, { once: true });
     return () => window.removeEventListener('pointerdown', unlockMusic);
   }, [musicEnabled]);
@@ -109,9 +117,23 @@ function AppWorkspace() {
     soundFx.setVolume(volume);
     setSoundVolume(volume);
   };
-  const handleMusicEnabledChange = (enabled: boolean) => {
-    backgroundMusic.setEnabled(enabled);
-    setMusicEnabled(enabled);
+  const handleMusicEnabledChange = async (enabled: boolean) => {
+    setMusicError(null);
+    if (!enabled) {
+      setMusicEnabled(false);
+      await backgroundMusic.setEnabled(false);
+      return;
+    }
+
+    try {
+      await backgroundMusic.setEnabled(true);
+      setMusicEnabled(true);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Không thể khởi chạy nhạc nền.';
+      setMusicError(message);
+      notify(message, 'error');
+    }
   };
   const handleMusicVolumeChange = (volume: number) => {
     backgroundMusic.setVolume(volume);
@@ -580,6 +602,7 @@ function AppWorkspace() {
         onFontChange={setAppFont}
         musicEnabled={musicEnabled}
         onMusicEnabledChange={handleMusicEnabledChange}
+        musicError={musicError}
         musicVolume={musicVolume}
         onMusicVolumeChange={handleMusicVolumeChange}
         soundEnabled={soundEnabled}
