@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   Code2,
   Eye,
   Flame,
@@ -454,6 +455,17 @@ function AppWorkspace() {
             >
               <Menu className="w-5 h-5" />
             </button>
+            {!activeMatch && activeView !== 'overview' && (
+              <button
+                type="button"
+                onClick={() => setActiveView('overview')}
+                aria-label="Quay lại Sảnh"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] px-2.5 py-2 text-xs font-semibold text-[var(--text-secondary)] transition-colors hover:border-[var(--accent-primary)] hover:text-[var(--text-primary)] sm:px-3"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                <span className="hidden sm:inline">Quay lại Sảnh</span>
+              </button>
+            )}
             <h1 className="text-base sm:text-lg font-bold text-[var(--text-primary)] truncate">
               {activeMatch ? 'Bàn Thi Đấu Chiến Thuật 9×9' : VIEW_TITLES[activeView]}
             </h1>

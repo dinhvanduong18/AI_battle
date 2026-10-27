@@ -98,12 +98,12 @@ class BackgroundMusicEngine {
       this.chordTimer = setInterval(() => {
         this.chordIndex = (this.chordIndex + 1) % this.chords.length;
         this.playChord();
-      }, 4000);
+      }, 6400);
     }
     if (!this.melodyTimer) {
       this.melodyTimer = setInterval(() => {
         this.playBeat();
-      }, 250);
+      }, 400);
     }
   }
 
@@ -124,12 +124,12 @@ class BackgroundMusicEngine {
       oscillator.frequency.value = frequency;
       envelope.gain.setValueAtTime(0.0001, now);
       envelope.gain.exponentialRampToValueAtTime(0.12, now + 0.45);
-      envelope.gain.setValueAtTime(0.12, now + 2.2);
-      envelope.gain.exponentialRampToValueAtTime(0.0001, now + 3.1);
+      envelope.gain.setValueAtTime(0.12, now + 4.5);
+      envelope.gain.exponentialRampToValueAtTime(0.0001, now + 5.8);
       oscillator.connect(envelope);
       envelope.connect(this.masterGain);
       oscillator.start(now);
-      oscillator.stop(now + 3.15);
+      oscillator.stop(now + 5.85);
       oscillator.addEventListener('ended', () => {
         oscillator.disconnect();
         envelope.disconnect();
@@ -146,11 +146,11 @@ class BackgroundMusicEngine {
     oscillator.frequency.value = frequency;
     envelope.gain.setValueAtTime(0.0001, now);
     envelope.gain.exponentialRampToValueAtTime(0.22, now + 0.025);
-    envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+    envelope.gain.exponentialRampToValueAtTime(0.0001, now + 0.3);
     oscillator.connect(envelope);
     envelope.connect(this.masterGain);
     oscillator.start(now);
-    oscillator.stop(now + 0.65);
+    oscillator.stop(now + 0.35);
     oscillator.addEventListener('ended', () => {
       oscillator.disconnect();
       envelope.disconnect();
