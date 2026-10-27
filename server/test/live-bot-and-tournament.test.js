@@ -439,6 +439,14 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
         matchId: paired.matchId,
         payload: { type: 'CONSENSUS_ACK', attestation: ack2 },
       });
+      const [receipt1, receipt2] = await Promise.all([
+        paired.seat1.client.waitFor('consensus-ack-received'),
+        paired.seat2.client.waitFor('consensus-ack-received'),
+      ]);
+      assert.equal(receipt1.stepCount, step + 1);
+      assert.equal(receipt1.stateHash, stateHash);
+      assert.equal(receipt2.stepCount, step + 1);
+      assert.equal(receipt2.stateHash, stateHash);
       await Promise.all([
         paired.seat1.client.waitFor(
           (m) => m.type === 'match-relay' && m.payload?.type === 'CONSENSUS_ACK'

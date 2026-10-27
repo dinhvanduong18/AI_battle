@@ -790,6 +790,7 @@ async function applyTournamentSprintResets(tournamentId, fromWeek, toWeek) {
   const steps = Math.max(0, Number(toWeek) - Math.max(1, Number(fromWeek) || 1));
   if (!steps) return;
   const client = await pool.connect();
+  let ackReceipt = null;
   try {
     await client.query('BEGIN');
     const entries = await client.query(
@@ -2286,11 +2287,26 @@ wss.on('connection', ws => {
                 cs.lastRevealAt = now;
                 cs.lastRevealCommit = p.attestation.payload.commit;
               } else if (p.type === 'CONSENSUS_ACK' && p.attestation?.payload) {
-                const ackStep = Number(p.attestation.payload.stepCount);
+                const ackPayload = p.attestation.payload;
+                const ackStep = Number(ackPayload.stepCount);
                 const currentStep = Number(cs.currentStep || 0);
-                if (ackStep === currentStep + 1) {
+                if (
+                  Number.isSafeInteger(ackStep) &&
+                  ackStep >= 1 &&
+                  ackStep <= currentStep + 1 &&
+                  ackPayload.matchId === match.id &&
+                  typeof ackPayload.moveCommit === 'string' &&
+                  typeof ackPayload.stateHash === 'string'
+                ) {
+                  ackReceipt = {
+                    matchId: match.id,
+                    stepCount: ackStep,
+                    stateHash: ackPayload.stateHash,
+                  };
+                }
+                if (ackStep === currentStep + 1 && ackReceipt) {
                   cs.acksForPendingStep = cs.acksForPendingStep || {};
-                  cs.acksForPendingStep[senderSeat] = p.attestation.payload.stateHash;
+                  cs.acksForPendingStep[senderSeat] = ackPayload.stateHash;
                   if (
                     cs.acksForPendingStep[1] &&
                     cs.acksForPendingStep[2] &&
@@ -2317,6 +2333,7 @@ wss.on('connection', ws => {
           } finally {
             client.release();
           }
+          if (ackReceipt) send(ws, 'consensus-ack-received', ackReceipt);
         }
         const peerId = match.player1_id === userId ? match.player2_id : match.player1_id;
         const online = await redis.get(`ottv2:presence:${peerId}`);

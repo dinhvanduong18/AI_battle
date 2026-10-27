@@ -2943,6 +2943,7 @@ export async function startServer(options: ServerStartOptions = {}) {
             // Update server consensus progress tracker for stall/withheld-ACK detection
             const cs = match.consensus_state || createInitialConsensusState(match.match_type);
             const now = Date.now();
+            let ackReceipt: { matchId: string; stepCount: number; stateHash: string } | null = null;
             cs.lastActivityAt = now;
 
             if (p.type === 'BOT_READY' || (p.type === 'CONSENSUS_HELLO' && p.autoStart)) {
@@ -2958,11 +2959,26 @@ export async function startServer(options: ServerStartOptions = {}) {
               cs.lastRevealAt = now;
               cs.lastRevealCommit = p.attestation.payload.commit;
             } else if (p.type === 'CONSENSUS_ACK' && p.attestation?.payload) {
-              const ackStep = Number(p.attestation.payload.stepCount);
+              const ackPayload = p.attestation.payload;
+              const ackStep = Number(ackPayload.stepCount);
               const currentStep = Number(cs.currentStep || 0);
-              if (ackStep === currentStep + 1) {
+              if (
+                Number.isSafeInteger(ackStep) &&
+                ackStep >= 1 &&
+                ackStep <= currentStep + 1 &&
+                ackPayload.matchId === match.id &&
+                typeof ackPayload.moveCommit === 'string' &&
+                typeof ackPayload.stateHash === 'string'
+              ) {
+                ackReceipt = {
+                  matchId: match.id,
+                  stepCount: ackStep,
+                  stateHash: ackPayload.stateHash,
+                };
+              }
+              if (ackStep === currentStep + 1 && ackReceipt) {
                 cs.acksForPendingStep = cs.acksForPendingStep || {};
-                cs.acksForPendingStep[senderSeat] = p.attestation.payload.stateHash;
+                cs.acksForPendingStep[senderSeat] = ackPayload.stateHash;
                 if (
                   cs.acksForPendingStep[1] &&
                   cs.acksForPendingStep[2] &&
@@ -2981,6 +2997,7 @@ export async function startServer(options: ServerStartOptions = {}) {
               cs.finalProofAt[senderSeat] = now;
             }
             match.consensus_state = cs;
+            if (ackReceipt) sendWs(ws, 'consensus-ack-received', ackReceipt);
           }
 
           const spar = sparringSessions.get(match.id);
