@@ -171,11 +171,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   } | null>(null);
   const consensusStepsRef = useRef<ConsensusStepRecord[]>([]);
   const [ackedStepCount, setAckedStepCount] = useState<number>(0);
-  const [serverAckedStepCount, setServerAckedStepCount] = useState<number>(0);
-  const confirmedStepCount =
-    session.source === 'backend'
-      ? Math.min(ackedStepCount, serverAckedStepCount)
-      : ackedStepCount;
   const replayMovesRef = useRef<any[]>([]);
   const myFinalProofRef = useRef<{ proof: any; signature: string } | null>(null);
   const peerFinalProofRef = useRef<{ proof: any; signature: string } | null>(null);
@@ -470,7 +465,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
         resolvedRef.current ||
         OTTGameEngine.isGameOver(current) ||
         current.turn !== session.mySeat ||
-        (session.source === 'backend' && serverAckedStepCount < current.stepCount)
+        ackedStepCount < current.stepCount
       ) {
         return false;
       }
@@ -593,7 +588,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       }
       return true;
     },
-    [sendMessageToPeer, serverAckedStepCount, session.matchId, session.mySeat, signAndBroadcastFinalProof]
+    [ackedStepCount, sendMessageToPeer, session.matchId, session.mySeat, signAndBroadcastFinalProof]
   );
 
   // Setup Consensus Identity, Sequential Peer Message Queue & Server Adjudication Listeners
@@ -946,28 +941,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           })
         : () => {};
 
-    const unsubAckReceived =
-      session.source === 'backend'
-        ? backendClient.on('consensus-ack-received', (pkt) => {
-            if (
-              !active ||
-              pkt?.matchId !== session.matchId ||
-              !Number.isSafeInteger(pkt?.stepCount) ||
-              pkt.stepCount < 1
-            ) {
-              return;
-            }
-            const step = consensusStepsRef.current.find(
-              (entry) => entry.stepCount === pkt.stepCount
-            );
-            const ownAcknowledgement = step?.acknowledgements.find(
-              (entry) => entry.payload?.player === session.mySeat
-            );
-            if (ownAcknowledgement?.payload?.stateHash !== pkt.stateHash) return;
-            setServerAckedStepCount((prev) => Math.max(prev, pkt.stepCount));
-          })
-        : () => {};
-
     const unsubForfeited =
       session.source === 'backend'
         ? backendClient.on('match-forfeited', (pkt) => {
@@ -1030,7 +1003,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (helloInterval) clearInterval(helloInterval);
       unsubPeerData();
       unsubPeerKey();
-      unsubAckReceived();
       unsubForfeited();
       unsubDisputeResult();
       unsubAborted();
@@ -1133,7 +1105,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     return () => clearInterval(timer);
   }, [isBotMatch, isMatchFinished, myBotReady, peerBotReady]);
 
-  // Retry our signed ACK until the server confirms it persisted the step.
+  // Retry our signed ACK until the peer's ACK confirms it received the step.
   useEffect(() => {
     if (
       session.source !== 'backend' ||
@@ -1144,7 +1116,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     }
 
     const timer = setInterval(() => {
-      const stepCount = serverAckedStepCount + 1;
+      const stepCount = ackedStepCount + 1;
       const step = consensusStepsRef.current.find((entry) => entry.stepCount === stepCount);
       const acknowledgement = step?.acknowledgements.find(
         (entry) => entry.payload?.player === session.mySeat
@@ -1156,9 +1128,9 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
     return () => clearInterval(timer);
   }, [
+    ackedStepCount,
     isMatchFinished,
     sendMessageToPeer,
-    serverAckedStepCount,
     session.mySeat,
     session.source,
   ]);
@@ -1178,7 +1150,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (resolvedRef.current) return;
       const curr = stateRef.current;
       const waitingOnSetup = !consensusReady || !peerBotReady;
-      const waitingOnAck = confirmedStepCount < curr.stepCount;
+      const waitingOnAck = ackedStepCount < curr.stepCount;
       const waitingOnFinalProof =
         OTTGameEngine.isGameOver(curr) &&
         Boolean(myFinalProofRef.current) &&
@@ -1212,7 +1184,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
     return () => clearInterval(timer);
   }, [
-    confirmedStepCount,
+    ackedStepCount,
     consensusReady,
     isMatchFinished,
     myBotReady,
@@ -1270,7 +1242,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       !identityRef.current ||
       !botRunnerRef.current?.ready ||
       isMatchFinished ||
-      confirmedStepCount < gameState.stepCount ||
+      ackedStepCount < gameState.stepCount ||
       gameState.turn !== session.mySeat ||
       steppingBotRef.current
     ) {
@@ -1330,7 +1302,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       if (!started) steppingBotRef.current = false;
     };
   }, [
-    confirmedStepCount,
+    ackedStepCount,
     applyTechnicalOutcome,
     consensusReady,
     gameState,
@@ -1738,7 +1710,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
               <span className="font-semibold text-[var(--text-primary)]">
                 {session.mySeat === null
                   ? `Đang tới lượt: ${gameState.turn === 1 ? session.player1Name : session.player2Name}`
-                  : confirmedStepCount < gameState.stepCount
+                  : ackedStepCount < gameState.stepCount
                   ? 'Đang đối chiếu xác nhận mã băm trạng thái (ACK) từ đối thủ…'
                   : isMyTurn
                   ? session.mode === 'bot'
@@ -1748,7 +1720,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                       ? 'Đang chờ Bot đối thủ sẵn sàng…'
                       : !consensusReady
                       ? 'Đang đồng bộ khóa xác minh…'
-                      : confirmedStepCount < gameState.stepCount
+                      : ackedStepCount < gameState.stepCount
                       ? 'Đang xác nhận nước đi trước…'
                       : botThinking
                       ? 'Bot của bạn đang tính toán nước đi…'

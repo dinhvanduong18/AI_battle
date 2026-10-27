@@ -2942,7 +2942,6 @@ export async function startServer(options: ServerStartOptions = {}) {
 
             // Update server consensus progress tracker for stall/withheld-ACK detection
             const cs = match.consensus_state || createInitialConsensusState(match.match_type);
-            let ackReceipt: { matchId: string; stepCount: number; stateHash: string } | null = null;
             const now = Date.now();
             cs.lastActivityAt = now;
 
@@ -2961,18 +2960,6 @@ export async function startServer(options: ServerStartOptions = {}) {
             } else if (p.type === 'CONSENSUS_ACK' && p.attestation?.payload) {
               const ackStep = Number(p.attestation.payload.stepCount);
               const currentStep = Number(cs.currentStep || 0);
-              if (
-                Number.isSafeInteger(ackStep) &&
-                ackStep >= 1 &&
-                ackStep <= currentStep + 1 &&
-                typeof p.attestation.payload.stateHash === 'string'
-              ) {
-                ackReceipt = {
-                  matchId: match.id,
-                  stepCount: ackStep,
-                  stateHash: p.attestation.payload.stateHash,
-                };
-              }
               if (ackStep === currentStep + 1) {
                 cs.acksForPendingStep = cs.acksForPendingStep || {};
                 cs.acksForPendingStep[senderSeat] = p.attestation.payload.stateHash;
@@ -2994,7 +2981,6 @@ export async function startServer(options: ServerStartOptions = {}) {
               cs.finalProofAt[senderSeat] = now;
             }
             match.consensus_state = cs;
-            if (ackReceipt) sendWs(ws, 'consensus-ack-received', ackReceipt);
           }
 
           const spar = sparringSessions.get(match.id);
