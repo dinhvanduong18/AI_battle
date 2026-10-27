@@ -148,6 +148,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const [validMoves, setValidMoves] = useState<ValidMove[]>([]);
   const [logs, setLogs] = useState<MoveLogEntry[]>([]);
   const [leavingMatch, setLeavingMatch] = useState(false);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
 
   // Bot Ready State (for online Bot vs Bot)
   const isBotMatch = session.mode === 'bot' && session.mySeat !== null;
@@ -1352,25 +1353,19 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
   const handleLeaveMatchButton = async () => {
     if (!isMatchFinished && session.mySeat !== null && !resolvedRef.current) {
-      const confirmed = window.confirm(
-        'Trận đấu chưa kết thúc. Nếu rời bàn, bạn sẽ bị xử thua kỹ thuật. Bạn có chắc chắn muốn rời không?'
-      );
-      if (!confirmed) return;
+      setLeaveConfirmOpen(true);
+      return;
+    }
 
+    onExit();
+  };
+
+  const handleConfirmLeaveMatch = async () => {
+    if (leavingMatch) return;
+    setLeavingMatch(true);
+    try {
       if (session.source === 'backend') {
-        setLeavingMatch(true);
-        try {
-          await backendClient.forfeitMatch(session.matchId);
-        } catch (err) {
-          notify(
-            err instanceof Error
-              ? `Không thể rời trận: ${err.message}`
-              : 'Không thể rời trận do lỗi không xác định.',
-            'error'
-          );
-          setLeavingMatch(false);
-          return;
-        }
+        await backendClient.forfeitMatch(session.matchId);
         resolvedRef.current = true;
         notify('Bạn đã rời bàn khi trận đấu chưa kết thúc và bị xử thua kỹ thuật.', 'error');
       } else {
@@ -1381,9 +1376,29 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           reason: 'player-left-match',
         });
       }
+      setLeaveConfirmOpen(false);
+      onExit();
+    } catch (err) {
+      notify(
+        err instanceof Error
+          ? `Không thể rời trận: ${err.message}`
+          : 'Không thể rời trận do lỗi không xác định.',
+        'error'
+      );
+    } finally {
+      setLeavingMatch(false);
     }
-    onExit();
   };
+
+  useEffect(() => {
+    if (!leaveConfirmOpen) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !leavingMatch) setLeaveConfirmOpen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [leaveConfirmOpen, leavingMatch]);
 
   const handleBoardClick = (index: number) => {
     if (
@@ -1827,6 +1842,60 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           </div>
         </div>
       </div>
+      {leaveConfirmOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={() => {
+            if (!leavingMatch) setLeaveConfirmOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="leave-match-title"
+            aria-describedby="leave-match-description"
+            className="w-full max-w-md rounded-2xl border border-amber-400/30 bg-[#161024] p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <div className="rounded-xl bg-amber-500/10 p-2 text-amber-300">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 id="leave-match-title" className="text-base font-bold text-[var(--text-primary)]">
+                  Rời bàn đấu?
+                </h2>
+                <p
+                  id="leave-match-description"
+                  className="mt-2 text-sm leading-relaxed text-[var(--text-secondary)]"
+                >
+                  Trận đấu chưa kết thúc. Nếu rời bàn, bạn sẽ bị xử thua kỹ thuật.
+                </p>
+              </div>
+            </div>
+            <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setLeaveConfirmOpen(false)}
+                disabled={leavingMatch}
+                autoFocus
+                className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-4 py-2 text-sm font-medium text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Quay lại trận đấu
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmLeaveMatch}
+                disabled={leavingMatch}
+                className="inline-flex items-center justify-center gap-2 rounded-xl border border-red-400/30 bg-red-500/15 px-4 py-2 text-sm font-semibold text-red-200 transition-colors hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {leavingMatch && <Loader2 className="h-4 w-4 animate-spin" />}
+                {leavingMatch ? 'Đang xử lý…' : 'Rời bàn và chịu thua'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
