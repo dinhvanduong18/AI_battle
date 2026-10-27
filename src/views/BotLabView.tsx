@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   BookOpen,
   CheckCircle2,
@@ -716,32 +716,63 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             </button>
 
             {showApiGuide && (
-              <div className="px-4 pb-4 pt-1 border-t border-[var(--border-subtle)] space-y-2.5 text-xs text-[var(--text-secondary)]">
-                <p>
-                  Hàm bắt buộc:{' '}
-                  <code className="text-[var(--text-primary)]">
-                    def get_next_move(my_player_id, game_state):
-                  </code>
-                </p>
-                <ul className="space-y-1.5 list-disc pl-4">
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['validMoves']</code>: Danh sách mọi nước đi hợp lệ trong lượt hiện tại. Mỗi phần tử gồm{' '}
-                    <code>fromRow, fromCol, toRow, toCol, from, to, isAttack, pieceType, targetType</code>.
-                  </li>
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['myPieces']</code> &{' '}
-                    <code className="text-[var(--text-primary)]">game_state['opponentPieces']</code>: Danh sách tọa độ quân còn trên bàn (<code>row, col, index, type</code> với <code>type</code> là <code>'rock' | 'paper' | 'scissors'</code>).
-                  </li>
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['opponentPieceCounts']</code>: Số lượng từng hệ quân đối phương còn lại (<code>{'{ rock, paper, scissors, total }'}</code>). Đưa bất kỳ hệ nào về <code>0</code> sẽ thắng ngay!
-                  </li>
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['blockedCells']</code>: Mảng các chỉ số ô bị khóa trong giải đấu theo Sprint (ví dụ <code>[30, 31, 32, ...]</code>).
-                  </li>
-                  <li>
-                    Giá trị trả về hợp lệ: dictionary <code>{"{'fromRow': r1, 'fromCol': c1, 'toRow': r2, 'toCol': c2}"}</code> hoặc <code>{"{'from': idx1, 'to': idx2}"}</code>.
-                  </li>
-                </ul>
+              <div className="px-4 pb-4 pt-3 border-t border-[var(--border-subtle)] space-y-4 text-xs leading-relaxed text-[var(--text-secondary)]">
+                <p>Hàm được gọi mỗi lượt và nhận mã người chơi của bạn cùng trạng thái bàn cờ hiện tại. Hãy trả về một nước đi hợp lệ.</p>
+                <pre className="overflow-x-auto rounded-lg bg-[var(--bg-hover)]/50 p-3 text-[var(--text-primary)]"><code>{`def get_next_move(my_player_id, game_state):
+    moves = game_state.get('validMoves', [])
+    return moves[0] if moves else None`}</code></pre>
+                <p><code className="text-[var(--text-primary)]">game_state</code> là dictionary Python. Lấy dữ liệu bằng tên khóa, ví dụ <code>game_state['validMoves']</code>. Dùng <code>game_state.get('validMoves', [])</code> để có danh sách rỗng nếu khóa không tồn tại.</p>
+                <div>
+                  <h4 className="mb-1 font-semibold text-[var(--text-primary)]">Bàn cờ và lượt chơi</h4>
+                  <ul className="list-disc space-y-1 pl-4">
+                    <li><code>board</code>: bàn cờ 9 × 9; ô hàng <code>r</code>, cột <code>c</code> được đọc bằng <code>board[r][c]</code>. Hàng và cột đánh số từ 0 đến 8.</li>
+                    <li><code>flatBoard</code>: cùng bàn cờ trải thành danh sách 81 ô. Chỉ số ô bằng <code>row * 9 + col</code>; hàng 2, cột 3 là chỉ số 21.</li>
+                    <li><code>boardRows</code>, <code>boardCols</code>: số hàng và cột (đều là 9). <code>turn</code>: mã người chơi đang đi. <code>myPlayerId</code> và <code>opponentPlayerId</code>: mã của bạn và đối thủ; <code>my_player_id</code> cũng là mã của bạn.</li>
+                    <li><code>stepCount</code>: số lượt đã đi; <code>noCapturePlies</code>: số lượt liên tiếp chưa có quân bị ăn.</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="mb-1 font-semibold text-[var(--text-primary)]">Danh sách nước đi: <code>validMoves</code></h4>
+                  <p>Mỗi phần tử là một dictionary mô tả một nước hợp lệ trong lượt này.</p>
+                  <ul className="list-disc space-y-1 pl-4">
+                    <li><code>fromRow</code>, <code>fromCol</code>: hàng/cột xuất phát; <code>toRow</code>, <code>toCol</code>: hàng/cột đích. Các giá trị nằm trong khoảng 0–8.</li>
+                    <li><code>from</code>, <code>to</code>: chỉ số ô xuất phát/đích từ 0 đến 80, tính bằng <code>row * 9 + col</code>.</li>
+                    <li><code>fromAlg</code>, <code>toAlg</code>: tọa độ dạng chữ dễ đọc, ví dụ <code>a1</code>.</li>
+                    <li><code>isAttack</code> và <code>isCapture</code>: <code>True</code> nếu tấn công/ăn quân, ngược lại <code>False</code>.</li>
+                    <li><code>pieceType</code>: hệ quân đang đi; <code>targetType</code>: hệ quân ở ô đích hoặc <code>None</code> nếu ô trống. Tên hệ: <code>'rock'</code>, <code>'paper'</code>, <code>'scissors'</code>.</li>
+                  </ul>
+                  <p className="mt-1">Ví dụ <code>fromRow=2, fromCol=3, toRow=2, toCol=4</code> nghĩa là quân đi từ ô hàng 2 cột 3 sang hàng 2 cột 4. Chọn một phần tử sẵn có trong <code>validMoves</code> là cách đơn giản để bảo đảm nước đi hợp lệ.</p>
+                </div>
+                <div>
+                  <h4 className="mb-1 font-semibold text-[var(--text-primary)]">Quân trên bàn và số lượng</h4>
+                  <ul className="list-disc space-y-1 pl-4">
+                    <li><code>myPieces</code>, <code>opponentPieces</code>: danh sách quân còn trên bàn của hai bên. Mỗi quân có <code>row</code>, <code>col</code>, <code>index</code>, <code>algebraic</code>, <code>player</code>, <code>type</code>, <code>raw</code>. <code>type</code> là tên hệ; <code>index</code> là chỉ số ô 0–80.</li>
+                    <li><code>myPieceCounts</code>, <code>opponentPieceCounts</code>: số quân từng hệ còn lại, gồm <code>rock</code>, <code>paper</code>, <code>scissors</code>, <code>total</code>. Nếu một hệ của đối thủ còn 0 quân, bạn đạt điều kiện thắng theo luật.</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="mb-1 font-semibold text-[var(--text-primary)]">Ô đặc biệt và luật</h4>
+                  <ul className="list-disc space-y-1 pl-4">
+                    <li><code>specialCells</code>: chỉ số các ô <code>a1</code>, <code>i9</code> và các khóa <code>myWinIndex</code>/<code>opponentWinIndex</code> cho biết ô thắng của mỗi bên.</li>
+                    <li><code>blockedCells</code>: danh sách chỉ số ô bị khóa theo luật giải đấu, ví dụ <code>[30, 31, 32]</code>; có thể rỗng.</li>
+                    <li><code>rules</code>: thông tin bộ luật đang áp dụng; có thể là <code>None</code>.</li>
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="mb-1 font-semibold text-[var(--text-primary)]">Giá trị trả về và ví dụ</h4>
+                  <p>Có thể trả dictionary bằng tọa độ hàng/cột:</p>
+                  <pre className="my-1 overflow-x-auto rounded-lg bg-[var(--bg-hover)]/50 p-3 text-[var(--text-primary)]"><code>{`return {'fromRow': 2, 'fromCol': 3, 'toRow': 2, 'toCol': 4}`}</code></pre>
+                  <p>Hoặc bằng chỉ số ô:</p>
+                  <pre className="my-1 overflow-x-auto rounded-lg bg-[var(--bg-hover)]/50 p-3 text-[var(--text-primary)]"><code>{`return {'from': 21, 'to': 22}`}</code></pre>
+                  <p>Ví dụ ưu tiên nước ăn quân, nếu không có thì đi nước hợp lệ đầu tiên:</p>
+                  <pre className="mt-1 overflow-x-auto rounded-lg bg-[var(--bg-hover)]/50 p-3 text-[var(--text-primary)]"><code>{`def get_next_move(my_player_id, game_state):
+    moves = game_state.get('validMoves', [])
+    if not moves:
+        return None
+    attacks = [move for move in moves if move['isAttack']]
+    return attacks[0] if attacks else moves[0]`}</code></pre>
+                  <p>Luôn chọn từ <code>validMoves</code> để tránh trả về nước không hợp lệ.</p>
+                </div>
               </div>
             )}
           </div>
@@ -750,3 +781,5 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
     </div>
   );
 };
+
+
