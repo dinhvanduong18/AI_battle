@@ -314,7 +314,7 @@ export const MatchmakingView: React.FC<MatchmakingViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
-                {filteredMatches.map((m) => {
+                {filteredMatches.slice(0, 10).map((m) => {
                   const completed = m.status === 'completed';
                   const isDraw = completed && !m.winner_id;
                   const won = completed && m.winner_id === user.id;
