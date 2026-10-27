@@ -147,6 +147,7 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const [selectedCell, setSelectedCell] = useState<number | null>(null);
   const [validMoves, setValidMoves] = useState<ValidMove[]>([]);
   const [logs, setLogs] = useState<MoveLogEntry[]>([]);
+  const [leavingMatch, setLeavingMatch] = useState(false);
 
   // Bot Ready State (for online Bot vs Bot)
   const isBotMatch = session.mode === 'bot' && session.mySeat !== null;
@@ -1351,12 +1352,29 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
 
   const handleLeaveMatchButton = async () => {
     if (!isMatchFinished && session.mySeat !== null && !resolvedRef.current) {
-      resolvedRef.current = true;
+      const confirmed = window.confirm(
+        'Trận đấu chưa kết thúc. Nếu rời bàn, bạn sẽ bị xử thua kỹ thuật. Bạn có chắc chắn muốn rời không?'
+      );
+      if (!confirmed) return;
+
       if (session.source === 'backend') {
-        backendClient.leaveMatchWs(session.matchId);
-        await backendClient.forfeitMatch(session.matchId).catch(() => {});
+        setLeavingMatch(true);
+        try {
+          await backendClient.forfeitMatch(session.matchId);
+        } catch (err) {
+          notify(
+            err instanceof Error
+              ? `Không thể rời trận: ${err.message}`
+              : 'Không thể rời trận do lỗi không xác định.',
+            'error'
+          );
+          setLeavingMatch(false);
+          return;
+        }
+        resolvedRef.current = true;
         notify('Bạn đã rời bàn khi trận đấu chưa kết thúc và bị xử thua kỹ thuật.', 'error');
       } else {
+        resolvedRef.current = true;
         sendMessageToPeer({
           type: 'PLAYER_FORFEIT',
           seat: session.mySeat,
@@ -1442,10 +1460,15 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
           <button
             type="button"
             onClick={handleLeaveMatchButton}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            disabled={leavingMatch}
+            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
           >
             <ArrowLeft className="w-4 h-4" />
-            {isMatchFinished || session.mySeat === null ? 'Rời bàn đấu' : 'Rời bàn (Chịu thua)'}
+            {leavingMatch
+              ? 'Đang rời bàn…'
+              : isMatchFinished || session.mySeat === null
+                ? 'Rời bàn đấu'
+                : 'Rời bàn (Chịu thua)'}
           </button>
           <div>
             <div className="flex items-center gap-2 text-sm font-bold text-[var(--text-primary)]">
