@@ -5,6 +5,7 @@ import {
   Eye,
   Film,
   LogIn,
+  Medal,
   Play,
   Swords,
 } from 'lucide-react';
@@ -228,6 +229,14 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
 }) => {
   const openTournaments = tournaments.filter((t) => t.status !== 'completed');
   const visibleMatches = recentMatches.filter((match) => !match.is_sparring);
+  const elo = user?.elo ?? 1200;
+  const eloRank = elo >= 1600 ? 'Vàng' : elo >= 1350 ? 'Bạc' : 'Đồng';
+  const eloRankIconClass =
+    eloRank === 'Vàng'
+      ? 'text-yellow-300 fill-yellow-300/20'
+      : eloRank === 'Bạc'
+        ? 'text-slate-200 fill-slate-200/20'
+        : 'text-orange-400 fill-orange-400/20';
 
   return (
     <div className="space-y-8">
@@ -285,8 +294,18 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
       <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
           <div className="text-xs text-[var(--text-secondary)]">Hệ số Elo hiện tại</div>
-          <div className="mt-2 text-2xl sm:text-3xl font-bold font-display text-[var(--text-primary)] tabular-nums">
-            {user ? user.elo : '1200'}
+          <div className="mt-2 flex items-center gap-2 text-2xl sm:text-3xl font-bold font-display text-[var(--text-primary)] tabular-nums">
+            <span>{elo}</span>
+            <span
+              role="img"
+              aria-label={`Hạng Elo ${eloRank}`}
+              title={`Hạng ${eloRank}`}
+            >
+              <Medal
+                aria-hidden="true"
+                className={`h-5 w-5 sm:h-6 sm:w-6 ${eloRankIconClass}`}
+              />
+            </span>
           </div>
           <div className="mt-1 text-xs text-[var(--text-muted)]">
             {user ? `Kỳ thủ ${user.displayName}` : 'Mặc định khi tạo tài khoản'}
@@ -463,7 +482,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
-                    {visibleMatches.slice(0, 10).map((m) => {
+                    {visibleMatches.slice(0, 3).map((m) => {
                       const isCompleted = m.status === 'completed';
                       const isDraw = isCompleted && !m.winner_id;
                       const won = isCompleted && m.winner_id === user.id;
