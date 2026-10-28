@@ -120,6 +120,7 @@ export const GroupKnockoutTournamentDetail: React.FC<GroupKnockoutTournamentDeta
     ? Math.ceil(Math.log2(openingMatchCount)) + 1
     : 0;
   const bracketRows = Math.max(1, openingMatchCount);
+  const bracketGridRows = Math.max(2, bracketRows * 2 - 2);
   const knockoutRoundTitles = useMemo(() => {
     if (openingMatchCount >= 16) {
       return ['Vòng 1/16', 'Vòng 1/8', 'Tứ Kết', 'Bán Kết', 'Chung kết'];
@@ -737,7 +738,7 @@ export const GroupKnockoutTournamentDetail: React.FC<GroupKnockoutTournamentDeta
                     className="relative mx-auto grid w-full max-w-[1120px] items-stretch gap-x-1.5 gap-y-1.5 sm:gap-x-2"
                     style={{
                       gridTemplateColumns: `repeat(${bracketRoundCount - 1}, minmax(0, 1fr)) minmax(0, 1.15fr) repeat(${bracketRoundCount - 1}, minmax(0, 1fr))`,
-                      gridTemplateRows: `repeat(${bracketRows * 2}, minmax(1.1rem, auto))`,
+                      gridTemplateRows: `repeat(${bracketGridRows}, minmax(1.1rem, auto))`,
                     }}
                   >
                     {Array.from({ length: bracketRoundCount - 1 }, (_, roundIndex) => {
@@ -768,7 +769,7 @@ export const GroupKnockoutTournamentDetail: React.FC<GroupKnockoutTournamentDeta
                           const sideMatchIndex = side === 'left'
                             ? matchIndex
                             : matchIndex - leftMatchCount;
-                          const rowStart = sideMatchIndex * rowStep + 1;
+                          const rowStart = sideMatchIndex * rowStep + rowStep / 4;
                           const connectorClass = side === 'left'
                             ? "after:absolute after:top-1/2 after:-right-3 after:h-px after:w-3 after:bg-[var(--border-subtle)] after:content-['']"
                             : "before:absolute before:top-1/2 before:-left-3 before:h-px before:w-3 before:bg-[var(--border-subtle)] before:content-['']";
@@ -824,7 +825,7 @@ export const GroupKnockoutTournamentDetail: React.FC<GroupKnockoutTournamentDeta
                       className="flex flex-col justify-center self-center rounded-xl border border-[var(--border-accent)] bg-gradient-to-b from-orange-500/10 via-[var(--bg-elevated)] to-purple-500/10 px-1.5 py-3 text-center shadow-xl shadow-orange-950/20 sm:px-3 sm:py-4"
                       style={{
                         gridColumn: bracketRoundCount,
-                        gridRow: `1 / span ${bracketRows * 2}`,
+                        gridRow: `1 / span ${bracketGridRows}`,
                       }}
                     >
                       <Trophy className="mx-auto mb-2 h-6 w-6 text-[var(--accent-primary)]" />

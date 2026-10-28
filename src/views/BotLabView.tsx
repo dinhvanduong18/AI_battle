@@ -1,23 +1,23 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   BookOpen,
   CheckCircle2,
-  ChevronDown,
-  ChevronUp,
   CloudUpload,
+  Grid3X3,
   Loader2,
   Pause,
   Play,
   RotateCcw,
+  Settings2,
   Shuffle,
   SkipForward,
   Terminal,
+  X,
 } from 'lucide-react';
 import {
   OTTGameEngine,
   PIECE_VIET_NAMES,
-  SPRINT_RULE_PRESETS,
-  buildRulesFromPreset,
   type GameState,
   type ValidMove,
 } from '../core/ottEngine';
@@ -68,11 +68,14 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
   // Match Sandbox Configuration
   const [p1Controller, setP1Controller] = useState<SandboxControllerType>('editor');
   const [p2Controller, setP2Controller] = useState<SandboxControllerType>('phantom_hunter');
-  const [presetKey, setPresetKey] = useState<string>('standard');
+  const [blockedCells, setBlockedCells] = useState<number[]>([]);
   const [pieceCount, setPieceCount] = useState<number>(9);
   const [seed, setSeed] = useState<number>(20261031);
   const [delayMs, setDelayMs] = useState<number>(300);
   const [tleMs, setTleMs] = useState<number>(500);
+  const [workspaceLayer, setWorkspaceLayer] = useState<'board' | 'docs' | null>(null);
+  const [showTournamentRules, setShowTournamentRules] = useState(false);
+  const [boardDraft, setBoardDraft] = useState<number[]>([]);
 
   // Game State
   const [gameState, setGameState] = useState<GameState>(() =>
@@ -91,7 +94,6 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
   const [checkingSyntax, setCheckingSyntax] = useState(false);
   const [savingServer, setSavingServer] = useState(false);
   const [syntaxStatus, setSyntaxStatus] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [showApiGuide, setShowApiGuide] = useState(false);
 
   const runner1Ref = useRef<BotRunner | null>(null);
   const runner2Ref = useRef<BotRunner | null>(null);
@@ -109,10 +111,19 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
   }, [destroyRunners]);
 
   const resetSandbox = useCallback(
-    (nextSeed = seed, nextCount = pieceCount, nextPreset = presetKey) => {
+    (nextSeed = seed, nextCount = pieceCount, nextBlockedCells = blockedCells) => {
       setRunning(false);
       destroyRunners();
-      const rules = buildRulesFromPreset(nextPreset, 1);
+      const rules = nextBlockedCells.length
+        ? {
+            id: 'sandbox-custom',
+            title: 'Bàn tùy chỉnh',
+            week: 1,
+            rows: 9,
+            cols: 9,
+            blockedCells: [...nextBlockedCells],
+          }
+        : null;
       const fresh = OTTGameEngine.createGame(nextSeed, nextCount, rules);
       stateRef.current = fresh;
       setGameState(fresh);
@@ -120,7 +131,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
       setValidMoves([]);
       setLogs([]);
     },
-    [destroyRunners, pieceCount, presetKey, seed]
+    [blockedCells, destroyRunners, pieceCount, seed]
   );
 
   const resolveControllerCode = useCallback(
@@ -331,9 +342,143 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Split 50/50 Lab Workspace */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
         {/* LEFT COLUMN: 9x9 Sandbox Simulator */}
-        <div className="xl:col-span-6 p-5 sm:p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-5">
+        <div className="xl:col-span-6 p-5 sm:p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+          {workspaceLayer ? (
+            <div className="flex h-full flex-col">
+              <div className="mb-4 flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setWorkspaceLayer(null)}
+                    aria-label="Quay lại bàn thử nghiệm"
+                    className="rounded-lg p-2 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-white"
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </button>
+                  <h2 className="text-base font-bold text-[var(--text-primary)]">
+                    {workspaceLayer === 'board' ? 'Điều chỉnh bàn đấu' : 'Tài liệu Bot Python'}
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setWorkspaceLayer(null)}
+                  aria-label="Đóng lớp"
+                  className="rounded-lg p-2 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {workspaceLayer === 'board' ? (
+                <div className="flex min-h-0 flex-1 flex-col">
+                  <p className="mb-3 text-xs text-[var(--text-secondary)]">
+                    Chọn ô để thêm hoặc bỏ chướng ngại. Mỗi thay đổi được áp dụng đối xứng qua đường chéo chính; hai ô đích không thể bị chặn.
+                  </p>
+                  <div className="mx-auto grid aspect-square w-full max-w-[500px] grid-cols-9 overflow-hidden rounded-xl border border-[var(--border-subtle)]">
+                    {Array.from({ length: 81 }, (_, index) => {
+                      const row = Math.floor(index / 9);
+                      const col = index % 9;
+                      const isTarget = index === 8 || index === 72;
+                      const isBlocked = boardDraft.includes(index);
+                      const oppositeIndex = col * 9 + row;
+                      return (
+                        <button
+                          key={index}
+                          type="button"
+                          disabled={isTarget}
+                          aria-label={`${String.fromCharCode(97 + col)}${9 - row}${isBlocked ? ', chướng ngại' : ''}`}
+                          aria-pressed={isBlocked}
+                          title={isTarget ? 'Ô đích không thể bị chặn' : `Đổi cả ô ${String.fromCharCode(97 + col)}${9 - row} và ô đối xứng`}
+                          onClick={() =>
+                            setBoardDraft((current) => {
+                              const pair = new Set([index, oppositeIndex]);
+                              return isBlocked
+                                ? current.filter((cell) => !pair.has(cell))
+                                : [...current.filter((cell) => !pair.has(cell)), ...pair];
+                            })
+                          }
+                          className={`aspect-square min-w-0 border-r border-b border-black/30 text-[10px] transition-colors ${
+                            isTarget
+                              ? 'cursor-not-allowed bg-orange-700/70 text-white'
+                              : isBlocked
+                              ? 'bg-slate-500 text-white'
+                              : (row + col) % 2
+                              ? 'bg-[#21172f] text-transparent hover:bg-orange-500/60'
+                              : 'bg-[#30213f] text-transparent hover:bg-orange-500/60'
+                          }`}
+                        >
+                          {isTarget ? '◆' : isBlocked ? '■' : '·'}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="text-[var(--text-muted)]">{boardDraft.length} ô chướng ngại</span>
+                    <button
+                      type="button"
+                      onClick={() => setBoardDraft([])}
+                      disabled={!boardDraft.length}
+                      className="rounded-lg border border-[var(--border-subtle)] px-3 py-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] disabled:opacity-40"
+                    >
+                      Xóa chướng ngại
+                    </button>
+                  </div>
+                  <div className="mt-auto flex justify-end gap-2 border-t border-[var(--border-subtle)] pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setWorkspaceLayer(null)}
+                      className="rounded-xl px-4 py-2 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+                    >
+                      Hủy
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextBlockedCells = [...boardDraft];
+                        setBlockedCells(nextBlockedCells);
+                        resetSandbox(seed, pieceCount, nextBlockedCells);
+                        setWorkspaceLayer(null);
+                      }}
+                      className="rounded-xl bg-[var(--accent-primary)] px-4 py-2 text-xs font-semibold text-white hover:bg-[var(--accent-primary-hover)]"
+                    >
+                      Áp dụng bàn đấu
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1 text-xs text-[var(--text-secondary)]">
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                    <p>
+                      Hàm bắt buộc:{' '}
+                      <code className="text-[var(--text-primary)]">
+                        def get_next_move(my_player_id, game_state):
+                      </code>
+                    </p>
+                    <ul className="mt-2 list-disc space-y-1.5 pl-4">
+                      <li>
+                        <code className="text-[var(--text-primary)]">game_state['validMoves']</code>: các nước hợp lệ, gồm <code>fromRow, fromCol, toRow, toCol, from, to, isAttack, pieceType, targetType</code>.
+                      </li>
+                      <li>
+                        <code className="text-[var(--text-primary)]">game_state['myPieces']</code> và <code className="text-[var(--text-primary)]">game_state['opponentPieces']</code>: tọa độ quân còn trên bàn, gồm <code>row, col, index, type</code>.
+                      </li>
+                      <li>
+                        <code className="text-[var(--text-primary)]">game_state['opponentPieceCounts']</code>: số quân từng hệ của đối thủ. Loại bỏ hết một hệ quân sẽ thắng ngay.
+                      </li>
+                      <li>
+                        <code className="text-[var(--text-primary)]">game_state['blockedCells']</code>: chỉ số các ô chướng ngại trên bàn.
+                      </li>
+                      <li>
+                        Trả về dictionary theo tọa độ <code>{'{"fromRow": r1, "fromCol": c1, "toRow": r2, "toCol": c2}'}</code> hoặc chỉ số ô <code>{'{"from": idx1, "to": idx2}'}</code>.
+                      </li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+          <div className="space-y-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold text-[var(--text-primary)]">
@@ -345,6 +490,14 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             </div>
 
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowTournamentRules(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3 py-2 text-xs font-medium text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors"
+              >
+                <BookOpen className="h-3.5 w-3.5 text-[var(--accent-primary)]" />
+                Thể thức
+              </button>
               <button
                 type="button"
                 disabled={loadingBots || gameFinished}
@@ -461,22 +614,18 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
           {/* Sandbox Parameters Row */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
             <div>
-              <label className="block text-[11px] text-[var(--text-muted)] mb-1">Địa hình Sprint</label>
-              <select
-                value={presetKey}
-                onChange={(e) => {
-                  const nextPreset = e.target.value;
-                  setPresetKey(nextPreset);
-                  resetSandbox(seed, pieceCount, nextPreset);
+              <span className="mb-1 block text-[11px] text-[var(--text-muted)]">Bàn đấu</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setBoardDraft([...blockedCells]);
+                  setWorkspaceLayer('board');
                 }}
-                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
+                className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-2.5 py-1.5 text-[var(--text-primary)] hover:border-[var(--accent-primary)]"
               >
-                {Object.values(SPRINT_RULE_PRESETS).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.title}
-                  </option>
-                ))}
-              </select>
+                <Settings2 className="h-3.5 w-3.5" />
+                Chướng ngại ({blockedCells.length})
+              </button>
             </div>
 
             <div>
@@ -486,7 +635,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
                 onChange={(e) => {
                   const nextCount = Number(e.target.value);
                   setPieceCount(nextCount);
-                  resetSandbox(seed, nextCount, presetKey);
+                  resetSandbox(seed, nextCount, blockedCells);
                 }}
                 className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] font-mono"
               >
@@ -543,7 +692,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
               onClick={() => {
                 const randomSeed = Math.floor(100000 + Math.random() * 8999999);
                 setSeed(randomSeed);
-                resetSandbox(randomSeed, pieceCount, presetKey);
+                resetSandbox(randomSeed, pieceCount, blockedCells);
               }}
               className="inline-flex items-center gap-1 text-[var(--accent-primary)] hover:underline cursor-pointer whitespace-nowrap"
             >
@@ -563,36 +712,8 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             themeMode={themeMode}
           />
 
-          {/* Compact Move & TLE Log */}
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
-            <div className="flex items-center justify-between text-xs text-[var(--text-secondary)] mb-2">
-              <span className="font-semibold text-[var(--text-primary)]">Nhật ký thực thi & thời gian phản hồi</span>
-              <span className="font-mono tabular-nums">{logs.length} nước</span>
-            </div>
-            <div className="h-28 overflow-y-auto space-y-1 pr-1 font-mono text-xs tabular-nums">
-              {logs.length === 0 ? (
-                <div className="text-[var(--text-muted)] py-6 text-center">
-                  Bấm "Chạy thử" hoặc "1 Bước" để kiểm tra tốc độ phản hồi của thuật toán.
-                </div>
-              ) : (
-                logs.slice(-30).map((item, i) => (
-                  <div
-                    key={`${item.step}-${i}`}
-                    className={`flex items-center justify-between px-2 py-1 rounded ${
-                      item.isError ? 'bg-red-500/15 text-red-300' : 'text-[var(--text-secondary)]'
-                    }`}
-                  >
-                    <span>
-                      #{String(item.step).padStart(2, '0')} {item.text}
-                    </span>
-                    {item.elapsedMs !== undefined && (
-                      <span className="text-[var(--text-muted)]">{item.elapsedMs}ms</span>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
           </div>
+          )}
         </div>
 
         {/* RIGHT COLUMN: Python 3 Code Editor & Bot API Docs */}
@@ -701,52 +822,104 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             </button>
           </div>
 
-          {/* Collapsible Bot API Reference */}
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] overflow-hidden">
-            <button
-              type="button"
-              onClick={() => setShowApiGuide((s) => !s)}
-              className="w-full flex items-center justify-between px-4 py-3 text-xs font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-hover)]/40 transition-colors cursor-pointer"
-            >
-              <span className="inline-flex items-center gap-2">
-                <BookOpen className="w-4 h-4 text-[var(--accent-primary)]" />
-                Tài liệu cấu trúc tham số game_state cho Python Bot
-              </span>
-              {showApiGuide ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-            </button>
+          <button
+            type="button"
+            onClick={() => setWorkspaceLayer('docs')}
+            className="flex w-full items-center justify-between gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-4 py-3 text-left text-xs font-semibold text-[var(--text-primary)] hover:border-[var(--accent-primary)] transition-colors"
+          >
+            <span className="inline-flex items-center gap-2">
+              <BookOpen className="h-4 w-4 text-[var(--accent-primary)]" />
+              Tài liệu cấu trúc game_state cho Python Bot
+            </span>
+            <span className="text-[var(--accent-primary)]">Mở tài liệu →</span>
+          </button>
 
-            {showApiGuide && (
-              <div className="px-4 pb-4 pt-1 border-t border-[var(--border-subtle)] space-y-2.5 text-xs text-[var(--text-secondary)]">
-                <p>
-                  Hàm bắt buộc:{' '}
-                  <code className="text-[var(--text-primary)]">
-                    def get_next_move(my_player_id, game_state):
-                  </code>
-                </p>
-                <ul className="space-y-1.5 list-disc pl-4">
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['validMoves']</code>: Danh sách mọi nước đi hợp lệ trong lượt hiện tại. Mỗi phần tử gồm{' '}
-                    <code>fromRow, fromCol, toRow, toCol, from, to, isAttack, pieceType, targetType</code>.
-                  </li>
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['myPieces']</code> &{' '}
-                    <code className="text-[var(--text-primary)]">game_state['opponentPieces']</code>: Danh sách tọa độ quân còn trên bàn (<code>row, col, index, type</code> với <code>type</code> là <code>'rock' | 'paper' | 'scissors'</code>).
-                  </li>
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['opponentPieceCounts']</code>: Số lượng từng hệ quân đối phương còn lại (<code>{'{ rock, paper, scissors, total }'}</code>). Đưa bất kỳ hệ nào về <code>0</code> sẽ thắng ngay!
-                  </li>
-                  <li>
-                    <code className="text-[var(--text-primary)]">game_state['blockedCells']</code>: Mảng các chỉ số ô bị khóa trong giải đấu theo Sprint (ví dụ <code>[30, 31, 32, ...]</code>).
-                  </li>
-                  <li>
-                    Giá trị trả về hợp lệ: dictionary <code>{"{'fromRow': r1, 'fromCol': c1, 'toRow': r2, 'toCol': c2}"}</code> hoặc <code>{"{'from': idx1, 'to': idx2}"}</code>.
-                  </li>
-                </ul>
-              </div>
-            )}
+          {/* Compact Move & TLE Log */}
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+            <div className="mb-2 flex items-center justify-between text-xs text-[var(--text-secondary)]">
+              <span className="font-semibold text-[var(--text-primary)]">Nhật ký thực thi & thời gian phản hồi</span>
+              <span className="font-mono tabular-nums">{logs.length} nước</span>
+            </div>
+            <div className="h-28 space-y-1 overflow-y-auto pr-1 font-mono text-xs tabular-nums">
+              {logs.length === 0 ? (
+                <div className="py-6 text-center text-[var(--text-muted)]">
+                  Bấm "Chạy thử" hoặc "1 Bước" để kiểm tra tốc độ phản hồi của thuật toán.
+                </div>
+              ) : (
+                logs.slice(-30).map((item, i) => (
+                  <div
+                    key={`${item.step}-${i}`}
+                    className={`flex items-center justify-between rounded px-2 py-1 ${
+                      item.isError ? 'bg-red-500/15 text-red-300' : 'text-[var(--text-secondary)]'
+                    }`}
+                  >
+                    <span>
+                      #{String(item.step).padStart(2, '0')} {item.text}
+                    </span>
+                    {item.elapsedMs !== undefined && (
+                      <span className="text-[var(--text-muted)]">{item.elapsedMs}ms</span>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       </div>
+      {showTournamentRules && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowTournamentRules(false);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sandbox-rules-heading"
+            className="w-full max-w-xl max-h-[85vh] overflow-y-auto rounded-2xl border border-[var(--border-accent)] bg-[#150e23] p-5 shadow-2xl sm:p-6"
+          >
+            <div className="mb-4 flex items-center justify-between gap-3 border-b border-[var(--border-subtle)] pb-3">
+              <h2 id="sandbox-rules-heading" className="text-lg font-bold text-[var(--text-primary)]">
+                Thể thức thi đấu
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowTournamentRules(false)}
+                aria-label="Đóng thể thức thi đấu"
+                className="rounded-lg p-2 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <p className="mb-3 text-xs text-[var(--text-secondary)]">
+              Áp dụng cho ván thử và Bot khi tham gia thi đấu.
+            </p>
+            <div className="grid gap-3 text-xs text-[var(--text-secondary)] sm:grid-cols-2">
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                <h3 className="mb-1 font-semibold text-[var(--p1-main)]">Di chuyển</h3>
+                <p>Mỗi lượt đi một ô theo chiều ngang hoặc dọc. Không thể đi vào ô có quân cùng phe hay ô chướng ngại.</p>
+              </div>
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                <h3 className="mb-1 font-semibold text-[var(--p2-main)]">Khắc chế</h3>
+                <p>Đấm thắng Kéo, Kéo thắng Lá, Lá thắng Đấm. Quân cùng hệ không thể ăn nhau.</p>
+              </div>
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                <h3 className="mb-1 font-semibold text-[var(--text-primary)]">Điều kiện thắng</h3>
+                <p>Loại hết một hệ quân của đối thủ hoặc đưa quân tới ô đích của đối phương.</p>
+              </div>
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                <h3 className="mb-1 font-semibold text-[var(--text-primary)]">Luật giới hạn nước đi</h3>
+                <p>Nếu giải đặt giới hạn 25 lượt đi, kết quả được phân định theo luật giải; hai bên bằng điểm thì hòa.</p>
+              </div>
+              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3 sm:col-span-2">
+                <h3 className="mb-1 font-semibold text-[var(--text-primary)]">Bàn đấu hiện tại</h3>
+                <p>{blockedCells.length ? `${blockedCells.length} ô chướng ngại được áp dụng đối xứng trên bàn 9×9.` : 'Bàn 9×9 tiêu chuẩn, chưa có chướng ngại.'} Hai ô đích luôn được giữ thông thoáng.</p>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 };
