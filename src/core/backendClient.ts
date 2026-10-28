@@ -116,10 +116,49 @@ export function getMatchEloLabel(match: MatchSummary, userId: string): string | 
   return `${signedDelta} Elo${ratingChange}`;
 }
 
+export interface KnockoutGameSummary {
+  game_index: number;
+  match_id?: string;
+  winner_id?: string | null;
+  status: 'pending' | 'active' | 'completed' | 'abandoned';
+  completed_at?: string;
+}
+
+export interface KnockoutMatchupSummary {
+  id: string;
+  round: number;
+  match_index: number;
+  round_name: string;
+  player1_id: string | null;
+  player2_id: string | null;
+  player1_name?: string;
+  player1_avatar?: string;
+  player2_name?: string;
+  player2_avatar?: string;
+  score1: number;
+  score2: number;
+  winner_id: string | null;
+  status: 'pending' | 'ready' | 'in_progress' | 'waiting_break' | 'completed';
+  current_game: number;
+  max_games: number;
+  break_until: string | null;
+  rule_id: string;
+  games: KnockoutGameSummary[];
+}
+
+export interface KnockoutDataSummary {
+  total_rounds: number;
+  current_round: number;
+  round_break_until: string | null;
+  matchups: KnockoutMatchupSummary[];
+  champion_id: string | null;
+}
+
 export interface TournamentItem {
   id: string;
   name: string;
-  format: string;
+  format: 'ranked_weekly' | 'knockout' | string;
+  join_code?: string | null;
   description: string;
   status: 'registration' | 'qualifying' | 'completed';
   registration_closes_at: string;
@@ -132,7 +171,9 @@ export interface TournamentItem {
   rules_schedule?: string[];
   participant_count?: number;
   created_at: string;
+  knockout_data?: KnockoutDataSummary | null;
 }
+
 
 type EventHandler = (payload: any) => void;
 
@@ -344,7 +385,7 @@ export class BackendClient {
   }
 
   async getTournamentDetail(id: string) {
-    return this.request(`/api/tournaments/${encodeURIComponent(id)}`);
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}`, 'GET', undefined, Boolean(this.token));
   }
 
   async createTournament(payload: {
@@ -355,8 +396,25 @@ export class BackendClient {
     sprintCount: number;
     maxTeams: number;
     sprintRules: string[];
+    registrationClosesAt?: string;
+    endsAt?: string;
   }) {
-    return this.request('/api/tournaments', 'POST', payload, true);
+    const now = Date.now();
+    const regDays = Math.max(1, Number(payload.registrationDays) || 3);
+    const regClose =
+      payload.registrationClosesAt ||
+      new Date(now + regDays * 86400000).toISOString();
+    const sprintCount = Math.max(1, Number(payload.sprintCount) || 4);
+    const ends =
+      payload.endsAt ||
+      new Date(new Date(regClose).getTime() + (sprintCount * 7 + 7) * 86400000).toISOString();
+
+    const body = {
+      ...payload,
+      registrationClosesAt: regClose,
+      endsAt: ends,
+    };
+    return this.request('/api/tournaments', 'POST', body, true);
   }
 
   async startTournament(id: string) {
@@ -371,8 +429,20 @@ export class BackendClient {
     return this.request(`/api/tournaments/${encodeURIComponent(id)}/complete`, 'POST', {}, true);
   }
 
+  async skipKnockoutBreak(id: string, matchupId?: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/knockout/skip-break`, 'POST', { matchupId }, true);
+  }
+
+  async launchKnockoutMatch(id: string, matchupId: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/knockout/launch-match`, 'POST', { matchupId }, true);
+  }
+
   async registerTournament(id: string) {
     return this.request(`/api/tournaments/${encodeURIComponent(id)}/register`, 'POST', {}, true);
+  }
+
+  async joinTournamentByCode(code: string) {
+    return this.request('/api/tournaments/join-by-code', 'POST', { code }, true);
   }
 
   async submitMatchResult(payload: unknown) {

@@ -182,10 +182,46 @@ interface BotVersionRecord {
   created_at: string;
 }
 
+export interface KnockoutGameRecord {
+  game_index: number;
+  match_id?: string;
+  winner_id?: string | null;
+  status: 'pending' | 'active' | 'completed' | 'abandoned';
+  completed_at?: string;
+}
+
+export interface KnockoutMatchupRecord {
+  id: string;
+  round: number;
+  match_index: number;
+  round_name: string;
+  player1_id: string | null;
+  player2_id: string | null;
+  score1: number;
+  score2: number;
+  winner_id: string | null;
+  status: 'pending' | 'ready' | 'in_progress' | 'waiting_break' | 'completed';
+  current_game: number;
+  max_games: number;
+  break_until: string | null;
+  rule_id: string;
+  games: KnockoutGameRecord[];
+}
+
+export interface KnockoutData {
+  total_rounds: number;
+  current_round: number;
+  round_break_until: string | null;
+  matchups: KnockoutMatchupRecord[];
+  champion_id: string | null;
+}
+
 interface TournamentRecord {
   id: string;
+  created_by?: string;
+  join_code?: string | null;
   name: string;
-  format: 'ranked_weekly';
+  format: 'ranked_weekly' | 'knockout';
   description: string;
   status: 'registration' | 'qualifying' | 'completed';
   registration_closes_at: string;
@@ -197,7 +233,9 @@ interface TournamentRecord {
   rules_json: any;
   rules_schedule: string[];
   created_at: string;
+  knockout_data?: KnockoutData | null;
 }
+
 
 interface TournamentEntryRecord {
   tournament_id: string;
@@ -850,6 +888,205 @@ export async function startServer(options: ServerStartOptions = {}) {
     }
   }
 
+  function getKnockoutRoundName(round: number, totalRounds: number): string {
+    const remaining = totalRounds - round + 1;
+    if (remaining === 1) return 'Trận Chung Kết';
+    if (remaining === 2) return 'Vòng Bán Kết';
+    if (remaining === 3) return 'Vòng Tứ Kết';
+    if (remaining === 4) return 'Vòng 1/8 (Vòng 16)';
+    return `Vòng ${round}`;
+  }
+
+  function createKnockoutJoinCode(): string {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    do {
+      code = Array.from({ length: 6 }, () => alphabet[randomInt(alphabet.length)]).join('');
+    } while (db.tournaments.some((t) => t.join_code === code));
+    return code;
+  }
+
+  function initializeKnockoutTournament(t: TournamentRecord) {
+    const entries = db.tournamentEntries.filter((e) => e.tournament_id === t.id);
+    const candidateIds = entries.map((e) => e.player_id);
+
+    // Shuffle registered players randomly for fair draw
+    for (let i = candidateIds.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [candidateIds[i], candidateIds[j]] = [candidateIds[j], candidateIds[i]];
+    }
+
+    const bracketSize = Math.max(2, t.max_teams || 8);
+    const totalRounds = Math.max(1, Math.ceil(Math.log2(bracketSize)));
+
+    const matchups: KnockoutMatchupRecord[] = [];
+    let matchCount = bracketSize / 2;
+
+    for (let r = 1; r <= totalRounds; r++) {
+      const roundRuleKey = t.rules_schedule?.[r - 1] || 'standard';
+      const roundName = getKnockoutRoundName(r, totalRounds);
+
+      for (let m = 0; m < matchCount; m++) {
+        let p1: string | null = null;
+        let p2: string | null = null;
+        if (r === 1) {
+          p1 = candidateIds[m * 2] || null;
+          p2 = candidateIds[m * 2 + 1] || null;
+        }
+
+        const isBye = r === 1 && p1 && !p2;
+        const initialStatus = isBye ? 'completed' : p1 && p2 ? 'ready' : 'pending';
+
+        matchups.push({
+          id: `ko-${t.id.slice(0, 8)}-r${r}-m${m}`,
+          round: r,
+          match_index: m,
+          round_name: roundName,
+          player1_id: p1,
+          player2_id: p2,
+          score1: isBye ? 3 : 0,
+          score2: 0,
+          winner_id: isBye ? p1 : null,
+          status: initialStatus,
+          current_game: 1,
+          max_games: 5,
+          break_until: null,
+          rule_id: roundRuleKey,
+          games: [],
+        });
+      }
+      matchCount = matchCount / 2;
+    }
+
+    // Advance byes from round 1 to round 2
+    for (const m of matchups.filter((x) => x.round === 1 && x.status === 'completed' && x.winner_id)) {
+      const nextMatchup = matchups.find(
+        (x) => x.round === 2 && x.match_index === Math.floor(m.match_index / 2)
+      );
+      if (nextMatchup) {
+        if (m.match_index % 2 === 0) nextMatchup.player1_id = m.winner_id;
+        else nextMatchup.player2_id = m.winner_id;
+        if (nextMatchup.player1_id && nextMatchup.player2_id) {
+          nextMatchup.status = 'ready';
+        }
+      }
+    }
+
+    t.status = 'qualifying';
+    t.current_week = 1;
+    t.week_started_at = new Date().toISOString();
+    const r1RuleKey = t.rules_schedule?.[0] || 'standard';
+    const r1Preset = SPRINT_RULE_LAYOUTS[r1RuleKey] || SPRINT_RULE_LAYOUTS.standard;
+    t.rules_json = {
+      id: `knockout-r1-${r1RuleKey}`,
+      title: r1Preset.title,
+      rows: 9,
+      cols: 9,
+      blockedCells: [...r1Preset.blockedCells],
+    };
+    t.knockout_data = {
+      total_rounds: totalRounds,
+      current_round: 1,
+      round_break_until: null,
+      matchups,
+      champion_id: null,
+    };
+    clearTournamentWaiters(t.id);
+  }
+
+  function advanceKnockoutMatchResult(match: MatchRecord, winnerId: string | null) {
+    if (!match.tournament_id) return;
+    const t = db.tournaments.find((tour) => tour.id === match.tournament_id);
+    if (!t || t.format !== 'knockout' || !t.knockout_data) return;
+
+    const kd = t.knockout_data;
+    const matchup = kd.matchups.find(
+      (m) =>
+        m.round === kd.current_round &&
+        m.status !== 'completed' &&
+        ((m.player1_id === match.player1_id && m.player2_id === match.player2_id) ||
+          (m.player1_id === match.player2_id && m.player2_id === match.player1_id))
+    );
+    if (!matchup) return;
+
+    const isP1Win = winnerId === matchup.player1_id;
+    const isP2Win = winnerId === matchup.player2_id;
+    if (isP1Win) matchup.score1 += 1;
+    else if (isP2Win) matchup.score2 += 1;
+
+    matchup.games.push({
+      game_index: matchup.current_game,
+      match_id: match.id,
+      winner_id: winnerId,
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+    });
+
+    const targetWins = 3; // Best of 5 (BO5)
+    const hasWinner = matchup.score1 >= targetWins || matchup.score2 >= targetWins;
+    const seriesDone = hasWinner || matchup.games.length >= matchup.max_games;
+
+    if (seriesDone) {
+      matchup.status = 'completed';
+      matchup.winner_id =
+        matchup.score1 > matchup.score2
+          ? matchup.player1_id
+          : matchup.score2 > matchup.score1
+          ? matchup.player2_id
+          : winnerId;
+      matchup.break_until = null;
+
+      // Promote winner to next round matchup if not final
+      if (matchup.round < kd.total_rounds) {
+        const nextRound = matchup.round + 1;
+        const nextMatchIndex = Math.floor(matchup.match_index / 2);
+        const nextMatchup = kd.matchups.find(
+          (m) => m.round === nextRound && m.match_index === nextMatchIndex
+        );
+        if (nextMatchup) {
+          if (matchup.match_index % 2 === 0) {
+            nextMatchup.player1_id = matchup.winner_id;
+          } else {
+            nextMatchup.player2_id = matchup.winner_id;
+          }
+          if (nextMatchup.player1_id && nextMatchup.player2_id) {
+            nextMatchup.status = 'ready';
+          }
+        }
+      }
+
+      // Check if all matchups of current round are finished
+      const roundMatchups = kd.matchups.filter((m) => m.round === kd.current_round);
+      const allRoundDone = roundMatchups.every((m) => m.status === 'completed');
+      if (allRoundDone) {
+        if (kd.current_round >= kd.total_rounds) {
+          // Championship concluded!
+          kd.champion_id = matchup.winner_id;
+          t.status = 'completed';
+        } else {
+          // 30-minute break between rounds
+          kd.current_round += 1;
+          kd.round_break_until = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+          const nextRuleKey = t.rules_schedule?.[kd.current_round - 1] || 'standard';
+          const nextPreset = SPRINT_RULE_LAYOUTS[nextRuleKey] || SPRINT_RULE_LAYOUTS.standard;
+          t.rules_json = {
+            id: `knockout-r${kd.current_round}-${nextRuleKey}`,
+            title: nextPreset.title,
+            rows: 9,
+            cols: 9,
+            blockedCells: [...nextPreset.blockedCells],
+          };
+          t.current_week = kd.current_round;
+        }
+      }
+    } else {
+      // 10-minute break between games in the BO5 series
+      matchup.status = 'waiting_break';
+      matchup.break_until = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      matchup.current_game += 1;
+    }
+  }
+
   function applySprintResetsToEntries(tournament: TournamentRecord, targetWeek: number) {
     const startResetWeek = Math.max(1, tournament.last_reset_week || tournament.current_week || 1);
     const steps = Math.max(0, targetWeek - startResetWeek);
@@ -890,19 +1127,27 @@ export async function startServer(options: ServerStartOptions = {}) {
         );
         dirty = true;
       } else if (t.status === 'registration' && (now >= regCloseMs || entryCount >= t.max_teams)) {
-        t.status = 'qualifying';
-        t.current_week = 1;
-        t.last_reset_week = 1;
-        t.week_started_at = new Date(now).toISOString();
-        t.rules_json = weeklyRules(1, t.rules_schedule);
-        initializeStageBEntries(t.id);
-        clearTournamentWaiters(t.id);
-        abandonActiveTournamentMatches(
-          t.id,
-          'Vòng Chạy Đà đã kết thúc để chuyển sang Thực chiến Sprint 1; ván đấu luyện tập đã được đóng.'
-        );
+        if (t.format === 'knockout') {
+          initializeKnockoutTournament(t);
+          abandonActiveTournamentMatches(
+            t.id,
+            'Giải đấu Knockout đã bắt đầu; các trận đấu chạy đà đã được đóng.'
+          );
+        } else {
+          t.status = 'qualifying';
+          t.current_week = 1;
+          t.last_reset_week = 1;
+          t.week_started_at = new Date(now).toISOString();
+          t.rules_json = weeklyRules(1, t.rules_schedule);
+          initializeStageBEntries(t.id);
+          clearTournamentWaiters(t.id);
+          abandonActiveTournamentMatches(
+            t.id,
+            'Vòng Chạy Đà đã kết thúc để chuyển sang Thực chiến Sprint 1; ván đấu luyện tập đã được đóng.'
+          );
+        }
         dirty = true;
-      } else if (t.status === 'qualifying' && t.week_started_at) {
+      } else if (t.status === 'qualifying' && t.format === 'ranked_weekly' && t.week_started_at) {
         const startMs = new Date(t.week_started_at).getTime();
         const computedWeek = Math.max(1, Math.floor((now - startMs) / WEEK_MS) + 1);
         if (computedWeek > t.current_week) {
@@ -998,6 +1243,7 @@ export async function startServer(options: ServerStartOptions = {}) {
     }
 
     const tournamentUpdates = applyTournamentScoreForMatch(match, score1);
+    advanceKnockoutMatchResult(match, winnerId);
 
     match.status = 'completed';
     match.winner_id = winnerId;
@@ -1519,8 +1765,10 @@ export async function startServer(options: ServerStartOptions = {}) {
     }
   });
 
-  app.get('/api/tournaments', (_req: Request, res: Response) => {
+  app.get('/api/tournaments', (req: Request, res: Response) => {
     updateTournamentLifecycle();
+    const authUser = getOptionalAuthUser(req);
+    const isAdmin = Boolean(authUser?.is_admin);
     const list = [...db.tournaments]
       .sort((a, b) => {
         const order = (s: string) => (s === 'registration' ? 0 : s === 'qualifying' ? 1 : 2);
@@ -1528,6 +1776,8 @@ export async function startServer(options: ServerStartOptions = {}) {
       })
       .map((t) => ({
         ...t,
+        join_code: isAdmin && t.format === 'knockout' ? t.join_code : undefined,
+        created_by: undefined,
         participant_count: db.tournamentEntries.filter((e) => e.tournament_id === t.id).length,
       }));
     res.json({ tournaments: list });
@@ -1580,8 +1830,40 @@ export async function startServer(options: ServerStartOptions = {}) {
     const motivationBanner = buildTournamentMotivation(ownEntry, privateChallengerRank);
     const isCompleted = t.status === 'completed';
 
+    let enrichedTournament: any = t;
+    if (t.knockout_data) {
+      enrichedTournament = {
+        ...t,
+        knockout_data: {
+          ...t.knockout_data,
+          matchups: t.knockout_data.matchups.map((m) => {
+            const u1 = m.player1_id ? db.users.find((u) => u.id === m.player1_id) : null;
+            const u2 = m.player2_id ? db.users.find((u) => u.id === m.player2_id) : null;
+            return {
+              ...m,
+              player1_name: u1?.display_name || (m.player1_id ? 'Kỳ thủ' : 'Chờ xác định'),
+              player1_avatar: u1?.avatar_id || 'pumpkin',
+              player2_name: u2?.display_name || (m.player2_id ? 'Kỳ thủ' : 'Chờ xác định'),
+              player2_avatar: u2?.avatar_id || 'bat',
+            };
+          }),
+        },
+      };
+    }
+
+    const canViewJoinCode = Boolean(
+      t.format === 'knockout' && t.join_code && authUser &&
+      (authUser.is_admin || authUser.id === t.created_by)
+    );
+    const publicTournament = {
+      ...enrichedTournament,
+      join_code: undefined,
+      created_by: undefined,
+    };
+
     res.json({
-      tournament: t,
+      tournament: canViewJoinCode ? { ...publicTournament, join_code: t.join_code } : publicTournament,
+      isCreator: Boolean(authUser && t.created_by === authUser.id),
       participantCount: entries.length,
       ranks: tournamentRanks(),
       myEntry: ownEntry
@@ -1607,19 +1889,46 @@ export async function startServer(options: ServerStartOptions = {}) {
       }
       const name = String(req.body?.name || '').trim().slice(0, 100);
       const description = String(req.body?.description || '').trim().slice(0, 2000);
-      const registrationClosesAt = new Date(req.body?.registrationClosesAt);
-      const endsAt = new Date(req.body?.endsAt);
-      const maxTeams = Math.min(256, Math.max(2, Number(req.body?.maxTeams) || 64));
+      let registrationClosesAt = req.body?.registrationClosesAt
+        ? new Date(req.body.registrationClosesAt)
+        : new Date(NaN);
+      let endsAt = req.body?.endsAt ? new Date(req.body.endsAt) : new Date(NaN);
+
+      if (Number.isNaN(registrationClosesAt.getTime()) && Number(req.body?.registrationDays) > 0) {
+        registrationClosesAt = new Date(Date.now() + Number(req.body.registrationDays) * 86400000);
+      }
+      if (Number.isNaN(endsAt.getTime()) && !Number.isNaN(registrationClosesAt.getTime())) {
+        const sprintCount = Number(req.body?.sprintCount) || 4;
+        endsAt = new Date(registrationClosesAt.getTime() + (sprintCount * 7 + 7) * 86400000);
+      }
+      const format: 'ranked_weekly' | 'knockout' =
+        req.body?.format === 'knockout' ? 'knockout' : 'ranked_weekly';
+
+      const maxTeams =
+        format === 'knockout'
+          ? [4, 8, 16].includes(Number(req.body?.maxTeams))
+            ? Number(req.body?.maxTeams)
+            : 8
+          : Math.min(256, Math.max(2, Number(req.body?.maxTeams) || 64));
+
+      const requiredRulesCount =
+        format === 'knockout' ? Math.max(1, Math.ceil(Math.log2(maxTeams))) : 4;
+
       const sprintRules: string[] = Array.isArray(req.body?.sprintRules)
-        ? req.body.sprintRules
-        : DEFAULT_SPRINT_RULES;
+        ? req.body.sprintRules.slice(0, requiredRulesCount)
+        : DEFAULT_SPRINT_RULES.slice(0, requiredRulesCount);
 
       if (!name) {
         res.status(400).json({ error: 'Vui lòng nhập tên giải đấu.' });
         return;
       }
-      if (sprintRules.length !== 4 || sprintRules.some((r) => !SPRINT_RULE_LAYOUTS[r])) {
-        res.status(400).json({ error: 'Hãy chọn luật hợp lệ cho đủ 4 Sprint.' });
+      if (
+        sprintRules.length !== requiredRulesCount ||
+        sprintRules.some((r) => !SPRINT_RULE_LAYOUTS[r])
+      ) {
+        res.status(400).json({
+          error: `Hãy chọn luật hợp lệ cho đủ ${requiredRulesCount} vòng đấu.`,
+        });
         return;
       }
       if (Number.isNaN(registrationClosesAt.getTime()) || registrationClosesAt <= new Date()) {
@@ -1633,8 +1942,10 @@ export async function startServer(options: ServerStartOptions = {}) {
 
       const created: TournamentRecord = {
         id: randomUUID(),
+        created_by: user.id,
+        join_code: format === 'knockout' ? createKnockoutJoinCode() : null,
         name,
-        format: 'ranked_weekly',
+        format,
         description,
         status: 'registration',
         registration_closes_at: registrationClosesAt.toISOString(),
@@ -1646,6 +1957,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         rules_json: {},
         rules_schedule: sprintRules,
         created_at: new Date().toISOString(),
+        knockout_data: null,
       };
       db.tournaments.unshift(created);
       saveDb();
@@ -1659,7 +1971,7 @@ export async function startServer(options: ServerStartOptions = {}) {
     try {
       const user = getAuthUser(req);
       if (!user.is_admin) {
-        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để bắt đầu vòng Thực chiến.' });
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để bắt đầu giải đấu.' });
         return;
       }
       const t = db.tournaments.find((tour) => tour.id === req.params.id);
@@ -1667,6 +1979,18 @@ export async function startServer(options: ServerStartOptions = {}) {
         res.status(409).json({ error: 'Giải đấu không ở giai đoạn Mở đăng ký / Chạy đà.' });
         return;
       }
+
+      if (t.format === 'knockout') {
+        initializeKnockoutTournament(t);
+        abandonActiveTournamentMatches(
+          t.id,
+          'Ban Tổ Chức đã bắt đầu Giải Đấu Knockout Loại Trực Tiếp; các trận chạy đà đang dở được đóng lại.'
+        );
+        saveDb();
+        res.json({ tournament: t });
+        return;
+      }
+
       t.status = 'qualifying';
       t.current_week = 1;
       t.last_reset_week = 1;
@@ -1680,6 +2004,89 @@ export async function startServer(options: ServerStartOptions = {}) {
       );
       saveDb();
       res.json({ tournament: t });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/knockout/skip-break', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức (Admin) để bỏ qua thời gian nghỉ.' });
+        return;
+      }
+      const t = db.tournaments.find((tour) => tour.id === req.params.id);
+      if (!t || t.format !== 'knockout' || !t.knockout_data) {
+        res.status(404).json({ error: 'Không tìm thấy giải đấu knockout.' });
+        return;
+      }
+      const matchupId = req.body?.matchupId;
+      if (matchupId) {
+        const m = t.knockout_data.matchups.find((x) => x.id === matchupId);
+        if (m) {
+          m.break_until = null;
+          if (m.status === 'waiting_break') m.status = 'ready';
+        }
+      } else {
+        t.knockout_data.round_break_until = null;
+        for (const m of t.knockout_data.matchups.filter(
+          (x) => x.round === t.knockout_data!.current_round
+        )) {
+          if (m.player1_id && m.player2_id && m.status !== 'completed') {
+            m.status = 'ready';
+            m.break_until = null;
+          }
+        }
+      }
+      saveDb();
+      res.json({ success: true, tournament: t });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/knockout/launch-match', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      const t = db.tournaments.find((tour) => tour.id === req.params.id);
+      if (!t || t.format !== 'knockout' || !t.knockout_data) {
+        res.status(404).json({ error: 'Không tìm thấy giải đấu knockout.' });
+        return;
+      }
+      const matchupId = String(req.body?.matchupId || '');
+      const matchup = t.knockout_data.matchups.find((m) => m.id === matchupId);
+      if (!matchup || !matchup.player1_id || !matchup.player2_id) {
+        res.status(400).json({ error: 'Cặp đấu chưa đủ 2 kỳ thủ.' });
+        return;
+      }
+      if (!user.is_admin && user.id !== matchup.player1_id && user.id !== matchup.player2_id) {
+        res.status(403).json({ error: 'Chỉ Admin hoặc kỳ thủ trong cặp đấu mới có thể khởi động ván.' });
+        return;
+      }
+      const u1 = db.users.find((u) => u.id === matchup.player1_id);
+      const u2 = db.users.find((u) => u.id === matchup.player2_id);
+      if (!u1 || !u2) {
+        res.status(404).json({ error: 'Không tìm thấy thông tin người chơi.' });
+        return;
+      }
+      const rulePreset = SPRINT_RULE_LAYOUTS[matchup.rule_id] || SPRINT_RULE_LAYOUTS.standard;
+      const tournamentWithRoundRule: TournamentRecord = {
+        ...t,
+        status: 'qualifying',
+        rules_json: {
+          id: `knockout-r${matchup.round}-${matchup.rule_id}`,
+          title: rulePreset.title,
+          rows: 9,
+          cols: 9,
+          blockedCells: [...rulePreset.blockedCells],
+        },
+      };
+      matchup.status = 'in_progress';
+      matchup.break_until = null;
+      const match = pairPlayers(u1, u2, 'bot', tournamentWithRoundRule, false);
+      saveDb();
+      res.json({ success: true, matchId: match.id });
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message });
     }
@@ -1743,6 +2150,58 @@ export async function startServer(options: ServerStartOptions = {}) {
     }
   });
 
+  app.post('/api/tournaments/join-by-code', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      updateTournamentLifecycle();
+      const code = String(req.body?.code || '').trim().toUpperCase().replace(/^OTT-/, '');
+      const t = db.tournaments.find(
+        (tour) => tour.format === 'knockout' && tour.join_code === code
+      );
+      if (!t) {
+        res.status(404).json({ error: 'Mã giải knockout không hợp lệ.' });
+        return;
+      }
+      const existing = db.tournamentEntries.find(
+        (e) => e.tournament_id === t.id && e.player_id === user.id
+      );
+      if (existing) {
+        res.json({ entry: existing, alreadyRegistered: true, tournamentId: t.id });
+        return;
+      }
+      if (t.status !== 'registration' || new Date(t.registration_closes_at) <= new Date()) {
+        res.status(409).json({ error: 'Giải knockout đã đóng đăng ký.' });
+        return;
+      }
+      const count = db.tournamentEntries.filter((e) => e.tournament_id === t.id).length;
+      if (count >= t.max_teams) {
+        res.status(409).json({ error: 'Giải knockout đã đủ số lượng người chơi tối đa.' });
+        return;
+      }
+      const entry: TournamentEntryRecord = {
+        tournament_id: t.id,
+        player_id: user.id,
+        bot_version: user.active_bot_version || 0,
+        matches_played: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        points: 0,
+        tournament_elo: user.elo,
+        tier: 'Bronze',
+        rank_stars: 0,
+        season_points: 0,
+        registered_at: new Date().toISOString(),
+      };
+      db.tournamentEntries.push(entry);
+      updateTournamentLifecycle();
+      saveDb();
+      res.status(201).json({ entry, alreadyRegistered: false, tournamentId: t.id });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/tournaments/:id/register', (req: Request, res: Response) => {
     try {
       const user = getAuthUser(req);
@@ -1750,6 +2209,10 @@ export async function startServer(options: ServerStartOptions = {}) {
       const t = db.tournaments.find((tour) => tour.id === req.params.id);
       if (!t) {
         res.status(404).json({ error: 'Không tìm thấy giải đấu.' });
+        return;
+      }
+      if (t.format === 'knockout') {
+        res.status(400).json({ error: 'Giải knockout cần mã tham gia. Hãy nhập mã giải để ghi danh.' });
         return;
       }
       const existing = db.tournamentEntries.find(
@@ -1764,10 +2227,6 @@ export async function startServer(options: ServerStartOptions = {}) {
           error:
             'Giải đấu đã đóng cổng đăng ký (đang ở Giai đoạn Thực chiến hoặc đã kết thúc). Hãy chọn giải đang Mở đăng ký!',
         });
-        return;
-      }
-      if (!getActiveUserBot(user.id)) {
-        res.status(400).json({ error: 'Cần lưu một Bot hợp lệ trước khi đăng ký giải đấu.' });
         return;
       }
       const count = db.tournamentEntries.filter((e) => e.tournament_id === t.id).length;
@@ -1950,6 +2409,7 @@ export async function startServer(options: ServerStartOptions = {}) {
       match.status = 'completed';
       match.winner_id =
         replayResult.winner === 1 ? u1.id : replayResult.winner === 2 ? u2.id : null;
+      advanceKnockoutMatchResult(match, match.winner_id);
       match.final_state_hash = replayResult.finalHash;
       match.replay_sha256 = replayChecksum;
       match.replay_json = body.replay;
@@ -2731,6 +3191,76 @@ export async function startServer(options: ServerStartOptions = {}) {
             sendWs(ws, 'error', {
               message: 'Bạn cần lưu Bot Python trong Phòng Lab trước khi tìm trận giải đấu.',
             });
+            return;
+          }
+
+          if (t.format === 'knockout' && t.status === 'qualifying' && t.knockout_data) {
+            const kd = t.knockout_data;
+            const now = Date.now();
+            if (kd.round_break_until && new Date(kd.round_break_until).getTime() > now) {
+              sendWs(ws, 'error', {
+                message:
+                  'Vòng đấu đang trong thời gian nghỉ 30 phút giữa các vòng để phổ biến luật thi đấu mới.',
+              });
+              return;
+            }
+            const matchup = kd.matchups.find(
+              (m) =>
+                m.round === kd.current_round &&
+                m.status !== 'completed' &&
+                (m.player1_id === user.id || m.player2_id === user.id)
+            );
+            if (!matchup || !matchup.player1_id || !matchup.player2_id) {
+              sendWs(ws, 'error', {
+                message: 'Bạn chưa có cặp đấu sẵn sàng trong vòng đấu hiện tại.',
+              });
+              return;
+            }
+            if (matchup.break_until && new Date(matchup.break_until).getTime() > now) {
+              sendWs(ws, 'error', {
+                message:
+                  'Cặp đấu đang trong thời gian nghỉ 10 phút giữa các ván để tinh chỉnh bot.',
+              });
+              return;
+            }
+
+            const opponentId =
+              matchup.player1_id === user.id ? matchup.player2_id : matchup.player1_id;
+            const oppSock = liveSockets.get(opponentId);
+            const oppUser = db.users.find((u) => u.id === opponentId);
+            const oppBot = getActiveUserBot(opponentId);
+
+            const qSet = tournamentQueue.get(t.id) || new Set<string>();
+            tournamentQueue.set(t.id, qSet);
+
+            if (
+              qSet.has(opponentId) &&
+              oppSock &&
+              oppSock.readyState === WebSocket.OPEN &&
+              oppUser &&
+              oppBot
+            ) {
+              qSet.delete(opponentId);
+              matchup.status = 'in_progress';
+              matchup.break_until = null;
+              pairPlayers(user, oppUser, 'bot', t, false);
+            } else {
+              qSet.add(user.id);
+              ws.queueMode = 'tournament';
+              ws.tournamentId = t.id;
+              ws.searchStartedAt = Date.now();
+              sendWs(ws, 'searching', {
+                elo: user.elo,
+                mode: 'tournament',
+                tournament: true,
+                tournamentId: t.id,
+                knockout: true,
+                round: matchup.round,
+                roundName: matchup.round_name,
+                game: matchup.current_game,
+                rules: t.rules_json,
+              });
+            }
             return;
           }
 
