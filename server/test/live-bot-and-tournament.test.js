@@ -1004,6 +1004,8 @@ test('2-Stage Individual Tournament E2E: Stage A practice (0 Star/0 Elo), Stage 
     });
     assert.equal(createTour.status, 201, JSON.stringify(createTour.data));
     const tourId = createTour.data.tournament.id;
+    const listedTournaments = await h.api('GET', '/api/tournaments');
+    assert.ok(!listedTournaments.data.tournaments.some((tournament) => tournament.id === tourId));
 
     // 1. User without saved Bot is blocked from registering
     const noBotUser = await h.registerUser('NoBotPlayer', false);
@@ -1237,5 +1239,214 @@ test('2-Stage Individual Tournament E2E: Stage A practice (0 Star/0 Elo), Stage 
   } catch (err) {
     await h.cleanup().catch(() => {});
     throw err;
+  }
+});
+
+test('Group/knockout tournament creation publishes balanced groups and a two-leg fixture schedule', async () => {
+  const h = await createTestHarness();
+  try {
+    const admin = await h.loginAdmin();
+    const now = Date.now();
+    const created = await h.api('POST', '/api/tournaments', admin.token, {
+      name: 'Giải kiểm thử bảng đấu',
+      description: 'Kiểm tra chia bảng và lịch thi đấu',
+      registrationOpensAt: new Date(now - 10_000).toISOString(),
+      registrationClosesAt: new Date(now + 2_000).toISOString(),
+      tournamentStartsAt: new Date(now + 120_000).toISOString(),
+      blockedCells: [],
+      moveLimitRule: 'standard',
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const tournamentId = created.data.tournament.id;
+
+    let firstParticipant;
+    const participants = [];
+    for (let index = 0; index < 16; index++) {
+      const player = await h.registerUser(`GroupEntrant${index}`, true);
+      if (index === 0) firstParticipant = player;
+      participants.push(player);
+      const registration = await h.api(
+        'POST',
+        `/api/tournaments/${tournamentId}/register`,
+        player.token
+      );
+      assert.equal(registration.status, 201, JSON.stringify(registration.data));
+    }
+
+    const beforeOrganization = await h.api('GET', `/api/tournaments/${tournamentId}`, admin.token);
+    assert.equal(beforeOrganization.data.tournament.status, 'registration');
+    const grouped = await h.api('POST', `/api/tournaments/${tournamentId}/groups`, admin.token, {
+      groupCount: 8,
+    });
+    assert.equal(grouped.status, 201, JSON.stringify(grouped.data));
+
+    const detail = await h.api('GET', `/api/tournaments/${tournamentId}`, admin.token);
+    assert.equal(detail.status, 200);
+    assert.equal(detail.data.groups.length, 8);
+    assert.equal(detail.data.tournament.status, 'group_stage');
+    assert.ok(new Date(detail.data.tournament.registration_closes_at).getTime() <= Date.now());
+    assert.ok(detail.data.groups.every((group) => group.members.length === 2));
+    assert.equal(detail.data.fixtures.length, 16);
+    assert.ok(detail.data.fixtures.every((fixture) => fixture.phase === 'group' && fixture.status === 'pending'));
+    assert.equal(detail.data.groupStandingsPublished, false);
+
+    const unauthorizedStart = await h.api(
+      'POST',
+      `/api/tournaments/${tournamentId}/start-groups`,
+      firstParticipant.token,
+      {}
+    );
+    assert.equal(unauthorizedStart.status, 403);
+    const prematureKnockout = await h.api(
+      'POST',
+      `/api/tournaments/${tournamentId}/start-knockout`,
+      admin.token,
+      {}
+    );
+    assert.equal(prematureKnockout.status, 409);
+
+    const launched = await h.api(
+      'POST',
+      `/api/tournaments/${tournamentId}/start-groups`,
+      admin.token,
+      {}
+    );
+    assert.equal(launched.status, 200, JSON.stringify(launched.data));
+    const launchedDetail = await h.api('GET', `/api/tournaments/${tournamentId}`, admin.token);
+    assert.equal(launchedDetail.data.tournament.status, 'group_running');
+    assert.ok(new Date(launchedDetail.data.tournament.tournament_starts_at).getTime() <= Date.now());
+    assert.equal(launchedDetail.data.groupStandingsPublished, true);
+
+    const firstFixture = launchedDetail.data.fixtures[0];
+    const participantsById = new Map(
+      participants.map((participant) => [participant.user.id, participant])
+    );
+    const entrantOne = participantsById.get(firstFixture.player1_id);
+    const entrantTwo = participantsById.get(firstFixture.player2_id);
+    const socketOne = await h.connectWs(entrantOne.token);
+    const socketTwo = await h.connectWs(entrantTwo.token);
+    socketOne.send({ type: 'find-tournament-match', tournamentId });
+    await socketOne.waitFor('searching');
+    socketTwo.send({ type: 'find-tournament-match', tournamentId });
+    const [foundOne, foundTwo] = await Promise.all([
+      socketOne.waitFor('match-found'),
+      socketTwo.waitFor('match-found'),
+    ]);
+    assert.equal(foundOne.match.id, foundTwo.match.id);
+    const incompleteResult = await h.api(
+      'POST',
+      '/api/match/submit-result',
+      entrantOne.token,
+      { matchId: foundOne.match.id }
+    );
+    assert.equal(incompleteResult.status, 400);
+    assert.match(incompleteResult.data.error, /chữ ký xác nhận kết quả/);
+    const activeFixtureDetail = await h.api('GET', `/api/tournaments/${tournamentId}`, admin.token);
+    assert.equal(activeFixtureDetail.data.fixtures[0].status, 'active');
+    assert.equal(
+      activeFixtureDetail.data.matches.find((match) => match.match_id === foundOne.match.id).status,
+      'active'
+    );
+    socketOne.close();
+    socketTwo.close();
+    await sleep(250);
+    const recoveredFixtures = await h.api('GET', `/api/tournaments/${tournamentId}`, admin.token);
+    assert.equal(recoveredFixtures.data.fixtures[0].status, 'pending');
+    const retrySocketOne = await h.connectWs(entrantOne.token);
+    const retrySocketTwo = await h.connectWs(entrantTwo.token);
+    retrySocketOne.send({ type: 'find-tournament-match', tournamentId });
+    await retrySocketOne.waitFor('searching');
+    retrySocketTwo.send({ type: 'find-tournament-match', tournamentId });
+    const [retryMatchOne, retryMatchTwo] = await Promise.all([
+      retrySocketOne.waitFor('match-found'),
+      retrySocketTwo.waitFor('match-found'),
+    ]);
+    assert.equal(retryMatchOne.match.id, retryMatchTwo.match.id);
+    assert.notEqual(retryMatchOne.match.id, foundOne.match.id);
+
+    const cancelled = await h.api('POST', '/api/tournaments/cancel-all', admin.token, {});
+    assert.equal(cancelled.status, 200, JSON.stringify(cancelled.data));
+    assert.ok(cancelled.data.cancelledCount >= 1);
+    const cancelledDetail = await h.api('GET', `/api/tournaments/${tournamentId}`, admin.token);
+    assert.equal(cancelledDetail.data.tournament.status, 'cancelled');
+    const visibleTournaments = await h.api('GET', '/api/tournaments');
+    assert.ok(!visibleTournaments.data.tournaments.some((tournament) => tournament.id === tournamentId));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('admin can copy entrants and their saved bot versions into a fresh tournament', async () => {
+  const h = await createTestHarness();
+  try {
+    const admin = await h.loginAdmin();
+    const now = Date.now();
+    const createTournament = (name) => h.api('POST', '/api/tournaments', admin.token, {
+      name,
+      description: 'Tournament roster-copy integration test',
+      registrationOpensAt: new Date(now - 1000).toISOString(),
+      registrationClosesAt: new Date(now + 60_000).toISOString(),
+      tournamentStartsAt: new Date(now + 120_000).toISOString(),
+      blockedCells: [],
+      moveLimitRule: 'standard',
+    });
+    const source = await createTournament('Roster source');
+    const target = await createTournament('Roster target');
+    assert.equal(source.status, 201);
+    assert.equal(target.status, 201);
+    for (let index = 0; index < 16; index++) {
+      const entrant = await h.registerUser(`RosterEntrant${index}`, true);
+      const registration = await h.api(
+        'POST',
+        `/api/tournaments/${source.data.tournament.id}/register`,
+        entrant.token
+      );
+      assert.equal(registration.status, 201);
+    }
+
+    const unauthorized = await h.api(
+      'POST',
+      `/api/tournaments/${target.data.tournament.id}/copy-entrants`,
+      (await h.registerUser('RosterNonAdmin', false)).token,
+      { sourceTournamentId: source.data.tournament.id }
+    );
+    assert.equal(unauthorized.status, 403);
+    const copied = await h.api(
+      'POST',
+      `/api/tournaments/${target.data.tournament.id}/copy-entrants`,
+      admin.token,
+      { sourceTournamentId: source.data.tournament.id }
+    );
+    assert.equal(copied.status, 201, JSON.stringify(copied.data));
+    assert.equal(copied.data.copiedCount, 16);
+
+    const targetDetail = await h.api(
+      'GET',
+      `/api/tournaments/${target.data.tournament.id}`,
+      admin.token
+    );
+    assert.equal(targetDetail.data.participantCount, 16);
+    const storedDb = JSON.parse(fs.readFileSync(h.dbPath, 'utf8'));
+    const sourceRoster = storedDb.tournamentEntries
+      .filter((entry) => entry.tournament_id === source.data.tournament.id)
+      .map((entry) => [entry.player_id, entry.bot_version])
+      .sort(([first], [second]) => first.localeCompare(second));
+    const targetRoster = storedDb.tournamentEntries
+      .filter((entry) => entry.tournament_id === target.data.tournament.id)
+      .map((entry) => [entry.player_id, entry.bot_version])
+      .sort(([first], [second]) => first.localeCompare(second));
+    assert.deepEqual(
+      targetRoster,
+      sourceRoster
+    );
+    const duplicateCopy = await h.api(
+      'POST',
+      `/api/tournaments/${target.data.tournament.id}/copy-entrants`,
+      admin.token,
+      { sourceTournamentId: source.data.tournament.id }
+    );
+    assert.equal(duplicateCopy.status, 409);
+  } finally {
+    await h.cleanup();
   }
 });

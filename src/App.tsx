@@ -57,7 +57,7 @@ const VIEW_TITLES: Record<NavView, string> = {
   overview: 'Sảnh Chiến Thuật OTTv2',
   'bot-lab': 'Phòng Lab & Huấn Luyện Bot Python 3',
   matchmaking: 'Đấu Trường Xếp Hạng Trực Tuyến',
-  tournaments: 'Giải Đấu Cá Nhân Theo Sprint',
+  tournaments: 'Giải Đấu Bảng & Knock-out',
   'private-room': 'Phòng Đấu Riêng P2P',
   'multi-watch': 'Trung Tâm Xem Trực Tiếp 4 Bàn',
 };
@@ -184,6 +184,7 @@ function AppWorkspace() {
   // Active 1v1 Match Session (Backend or P2P)
   const [activeMatch, setActiveMatch] = useState<ActiveMatchSession | null>(null);
   const [pendingTournamentId, setPendingTournamentId] = useState<string | null>(null);
+  const [selectedTournamentId, setSelectedTournamentId] = useState<string | null>(null);
   const p2pCleanupRef = useRef<(() => void) | null>(null);
 
   const handleEditorCodeChange = (nextCode: string) => {
@@ -378,11 +379,9 @@ function AppWorkspace() {
       {mobileMenuOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/75 lg:hidden"
-          onClick={() => setMobileMenuOpen(false)}
         >
           <div
             className="w-72 h-full bg-[#150e23] border-r border-[var(--border-subtle)] p-4 flex flex-col justify-between"
-            onClick={(e) => e.stopPropagation()}
           >
             <div className="space-y-4">
               <div className="flex items-center justify-between pb-3 border-b border-[var(--border-subtle)]">
@@ -554,11 +553,15 @@ function AppWorkspace() {
                   savedBotVersion={savedBotVersion}
                   themeMode="halloween"
                   tournaments={tournaments}
-                  initialSelectedId={pendingTournamentId}
+                  initialSelectedId={pendingTournamentId || selectedTournamentId}
                   onClearInitialSelectedId={() => setPendingTournamentId(null)}
+                  onSelectionChange={setSelectedTournamentId}
                   onRefreshTournaments={refreshPublicAndUserData}
                   onOpenAuth={(tab) => handleOpenAuth(tab || 'login')}
-                  onOpenBotLab={() => setActiveView('bot-lab')}
+                  onOpenBotLab={(tournamentId) => {
+                    if (tournamentId) setPendingTournamentId(tournamentId);
+                    setActiveView('bot-lab');
+                  }}
                   onWatchReplayById={handleWatchReplayById}
                 />
               )}

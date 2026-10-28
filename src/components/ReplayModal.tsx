@@ -120,11 +120,9 @@ export const ReplayModal: React.FC<ReplayModalProps> = ({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto"
-      onClick={onClose}
     >
       <div
         className="w-full max-w-5xl rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-5 sm:p-6 shadow-2xl my-auto"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-[var(--border-subtle)]">
           <div>

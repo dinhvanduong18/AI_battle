@@ -53,6 +53,9 @@ export interface BoardRules {
   rows: number;
   cols: number;
   blockedCells: number[];
+  moveLimit?: number;
+  moveLimitRule?: 'standard' | 'remaining-pieces' | 'goal-distance' | 'captured-points';
+  capturedPieceValues?: { rock: number; paper: number; scissors: number };
 }
 
 export const SPRINT_RULE_PRESETS: Record<string, { id: string; title: string; subtitle: string; blockedCells: number[] }> = {
@@ -106,7 +109,7 @@ export interface LastMoveInfo {
   captured: number | null;
 }
 
-export type DrawReason = 'threefold-repetition' | 'fifty-move-rule' | 'stalemate';
+export type DrawReason = 'threefold-repetition' | 'fifty-move-rule' | 'stalemate' | 'tournament-score-tie';
 
 export interface GameState {
   seed: number;
@@ -118,6 +121,7 @@ export interface GameState {
   drawReason?: DrawReason | null;
   noCapturePlies?: number;
   positionCounts?: Record<string, number>;
+  capturedPiecePoints?: { 1: number; 2: number };
   lastMove: LastMoveInfo | null;
   rules: BoardRules | null;
 }
@@ -179,7 +183,16 @@ export function computeFastHash(state: GameState): string {
   hash = Math.imul(hash, 0x01000193);
   if (state.rules) {
     const rules = state.rules;
-    const ruleKey = `${rules.id || ''}|${rules.week || 0}|${(rules.blockedCells || []).join(',')}`;
+    const ruleKey = `${rules.id || ''}|${rules.week || 0}|${(rules.blockedCells || []).join(',')}` +
+      (rules.moveLimit
+        ? `|${rules.moveLimit}|${rules.moveLimitRule || ''}` +
+          (rules.moveLimitRule === 'captured-points'
+            ? `|${rules.capturedPieceValues?.rock || 0},${rules.capturedPieceValues?.paper || 0},${rules.capturedPieceValues?.scissors || 0}`
+            : '')
+        : '') +
+      (state.rules?.moveLimitRule === 'captured-points'
+        ? `|${state.capturedPiecePoints?.[1] || 0},${state.capturedPiecePoints?.[2] || 0}`
+        : '');
     for (let i = 0; i < ruleKey.length; i++) {
       hash ^= ruleKey.charCodeAt(i);
       hash = Math.imul(hash, 0x01000193);
@@ -220,6 +233,24 @@ export class OTTGameEngine {
               )
             ),
           ].sort((a, b) => a - b),
+          ...(Number.isInteger(rules.moveLimit) && Number(rules.moveLimit) > 0
+            ? { moveLimit: Number(rules.moveLimit) }
+            : {}),
+          ...(rules.moveLimitRule === 'standard' ||
+          rules.moveLimitRule === 'remaining-pieces' ||
+          rules.moveLimitRule === 'goal-distance' ||
+          rules.moveLimitRule === 'captured-points'
+            ? { moveLimitRule: rules.moveLimitRule }
+            : {}),
+          ...(rules.moveLimitRule === 'captured-points'
+            ? {
+                capturedPieceValues: {
+                  rock: Number(rules.capturedPieceValues?.rock) || 1,
+                  paper: Number(rules.capturedPieceValues?.paper) || 2,
+                  scissors: Number(rules.capturedPieceValues?.scissors) || 3,
+                },
+              }
+            : {}),
         }
       : null;
 
@@ -268,6 +299,7 @@ export class OTTGameEngine {
       winner: null,
       drawReason: null,
       noCapturePlies: 0,
+      capturedPiecePoints: { 1: 0, 2: 0 },
       positionCounts: { [initialPosKey]: 1 },
       lastMove: null,
       rules: normalizedRules,
@@ -403,6 +435,15 @@ export class OTTGameEngine {
     let drawReason: DrawReason | null = null;
     const nextTurn: 1 | 2 = winner ? state.turn : state.turn === 1 ? 2 : 1;
     const nextNoCapturePlies = isAttack ? 0 : (state.noCapturePlies || 0) + 1;
+    const nextCapturedPiecePoints = {
+      1: state.capturedPiecePoints?.[1] || 0,
+      2: state.capturedPiecePoints?.[2] || 0,
+    };
+    if (isAttack && state.rules?.moveLimitRule === 'captured-points') {
+      const capturedTypeName = PIECE_TYPE_NAMES[captured];
+      nextCapturedPiecePoints[state.turn] +=
+        state.rules.capturedPieceValues?.[capturedTypeName] || 0;
+    }
     const nextPositionCounts: Record<string, number> = { ...(state.positionCounts || {}) };
 
     if (winner === null) {
@@ -432,6 +473,28 @@ export class OTTGameEngine {
         drawReason = 'fifty-move-rule';
       }
     }
+    if (winner === null && state.rules?.moveLimit && nextStepCount >= state.rules.moveLimit) {
+      const score = [0, 0, 0];
+      if (state.rules.moveLimitRule === 'goal-distance') {
+        for (let index = 0; index < TOTAL_CELLS; index++) {
+          const pieceOwner = nextBoard[index] ? (nextBoard[index] <= 3 ? 1 : 2) : 0;
+          if (!pieceOwner) continue;
+          const target = pieceOwner === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX;
+          const distance = Math.abs(Math.floor(index / 9) - Math.floor(target / 9)) +
+            Math.abs((index % 9) - (target % 9));
+          score[pieceOwner] -= distance;
+        }
+      } else if (state.rules.moveLimitRule === 'captured-points') {
+        score[1] = nextCapturedPiecePoints[1];
+        score[2] = nextCapturedPiecePoints[2];
+      } else {
+        const counts = this.countPieces(nextBoard);
+        score[1] = counts[1].total;
+        score[2] = counts[2].total;
+      }
+      winner = score[1] === score[2] ? 0 : score[1] > score[2] ? 1 : 2;
+      if (winner === 0) drawReason = 'tournament-score-tie';
+    }
 
     return {
       seed: state.seed,
@@ -442,6 +505,7 @@ export class OTTGameEngine {
       winner,
       drawReason,
       noCapturePlies: nextNoCapturePlies,
+      capturedPiecePoints: nextCapturedPiecePoints,
       positionCounts: nextPositionCounts,
       lastMove: lastMoveInfo,
       rules: state.rules || null,
@@ -480,6 +544,10 @@ export class OTTGameEngine {
       winner: state.winner === 0 ? 0 : state.winner || null,
       drawReason: state.drawReason || null,
       noCapturePlies: state.noCapturePlies || 0,
+      capturedPiecePoints: {
+        1: state.capturedPiecePoints?.[1] || 0,
+        2: state.capturedPiecePoints?.[2] || 0,
+      },
       positionCounts: state.positionCounts ? { ...state.positionCounts } : undefined,
       lastMove: state.lastMove,
       rules: state.rules || null,
@@ -500,6 +568,10 @@ export class OTTGameEngine {
       winner: obj.winner === 0 ? 0 : obj.winner || null,
       drawReason: obj.drawReason || null,
       noCapturePlies: Number(obj.noCapturePlies) || 0,
+      capturedPiecePoints: {
+        1: Number(obj.capturedPiecePoints?.[1]) || 0,
+        2: Number(obj.capturedPiecePoints?.[2]) || 0,
+      },
       positionCounts: obj.positionCounts ? { ...obj.positionCounts } : { [initialPosKey]: 1 },
       lastMove: obj.lastMove || null,
       rules: obj.rules || null,
@@ -590,6 +662,7 @@ export class OTTGameEngine {
       opponentPlayerId: oppId,
       myPieceCounts: counts[myId],
       opponentPieceCounts: counts[oppId],
+      capturedPiecePoints: state.capturedPiecePoints || { 1: 0, 2: 0 },
       specialCells: {
         a1: SPECIAL_A1_INDEX,
         i9: SPECIAL_I9_INDEX,

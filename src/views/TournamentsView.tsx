@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Award,
@@ -15,6 +15,8 @@ import {
   Trophy,
   XCircle,
 } from 'lucide-react';
+import { TournamentCreationModal, type TournamentCreatePayload } from '../components/TournamentCreationModal';
+import { GroupKnockoutTournamentDetail } from '../components/GroupKnockoutTournamentDetail';
 import {
   OTTGameEngine,
   SPRINT_RULE_PRESETS,
@@ -35,9 +37,10 @@ interface TournamentsViewProps {
   tournaments: TournamentItem[];
   initialSelectedId?: string | null;
   onClearInitialSelectedId?: () => void;
+  onSelectionChange?: (id: string | null) => void;
   onRefreshTournaments: () => Promise<void>;
   onOpenAuth: (tab?: 'login' | 'register' | 'profile') => void;
-  onOpenBotLab: () => void;
+  onOpenBotLab: (tournamentId?: string) => void;
   onWatchReplayById: (matchId: string, p1: string, p2: string) => void;
 }
 
@@ -57,7 +60,17 @@ const TIER_COLORS: Record<string, string> = {
   Challenger: 'text-orange-400',
 };
 
-const DEFAULT_SPRINT_SCHEDULE = ['standard', 'center_blockers', 'clipped_corners', 'corridor'];
+const GROUP_TOURNAMENT_STATUS_LABELS: Partial<Record<TournamentItem['status'], string>> = {
+  scheduled: 'Sắp mở đăng ký',
+  registration: 'Đang mở đăng ký',
+  grouping: 'Chờ chia bảng',
+  group_stage: 'Đã chia bảng · Chờ khởi chạy',
+  group_running: 'Vòng bảng đang chạy',
+  group_complete: 'Vòng bảng đã xong · Chờ knock-out',
+  knockout: 'Đang thi đấu knock-out',
+  completed: 'Đã kết thúc · Công bố nhà vô địch',
+  cancelled: 'Đã hủy',
+};
 
 function RankCrestSvg({ tier }: { tier: string }) {
   const color =
@@ -92,6 +105,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   tournaments,
   initialSelectedId = null,
   onClearInitialSelectedId,
+  onSelectionChange,
   onRefreshTournaments,
   onOpenAuth,
   onOpenBotLab,
@@ -99,42 +113,46 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
 }) => {
   const { notify } = useToast();
   const [statusFilter, setStatusFilter] = useState<
-    'all' | 'qualifying' | 'registration' | 'completed'
-  >('all');
+    'upcoming' | 'registration' | 'in_progress' | 'completed'
+  >('in_progress');
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
+  const appliedInitialSelectedId = useRef<string | null>(null);
   const [detail, setDetail] = useState<any | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [submittingAction, setSubmittingAction] = useState(false);
   const [queuingTournament, setQueuingTournament] = useState(false);
   const [showTournamentRules, setShowTournamentRules] = useState(false);
   const [showRankDetails, setShowRankDetails] = useState(false);
+  const [rulesPreviewTournament, setRulesPreviewTournament] = useState<TournamentItem | null>(null);
+  const [showCancelTournamentConfirm, setShowCancelTournamentConfirm] = useState(false);
 
   // Create Tournament Form State (Admin / BTC)
   const [showCreateForm, setShowCreateForm] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newDesc, setNewDesc] = useState('');
-  const [newMaxPlayers, setNewMaxPlayers] = useState(64);
-  const [regDays, setRegDays] = useState(3);
-  const [sprintCount, setSprintCount] = useState(4);
-  const [sprintSchedule, setSprintSchedule] = useState<string[]>(DEFAULT_SPRINT_SCHEDULE);
-
+  const selectTournament = (id: string | null) => {
+    setSelectedId(id);
+    onSelectionChange?.(id);
+  };
   useEffect(() => {
-    if (initialSelectedId) {
-      setSelectedId(initialSelectedId);
-      onClearInitialSelectedId?.();
+    if (!initialSelectedId) {
+      appliedInitialSelectedId.current = null;
+      return;
     }
+    if (appliedInitialSelectedId.current === initialSelectedId) return;
+    appliedInitialSelectedId.current = initialSelectedId;
+    selectTournament(initialSelectedId);
+    onClearInitialSelectedId?.();
   }, [initialSelectedId, onClearInitialSelectedId]);
 
   const loadTournamentDetail = useCallback(
-    async (id: string) => {
-      setLoadingDetail(true);
+    async (id: string, showLoading = true) => {
+      if (showLoading) setLoadingDetail(true);
       try {
         const res = await backendClient.getTournamentDetail(id);
         setDetail(res);
       } catch (err: any) {
         notify(err.message || 'Không thể tải thông tin giải đấu.', 'error');
       } finally {
-        setLoadingDetail(false);
+        if (showLoading) setLoadingDetail(false);
       }
     },
     [notify]
@@ -164,26 +182,15 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     };
   }, [notify]);
 
-  const handleCreateTournament = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateTournament = async (payload: TournamentCreatePayload) => {
     setSubmittingAction(true);
     try {
-      const created = await backendClient.createTournament({
-        name: newName,
-        format: 'ranked_weekly',
-        description: newDesc,
-        registrationDays: regDays,
-        sprintCount,
-        maxTeams: newMaxPlayers,
-        sprintRules: sprintSchedule.slice(0, sprintCount),
-      });
+      const created = await backendClient.createTournament(payload);
       await onRefreshTournaments();
       setShowCreateForm(false);
-      setNewName('');
-      setNewDesc('');
-      notify('Đã tạo giải đấu cá nhân mới thành công!', 'success');
+      notify('Đã tạo giải đấu mới thành công.', 'success');
       if (created?.tournament?.id) {
-        setSelectedId(created.tournament.id);
+        selectTournament(created.tournament.id);
       }
     } catch (err: any) {
       notify(err.message || 'Tạo giải đấu thất bại.', 'error');
@@ -201,6 +208,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     try {
       await backendClient.registerTournament(tournamentId);
       await onRefreshTournaments();
+      selectTournament(tournamentId);
       await loadTournamentDetail(tournamentId);
       notify(
         savedBotVersion > 0
@@ -264,6 +272,22 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     }
   };
 
+  const handleCancelTournament = async (tournamentId: string) => {
+    setSubmittingAction(true);
+    try {
+      await backendClient.cancelTournament(tournamentId);
+      await onRefreshTournaments();
+      setShowCancelTournamentConfirm(false);
+      selectTournament(null);
+      setDetail(null);
+      notify('Đã hủy giải đấu và gỡ khỏi danh sách.', 'success');
+    } catch (err: any) {
+      notify(err.message || 'Không thể hủy giải đấu.', 'error');
+    } finally {
+      setSubmittingAction(false);
+    }
+  };
+
   const handleFindMatch = async (tournamentId: string) => {
     if (!user) {
       onOpenAuth('login');
@@ -292,6 +316,29 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     const myMatches: any[] = detail?.matches || [];
     const ranks: any[] = detail?.ranks || [];
 
+    if (t?.format === 'group_knockout') {
+      return (
+        <GroupKnockoutTournamentDetail
+          tournament={t}
+          detail={detail}
+          user={user}
+            savedBotVersion={savedBotVersion}
+            themeMode={themeMode}
+            loading={loadingDetail}
+          onBack={() => {
+            backendClient.cancelMatch();
+            setQueuingTournament(false);
+            selectTournament(null);
+            setDetail(null);
+          }}
+          onRefresh={onRefreshTournaments}
+          onRefreshDetail={() => loadTournamentDetail(t.id, false)}
+          onOpenAuth={() => onOpenAuth('login')}
+          onOpenBotLab={() => onOpenBotLab(t.id)}
+        />
+      );
+    }
+
     const previewRules =
       t?.status !== 'registration' && t?.rules_json?.blockedCells
         ? t.rules_json
@@ -306,7 +353,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             onClick={() => {
               backendClient.cancelMatch();
               setQueuingTournament(false);
-              setSelectedId(null);
+              selectTournament(null);
               setDetail(null);
             }}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
@@ -317,6 +364,17 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
 
           {user?.isAdmin && t && (
             <div className="flex flex-wrap items-center gap-2">
+              {!['completed', 'cancelled'].includes(t.status) && (
+                <button
+                  type="button"
+                  disabled={submittingAction}
+                  onClick={() => setShowCancelTournamentConfirm(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <XCircle className="w-4 h-4" />
+                  Hủy giải đấu
+                </button>
+              )}
               {t.status === 'registration' && (
                 <button
                   type="button"
@@ -363,6 +421,48 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
           </div>
         ) : (
           <>
+            {showCancelTournamentConfirm && t && (
+              <div
+                className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget && !submittingAction) {
+                    setShowCancelTournamentConfirm(false);
+                  }
+                }}
+              >
+                <section
+                  role="alertdialog"
+                  aria-modal="true"
+                  aria-labelledby="cancel-selected-tournament-heading"
+                  className="w-full max-w-md rounded-2xl border border-red-500/40 bg-[var(--bg-elevated)] p-5 shadow-2xl"
+                >
+                  <h3 id="cancel-selected-tournament-heading" className="text-lg font-bold text-red-300">
+                    Xác nhận hủy giải đấu?
+                  </h3>
+                  <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                    Giải “{t.name}” sẽ bị hủy, các trận đang chạy sẽ dừng và giải được gỡ khỏi danh sách.
+                  </p>
+                  <div className="mt-5 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      disabled={submittingAction}
+                      onClick={() => setShowCancelTournamentConfirm(false)}
+                      className="rounded-xl border border-[var(--border-subtle)] px-4 py-2 text-xs text-[var(--text-secondary)] disabled:opacity-50"
+                    >
+                      Không hủy
+                    </button>
+                    <button
+                      type="button"
+                      disabled={submittingAction}
+                      onClick={() => handleCancelTournament(t.id)}
+                      className="rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                    >
+                      {submittingAction ? 'Đang hủy…' : 'Xác nhận hủy giải'}
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )}
             {/* Tournament Hero & Map Preview */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] items-center">
               <div className="lg:col-span-8 space-y-4">
@@ -374,7 +474,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       ? 'Giai đoạn A · Mở đăng ký & Chạy đà luyện tập'
                       : 'Giải đấu đã khép lại · Đã mở BXH Thách Đấu'}
                     {' · '}
-                    {detail.participantCount}/{t.max_teams} kỳ thủ cá nhân
+                    {detail.participantCount} kỳ thủ cá nhân
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <h2 className="text-2xl font-bold text-[var(--text-primary)] text-balance">
@@ -492,7 +592,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       ) : savedBotVersion <= 0 ? (
                         <button
                           type="button"
-                          onClick={onOpenBotLab}
+                          onClick={() => onOpenBotLab()}
                           className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap shrink-0"
                         >
                           <Code2 className="w-4 h-4" />
@@ -853,9 +953,17 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   }
 
   // ── TOURNAMENT DIRECTORY LIST VIEW (1-Click Event Frame) ──────
-  const filteredList = tournaments.filter((t) =>
-    statusFilter === 'all' ? true : t.status === statusFilter
-  );
+  const filteredList = tournaments.filter((tournament) => {
+    if (tournament.format !== 'group_knockout' || tournament.status === 'cancelled') return false;
+    if (statusFilter === 'upcoming') {
+      return ['scheduled', 'grouping', 'group_stage'].includes(tournament.status);
+    }
+    if (statusFilter === 'registration') return tournament.status === 'registration';
+    if (statusFilter === 'in_progress') {
+      return ['group_running', 'group_complete', 'knockout'].includes(tournament.status);
+    }
+    return tournament.status === 'completed';
+  });
 
   return (
     <div className="space-y-6">
@@ -864,15 +972,16 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
         <div className="flex items-center gap-1 p-1 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)]">
           {(
             [
-              { id: 'all', label: 'Tất cả giải' },
-              { id: 'qualifying', label: 'Đang thực chiến' },
-              { id: 'registration', label: 'Mở đăng ký · Chạy đà' },
-              { id: 'completed', label: 'Đã kết thúc' },
+              { id: 'upcoming', label: 'Sắp diễn ra' },
+              { id: 'registration', label: 'Đang mở đăng ký' },
+              { id: 'in_progress', label: 'Đang diễn ra' },
+              { id: 'completed', label: 'Đã Kết Thúc' },
             ] as const
           ).map((tab) => (
             <button
               key={tab.id}
               type="button"
+              aria-pressed={statusFilter === tab.id}
               onClick={() => setStatusFilter(tab.id)}
               className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 statusFilter === tab.id
@@ -886,153 +995,25 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
         </div>
 
         {user?.isAdmin && (
-          <button
-            type="button"
-            onClick={() => setShowCreateForm((v) => !v)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            {showCreateForm ? 'Đóng biểu mẫu' : 'Tạo giải đấu mới (BTC)'}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setShowCreateForm(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              Tạo giải đấu mới (BTC)
+            </button>
+          </div>
         )}
       </div>
 
-      {/* Collapsible Admin Create Tournament Panel */}
       {showCreateForm && user?.isAdmin && (
-        <form
+        <TournamentCreationModal
+          submitting={submittingAction}
+          onClose={() => setShowCreateForm(false)}
           onSubmit={handleCreateTournament}
-          className="p-6 rounded-2xl border border-[var(--border-accent)] bg-[var(--bg-elevated)] space-y-4"
-        >
-          <h3 className="text-base font-bold text-[var(--text-primary)]">
-            Khởi tạo Giải đấu Cá nhân theo Sprint Tuần
-          </h3>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="md:col-span-2">
-              <label className="block text-xs text-[var(--text-secondary)] mb-1">Tên giải đấu</label>
-              <input
-                type="text"
-                required
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="Ví dụ: Đấu Trường Trăng Máu Mùa 2"
-                className="w-full px-3.5 py-2 text-sm rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-[var(--text-secondary)] mb-1">
-                Số kỳ thủ cá nhân tối đa
-              </label>
-              <input
-                type="number"
-                min={2}
-                max={256}
-                value={newMaxPlayers}
-                onChange={(e) => setNewMaxPlayers(Number(e.target.value))}
-                className="w-full px-3.5 py-2 text-sm font-mono rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs text-[var(--text-secondary)] mb-1">
-              Thể lệ & mô tả giải đấu
-            </label>
-            <textarea
-              rows={2}
-              value={newDesc}
-              onChange={(e) => setNewDesc(e.target.value)}
-              placeholder="Mô tả ngắn gọn lịch thi đấu Chạy đà & Thực chiến…"
-              className="w-full px-3.5 py-2 text-sm rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-            />
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
-            <div>
-              <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                Số ngày đăng ký
-              </label>
-              <input
-                type="number"
-                min={1}
-                max={30}
-                value={regDays}
-                onChange={(e) => setRegDays(Number(e.target.value))}
-                className="w-full px-3 py-1.5 font-mono rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-              />
-            </div>
-            <div>
-              <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                Số Sprint Thực chiến
-              </label>
-              <input
-                type="number"
-                min={1}
-                max={52}
-                value={sprintCount}
-                onChange={(e) => {
-                  const nextCount = Math.min(52, Math.max(1, Math.floor(Number(e.target.value) || 1)));
-                  setSprintCount(nextCount);
-                  setSprintSchedule((current) =>
-                    Array.from(
-                      { length: nextCount },
-                      (_, index) => current[index] || DEFAULT_SPRINT_SCHEDULE[index % DEFAULT_SPRINT_SCHEDULE.length]
-                    )
-                  );
-                }}
-                className="w-full px-3 py-1.5 font-mono rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-              />
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs font-semibold text-[var(--text-primary)] mb-2">
-              Chọn thể lệ riêng cho từng Sprint (7 ngày/Sprint)
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {Array.from({ length: sprintCount }, (_, sprintIdx) => (
-              <div key={sprintIdx}>
-                <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                  Thể lệ Sprint {sprintIdx + 1}
-                </label>
-                <select
-                  value={sprintSchedule[sprintIdx]}
-                  onChange={(e) => {
-                    const copy = [...sprintSchedule];
-                    copy[sprintIdx] = e.target.value;
-                    setSprintSchedule(copy);
-                  }}
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-                >
-                  {Object.values(SPRINT_RULE_PRESETS).map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.title}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-2.5 pt-2">
-            <button
-              type="button"
-              onClick={() => setShowCreateForm(false)}
-              className="px-4 py-2 rounded-xl text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer whitespace-nowrap"
-            >
-              Hủy
-            </button>
-            <button
-              type="submit"
-              disabled={submittingAction}
-              className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap"
-            >
-              {submittingAction ? 'Đang khởi tạo…' : 'Công bố Giải đấu'}
-            </button>
-          </div>
-        </form>
+        />
       )}
 
       {/* Tournament cards open details; registration happens inside the detail view. */}
@@ -1043,17 +1024,24 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
           {filteredList.map((t) => {
-            const endDate = new Date(t.ends_at).toLocaleDateString('vi-VN');
+            const eventDate = new Date(
+              t.format === 'group_knockout'
+                ? t.tournament_starts_at || t.registration_closes_at
+                : t.ends_at
+            ).toLocaleString('vi-VN', { dateStyle: 'medium', timeStyle: 'short' });
+            const statusLabel = t.status === 'group_stage'
+              ? `${t.group_count || 0} bảng · Chờ khởi chạy`
+              : GROUP_TOURNAMENT_STATUS_LABELS[t.status] || t.status;
             return (
               <div
                 key={t.id}
                 role="button"
                 tabIndex={0}
-                onClick={() => setSelectedId(t.id)}
+                onClick={() => selectTournament(t.id)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    setSelectedId(t.id);
+                    selectTournament(t.id);
                   }
                 }}
                 aria-label={`Mở sự kiện ${t.name}`}
@@ -1061,13 +1049,9 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
               >
                 <div className="space-y-2.5">
                   <div className="text-xs font-medium text-[var(--accent-primary)] tabular-nums">
-                    {t.status === 'qualifying'
-                      ? `Thực Chiến · Sprint ${t.current_week || 1}/${t.total_sprints}`
-                      : t.status === 'registration'
-                      ? 'Mở Đăng Ký · Vòng Chạy Đà'
-                      : 'Đã Kết Thúc · Đã Công Bố BXH'}
+                    {statusLabel}
                     {' · '}
-                    {t.participant_count || 0}/{t.max_teams} kỳ thủ cá nhân
+                    {t.participant_count || 0} đã đăng ký
                   </div>
 
                   <h3 className="text-xl font-bold text-[var(--text-primary)] group-hover:text-[var(--accent-primary)] transition-colors">
@@ -1081,7 +1065,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                 <div className="pt-4 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--text-muted)] tabular-nums">
                   <div className="flex items-center gap-1.5">
                     <Calendar className="w-3.5 h-3.5" />
-                    <span>Kết thúc: {endDate}</span>
+                    <span>{t.format === 'group_knockout' ? 'Bắt đầu: ' : 'Kết thúc: '}{eventDate}</span>
                     {t.rules_json?.title && (
                       <>
                         <span aria-hidden="true">·</span>
@@ -1089,13 +1073,144 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       </>
                     )}
                   </div>
-                  <span className="text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] transition-colors">
-                    Nhấn vào khung sự kiện để xem chi tiết
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {t.status === 'registration' && (
+                      <button
+                        type="button"
+                        disabled={submittingAction}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleRegister(t.id);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-primary)] px-3 py-1.5 font-semibold text-white hover:bg-[var(--accent-primary-hover)] disabled:opacity-50"
+                      >
+                        Đăng ký tham gia
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setRulesPreviewTournament(t);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-accent)] px-3 py-1.5 text-[var(--accent-primary)] hover:bg-[var(--bg-hover)]"
+                    >
+                      <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
+                      Xem thể lệ thi đấu
+                    </button>
+                  </div>
                 </div>
               </div>
             );
           })}
+        </div>
+      )}
+
+      {rulesPreviewTournament && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setRulesPreviewTournament(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="card-tournament-rules-heading"
+            className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 sm:p-7 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[var(--border-subtle)] pb-4">
+              <div>
+                <h3 id="card-tournament-rules-heading" className="text-lg font-bold text-[var(--text-primary)]">
+                  Thể lệ giải: {rulesPreviewTournament.name}
+                </h3>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">Các mốc thời gian và luật thi đấu đã công bố</p>
+              </div>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setRulesPreviewTournament(null)}
+                className="rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+              >
+                Đóng
+              </button>
+            </div>
+            <div className="mt-5 space-y-4 text-sm text-[var(--text-secondary)]">
+              {rulesPreviewTournament.description && <p className="whitespace-pre-wrap">{rulesPreviewTournament.description}</p>}
+              <dl className="grid gap-3 sm:grid-cols-3">
+                {[
+                  ['Mở đăng ký', rulesPreviewTournament.registration_opens_at],
+                  ['Đóng đăng ký', rulesPreviewTournament.registration_closes_at],
+                  [rulesPreviewTournament.format === 'group_knockout' ? 'Bắt đầu giải' : 'Kết thúc giải',
+                    rulesPreviewTournament.tournament_starts_at || rulesPreviewTournament.ends_at],
+                ].filter((entry) => Boolean(entry[1])).map(([label, value]) => (
+                  <div key={label} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                    <dt className="text-xs text-[var(--text-muted)]">{label}</dt>
+                    <dd className="mt-1 font-semibold text-[var(--text-primary)]">
+                      {new Date(value as string).toLocaleString('vi-VN', { dateStyle: 'medium', timeStyle: 'short' })}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              {rulesPreviewTournament.format === 'group_knockout' ? (
+                <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(250px,0.8fr)]">
+                  <div className="space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
+                    <p>Bàn đấu 9 × 9, có {rulesPreviewTournament.rules_json?.blockedCells?.length || 0} ô chướng ngại đối xứng.</p>
+                    <p>
+                      Luật xử lý: {rulesPreviewTournament.rules_json?.moveLimitRule === 'standard'
+                        ? 'cơ bản, tiếp tục đến khi có bên thắng hoặc hòa'
+                        : rulesPreviewTournament.rules_json?.moveLimitRule === 'goal-distance'
+                        ? 'sau 25 nước, tính điểm theo khoảng cách đến ô đích'
+                        : rulesPreviewTournament.rules_json?.moveLimitRule === 'captured-points'
+                        ? 'sau 25 nước, tính điểm quân đã ăn'
+                        : 'sau 25 nước, đếm số quân còn lại'}
+                      {rulesPreviewTournament.rules_json?.moveLimitRule === 'captured-points' && (
+                        <> (Đấm {rulesPreviewTournament.rules_json?.capturedPieceValues?.rock || 1}, Lá {rulesPreviewTournament.rules_json?.capturedPieceValues?.paper || 2}, Kéo {rulesPreviewTournament.rules_json?.capturedPieceValues?.scissors || 3} điểm)</>
+                      )}
+                    </p>
+                    {rulesPreviewTournament.rules_json?.moveLimitRule === 'standard' && (
+                      <>
+                        <p>Thắng: phe Cam chiếm ô i9, phe Tím chiếm ô a1 hoặc diệt sạch 1 trong 3 hệ linh vật của đối phương.</p>
+                        <p>Hòa: lặp thế cờ 3 lần, 50 nước không ăn quân hoặc bên tới lượt hết nước đi hợp lệ.</p>
+                        <p>Thoát trận, treo máy, ngâm gói xác nhận ACK hoặc gửi sai mã băm SHA-256 sẽ bị xử thua kỹ thuật ngay lập tức.</p>
+                      </>
+                    )}
+                    <p>Chia bảng ngẫu nhiên và cân bằng; vòng bảng đấu hai lượt. Thắng 3 điểm, hòa 1 điểm, thua 0 điểm; hai đấu thủ đầu bảng vào vòng knock-out.</p>
+                    <p>Knock-out theo nhánh nhất bảng gặp nhì bảng; trận hòa sẽ được đấu lại.</p>
+                  </div>
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                    <h4 className="mb-3 text-center text-xs font-semibold text-[var(--text-primary)]">
+                      Bản đồ áp dụng · Bàn 9×9
+                    </h4>
+                    <Board9x9
+                      state={OTTGameEngine.createGame(
+                        20261031,
+                        9,
+                        rulesPreviewTournament.rules_json
+                      )}
+                      themeMode={themeMode}
+                      size="mini"
+                      showCoordinates={false}
+                      showLegend={false}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
+                  <p className="font-semibold text-[var(--text-primary)]">{rulesPreviewTournament.rules_json?.title || 'Thể lệ giải Sprint'}</p>
+                  <p className="mt-2">
+                    Luật các Sprint: {(rulesPreviewTournament.rules_schedule || [])
+                      .map((ruleId, index) => {
+                        const preset = SPRINT_RULE_PRESETS[ruleId];
+                        return `${index + 1}. ${preset?.title || ruleId}${preset?.subtitle ? ` — ${preset.subtitle}` : ''}`;
+                      })
+                      .join(' · ') || 'theo cấu hình của Ban Tổ Chức'}.
+                  </p>
+                  <p className="mt-2">Đăng ký tài khoản tham gia; kết quả và thứ hạng được tính theo thể thức giải Sprint.</p>
+                </div>
+              )}
+            </div>
+          </section>
         </div>
       )}
     </div>

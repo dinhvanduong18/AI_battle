@@ -226,7 +226,11 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   onOpenAuth,
   onWatchMatchReplay,
 }) => {
-  const openTournaments = tournaments.filter((t) => t.status !== 'completed');
+  const openTournaments = tournaments.filter(
+    (tournament) =>
+      tournament.format === 'group_knockout' &&
+      !['completed', 'cancelled'].includes(tournament.status)
+  );
   const visibleMatches = recentMatches.filter((match) => !match.is_sparring);
   const elo = user?.elo ?? 1200;
   const eloRank = elo >= 1600 ? 'Vàng' : elo >= 1350 ? 'Bạc' : 'Đồng';
@@ -245,7 +249,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
               Lập trình Bot Python 3 & Đối kháng chiến thuật 9×9 thời gian thực
             </h2>
             <p className="text-sm sm:text-base text-[var(--text-secondary)] leading-relaxed max-w-2xl">
-              Huấn luyện thuật toán trực tiếp trong trình duyệt với Pyodide, thi đấu xếp hạng Elo FIDE xác thực chữ ký số ECDSA P-256 và tranh tài tại các giải đấu biến đổi địa hình theo từng Sprint.
+              Huấn luyện thuật toán trực tiếp trong trình duyệt với Pyodide, thi đấu xếp hạng Elo FIDE xác thực chữ ký số ECDSA P-256 và tranh tài trong các giải đấu vòng bảng, knock-out với bản đồ tùy chỉnh.
             </p>
           </div>
 
@@ -402,7 +406,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
                         </span>
                         <span aria-hidden="true"> · </span>
                         <span>
-                          {t.participant_count || 0}/{t.max_teams} kỳ thủ
+                          {t.participant_count || 0} kỳ thủ
                         </span>
                         {t.rules_json?.title && (
                           <>

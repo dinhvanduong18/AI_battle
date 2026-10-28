@@ -121,10 +121,13 @@ export interface TournamentItem {
   name: string;
   format: string;
   description: string;
-  status: 'registration' | 'qualifying' | 'completed';
+  status: 'scheduled' | 'registration' | 'grouping' | 'group_stage' | 'group_running' | 'group_complete' | 'knockout' | 'qualifying' | 'completed' | 'cancelled';
+  registration_opens_at?: string;
   registration_closes_at: string;
+  tournament_starts_at?: string;
   ends_at: string;
   max_teams: number;
+  group_count?: number | null;
   current_week: number;
   total_sprints: number;
   week_started_at: string | null;
@@ -349,14 +352,35 @@ export class BackendClient {
 
   async createTournament(payload: {
     name: string;
-    format: string;
     description: string;
-    registrationDays: number;
-    sprintCount: number;
-    maxTeams: number;
-    sprintRules: string[];
+    registrationOpensAt: string;
+    registrationClosesAt: string;
+    tournamentStartsAt: string;
+    blockedCells: number[];
+    moveLimitRule: 'standard' | 'remaining-pieces' | 'goal-distance' | 'captured-points';
+    capturedPieceValues: { rock: number; paper: number; scissors: number };
   }) {
     return this.request('/api/tournaments', 'POST', payload, true);
+  }
+
+  async createTournamentGroups(id: string, groupCount: number) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/groups`, 'POST', { groupCount }, true);
+  }
+
+  async startTournamentGroups(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/start-groups`, 'POST', {}, true);
+  }
+
+  async startTournamentKnockout(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/start-knockout`, 'POST', {}, true);
+  }
+
+  async cancelTournament(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/cancel`, 'POST', {}, true);
+  }
+
+  async cancelAllTournaments() {
+    return this.request('/api/tournaments/cancel-all', 'POST', {}, true);
   }
 
   async startTournament(id: string) {

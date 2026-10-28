@@ -30,6 +30,14 @@ import {
   verifyReplay,
   verifySessionProof,
 } from './server/src/replay.js';
+import {
+  buildTournamentRules,
+  calculateGroupStandings,
+  createDoubleRoundRobinFixtures,
+  createKnockoutOpeningRound,
+  createNextKnockoutRound,
+  distributeTournamentGroups,
+} from './server/src/tournament-format.js';
 
 const require = createRequire(import.meta.url);
 const { OTTGameEngine } = require('./shared/OTTGameEngine.js');
@@ -185,12 +193,15 @@ interface BotVersionRecord {
 interface TournamentRecord {
   id: string;
   name: string;
-  format: 'ranked_weekly';
+  format: 'ranked_weekly' | 'group_knockout';
   description: string;
-  status: 'registration' | 'qualifying' | 'completed';
+  status: 'scheduled' | 'registration' | 'grouping' | 'group_stage' | 'group_running' | 'group_complete' | 'knockout' | 'qualifying' | 'completed' | 'cancelled';
   registration_closes_at: string;
+  registration_opens_at?: string;
+  tournament_starts_at?: string;
   ends_at: string;
   max_teams: number;
+  group_count?: number | null;
   current_week: number;
   last_reset_week?: number;
   week_started_at: string | null;
@@ -213,6 +224,25 @@ interface TournamentEntryRecord {
   rank_stars: number;
   season_points: number;
   registered_at: string;
+  group_number?: number | null;
+}
+
+interface TournamentFixtureRecord {
+  id: string;
+  tournament_id: string;
+  phase: 'group' | 'knockout';
+  group_number: number | null;
+  round_number: number;
+  match_number: number;
+  leg: number;
+  player1_id: string;
+  player2_id: string;
+  status: 'pending' | 'active' | 'completed';
+  winner_id: string | null;
+  move_count: number | null;
+  player1_ready_at: string | null;
+  player2_ready_at: string | null;
+  match_id: string | null;
 }
 
 interface ConsensusTrackState {
@@ -240,8 +270,10 @@ interface MatchRecord {
   match_type: 'human' | 'bot';
   status: 'pending' | 'active' | 'completed' | 'disputed' | 'abandoned';
   tournament_id: string | null;
-  tournament_phase: 'practice' | 'ranked' | null;
+  tournament_phase: 'practice' | 'ranked' | 'group' | 'knockout' | null;
   tournament_rules: any | null;
+  tournament_fixture_id?: string | null;
+  final_step_count?: number | null;
   is_sparring?: boolean;
   player1_bot_version?: number;
   player2_bot_version?: number;
@@ -285,10 +317,12 @@ interface MatchDisputeRecord {
 }
 
 interface DatabaseSchema {
+  groupKnockoutLifecycleVersion?: number;
   users: UserRecord[];
   botVersions: BotVersionRecord[];
   tournaments: TournamentRecord[];
   tournamentEntries: TournamentEntryRecord[];
+  tournamentFixtures: TournamentFixtureRecord[];
   matches: MatchRecord[];
   matchResults: MatchResultRecord[];
   matchDisputes: MatchDisputeRecord[];
@@ -547,6 +581,7 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
     botVersions,
     tournaments,
     tournamentEntries,
+    tournamentFixtures: [],
     matches: [],
     matchResults: [],
     matchDisputes: [],
@@ -690,6 +725,7 @@ export async function startServer(options: ServerStartOptions = {}) {
           db.matches = Array.isArray(db.matches) ? db.matches : [];
           db.matchResults = Array.isArray(db.matchResults) ? db.matchResults : [];
           db.matchDisputes = Array.isArray(db.matchDisputes) ? db.matchDisputes : [];
+          db.tournamentFixtures = Array.isArray(db.tournamentFixtures) ? db.tournamentFixtures : [];
           const rankedMatchesById = new Map(
             db.matches
               .filter(
@@ -734,6 +770,17 @@ export async function startServer(options: ServerStartOptions = {}) {
             if (e.draws === undefined) e.draws = 0;
             if (e.tier === 'Challenger') e.rank_stars = 0;
           }
+          let groupLifecycleMigrated = false;
+          if (db.groupKnockoutLifecycleVersion !== 1) {
+            for (const tournament of db.tournaments) {
+              if (tournament.format === 'group_knockout' && tournament.status === 'group_stage') {
+                tournament.status = 'group_running';
+                groupLifecycleMigrated = true;
+              }
+            }
+            db.groupKnockoutLifecycleVersion = 1;
+            groupLifecycleMigrated = true;
+          }
           // Ensure demo accounts p3/p4 are registered in t1Id if t1Id exists so demo testing works seamlessly
           const t1 = db.tournaments.find((t) => t.id === '11111111-2222-4333-8444-555555555501');
           if (t1 && t1.status === 'qualifying') {
@@ -766,7 +813,7 @@ export async function startServer(options: ServerStartOptions = {}) {
               }
             }
           }
-          if (eloPeaksMigrated) saveDb();
+          if (eloPeaksMigrated || groupLifecycleMigrated) saveDb();
           return;
         }
       }
@@ -774,6 +821,7 @@ export async function startServer(options: ServerStartOptions = {}) {
       // Recreate on corrupt JSON
     }
     db = await createSeedDatabase();
+    db.groupKnockoutLifecycleVersion = 1;
     for (const user of db.users) {
       if (options.testAdminEmails?.includes(user.email)) user.is_admin = true;
     }
@@ -875,6 +923,31 @@ export async function startServer(options: ServerStartOptions = {}) {
     const now = Date.now();
     let dirty = false;
     for (const t of db.tournaments) {
+      if (t.format === 'group_knockout') {
+        for (const fixture of db.tournamentFixtures) {
+          if (fixture.tournament_id !== t.id || fixture.status !== 'active') continue;
+          const linkedMatch = db.matches.find((match) => match.id === fixture.match_id);
+          if (!linkedMatch || linkedMatch.status === 'abandoned') {
+            fixture.status = 'pending';
+            fixture.match_id = null;
+            fixture.player1_ready_at = null;
+            fixture.player2_ready_at = null;
+            dirty = true;
+          }
+        }
+        const opensAt = new Date(t.registration_opens_at || t.created_at).getTime();
+        const closesAt = new Date(t.registration_closes_at).getTime();
+        const entryCount = db.tournamentEntries.filter((entry) => entry.tournament_id === t.id).length;
+        if (t.status === 'scheduled' && now >= opensAt) {
+          t.status = 'registration';
+          dirty = true;
+        }
+        if (t.status === 'registration' && now >= closesAt) {
+          t.status = 'grouping';
+          dirty = true;
+        }
+        continue;
+      }
       const endMs = new Date(t.ends_at).getTime();
       const regCloseMs = new Date(t.registration_closes_at).getTime();
       const entryCount = db.tournamentEntries.filter(
@@ -921,10 +994,172 @@ export async function startServer(options: ServerStartOptions = {}) {
     if (dirty) saveDb();
   }
 
+  function tournamentGroupStandings(tournamentId: string) {
+    const entries = db.tournamentEntries
+      .filter((entry) => entry.tournament_id === tournamentId && entry.group_number)
+      .map((entry) => ({
+        ...entry,
+        display_name: db.users.find((user) => user.id === entry.player_id)?.display_name || 'Đấu thủ',
+        avatar_id: db.users.find((user) => user.id === entry.player_id)?.avatar_id || 'pumpkin',
+        avatar_url: db.users.find((user) => user.id === entry.player_id)?.avatar_url || null,
+      }));
+    return calculateGroupStandings(
+      entries,
+      db.tournamentFixtures.filter((fixture) =>
+        fixture.tournament_id === tournamentId && fixture.phase === 'group'
+      )
+    );
+  }
+
+  function createTournamentFixture(
+    tournamentId: string,
+    fixture: Omit<TournamentFixtureRecord, 'id' | 'tournament_id' | 'winner_id' | 'move_count' | 'player1_ready_at' | 'player2_ready_at' | 'match_id'>
+  ) {
+    return {
+      ...fixture,
+      id: randomUUID(),
+      tournament_id: tournamentId,
+      winner_id: null,
+      move_count: null,
+      player1_ready_at: null,
+      player2_ready_at: null,
+      match_id: null,
+    } satisfies TournamentFixtureRecord;
+  }
+
+  function advanceGroupKnockoutTournament(tournament: TournamentRecord) {
+    const fixtures = db.tournamentFixtures.filter((fixture) => fixture.tournament_id === tournament.id);
+    if (tournament.status === 'group_running') {
+      const groupFixtures = fixtures.filter((fixture) => fixture.phase === 'group');
+      if (!groupFixtures.length || groupFixtures.some((fixture) => fixture.status !== 'completed')) return;
+      tournament.status = 'group_complete';
+      return;
+    }
+    if (tournament.status !== 'knockout') return;
+    const knockoutFixtures = fixtures.filter((fixture) => fixture.phase === 'knockout');
+    const roundNumber = Math.max(...knockoutFixtures.map((fixture) => fixture.round_number));
+    const currentRound = knockoutFixtures.filter((fixture) => fixture.round_number === roundNumber);
+    if (!currentRound.length || currentRound.some((fixture) => fixture.status !== 'completed' || !fixture.winner_id)) return;
+    const winners = currentRound
+      .sort((first, second) => first.match_number - second.match_number)
+      .map((fixture) => fixture.winner_id as string);
+    if (winners.length === 1) {
+      tournament.status = 'completed';
+      return;
+    }
+    const nextRound = createNextKnockoutRound(winners, roundNumber + 1);
+    db.tournamentFixtures.push(
+      ...nextRound.map((fixture) => createTournamentFixture(tournament.id, {
+        phase: 'knockout',
+        group_number: null,
+        round_number: fixture.roundNumber,
+        match_number: fixture.matchNumber,
+        leg: 1,
+        player1_id: fixture.player1Id,
+        player2_id: fixture.player2Id,
+        status: 'pending',
+      }))
+    );
+  }
+
+  function completeTournamentFixture(match: MatchRecord, winnerId: string | null, moveCount: number) {
+    if (!match.tournament_fixture_id || !match.tournament_id) return;
+    const fixture = db.tournamentFixtures.find((item) =>
+      item.id === match.tournament_fixture_id && item.tournament_id === match.tournament_id
+    );
+    const tournament = db.tournaments.find((item) => item.id === match.tournament_id);
+    if (!fixture || !tournament) return;
+    fixture.move_count = moveCount;
+    if (fixture.phase === 'knockout' && !winnerId) {
+      fixture.leg += 1;
+      fixture.status = 'pending';
+      fixture.player1_ready_at = null;
+      fixture.player2_ready_at = null;
+      fixture.match_id = null;
+      return;
+    }
+    fixture.winner_id = winnerId;
+    fixture.status = 'completed';
+    advanceGroupKnockoutTournament(tournament);
+  }
+
+  function isCurrentGroupKnockoutFixture(
+    match: MatchRecord,
+    tournament: TournamentRecord | undefined,
+    fixture: TournamentFixtureRecord | undefined
+  ) {
+    const expectedStatus = match.tournament_phase === 'group'
+      ? 'group_running'
+      : match.tournament_phase === 'knockout'
+      ? 'knockout'
+      : null;
+    return Boolean(
+      expectedStatus &&
+      tournament?.format === 'group_knockout' &&
+      tournament.status === expectedStatus &&
+      tournament.tournament_starts_at !== undefined &&
+      new Date(tournament.tournament_starts_at).getTime() <= Date.now() &&
+      fixture?.tournament_id === tournament.id &&
+      fixture.phase === match.tournament_phase &&
+      fixture.status === 'active' &&
+      fixture.match_id === match.id &&
+      [fixture.player1_id, fixture.player2_id].includes(match.player1_id) &&
+      [fixture.player1_id, fixture.player2_id].includes(match.player2_id)
+    );
+  }
+
+  function getPendingTournamentFixture(tournament: TournamentRecord, playerId: string) {
+    if (
+      tournament.format !== 'group_knockout' ||
+      !['group_running', 'knockout'].includes(tournament.status) ||
+      (tournament.status === 'knockout' && tournament.tournament_starts_at &&
+        new Date(tournament.tournament_starts_at).getTime() > Date.now())
+    ) return null;
+
+    const entry = db.tournamentEntries.find((item) =>
+      item.tournament_id === tournament.id && item.player_id === playerId
+    );
+    if (!entry) return null;
+    const fixtures = db.tournamentFixtures.filter((fixture) =>
+      fixture.tournament_id === tournament.id &&
+      fixture.phase === (tournament.status === 'group_running' ? 'group' : 'knockout') &&
+      (fixture.phase !== 'group' || fixture.group_number === entry.group_number) &&
+      (fixture.player1_id === playerId || fixture.player2_id === playerId)
+    );
+    if (!fixtures.length) return null;
+    let recoveredAbandonedFixture = false;
+    for (const fixture of fixtures) {
+      if (fixture.status !== 'active') continue;
+      const linkedMatch = db.matches.find((match) => match.id === fixture.match_id);
+      if (!linkedMatch || linkedMatch.status === 'abandoned') {
+        fixture.status = 'pending';
+        fixture.match_id = null;
+        fixture.player1_ready_at = null;
+        fixture.player2_ready_at = null;
+        recoveredAbandonedFixture = true;
+      }
+    }
+    if (recoveredAbandonedFixture) saveDb();
+    if (db.matches.some((match) =>
+      match.tournament_id === tournament.id &&
+      match.status === 'active' &&
+      (match.player1_id === playerId || match.player2_id === playerId)
+    )) return null;
+    const round = Math.min(...fixtures
+      .filter((fixture) => fixture.status !== 'completed')
+      .map((fixture) => fixture.round_number));
+    if (!Number.isFinite(round)) return null;
+    const currentRound = fixtures.filter((fixture) =>
+      fixture.round_number === round && fixture.status !== 'completed'
+    );
+    if (currentRound.some((fixture) => fixture.status === 'active')) return null;
+    return currentRound.find((fixture) => fixture.status === 'pending') || null;
+  }
+
   function applyTournamentScoreForMatch(match: MatchRecord, score1: number) {
     const updates = new Map<
       string,
-      { tier: RankTier; stars: number; seasonPoints: number; phase: 'practice' | 'ranked' | null }
+      { tier: RankTier; stars: number; seasonPoints: number; phase: 'practice' | 'ranked' | 'group' | 'knockout' | null }
     >();
     if (!match.tournament_id || match.is_sparring) return updates;
 
@@ -951,6 +1186,11 @@ export async function startServer(options: ServerStartOptions = {}) {
         entry.rank_stars = prog.stars;
         entry.season_points = prog.seasonPoints;
         entry.points = entry.wins;
+      } else if (['group', 'knockout'].includes(match.tournament_phase || '')) {
+        const tournament = db.tournaments.find((item) => item.id === match.tournament_id);
+        if (tournament?.format === 'group_knockout') {
+          entry.points = entry.wins * 3 + entry.draws;
+        }
       }
       updates.set(entry.player_id, {
         tier: entry.tier,
@@ -1001,6 +1241,8 @@ export async function startServer(options: ServerStartOptions = {}) {
 
     match.status = 'completed';
     match.winner_id = winnerId;
+    match.final_step_count = match.consensus_state?.currentStep || 0;
+    completeTournamentFixture(match, winnerId, match.final_step_count);
     match.disconnected_player_id = null;
     match.disconnected_at = null;
     match.completed_at = new Date().toISOString();
@@ -1521,9 +1763,14 @@ export async function startServer(options: ServerStartOptions = {}) {
 
   app.get('/api/tournaments', (_req: Request, res: Response) => {
     updateTournamentLifecycle();
-    const list = [...db.tournaments]
+    const list = db.tournaments
+      .filter((tournament) => tournament.format === 'group_knockout' && tournament.status !== 'cancelled')
+      .slice()
       .sort((a, b) => {
-        const order = (s: string) => (s === 'registration' ? 0 : s === 'qualifying' ? 1 : 2);
+        const order = (s: string) =>
+          ['scheduled', 'registration', 'grouping', 'group_stage', 'group_running', 'group_complete', 'knockout', 'qualifying'].indexOf(s) === -1
+            ? 6
+            : ['scheduled', 'registration', 'grouping', 'group_stage', 'group_running', 'group_complete', 'knockout', 'qualifying'].indexOf(s);
         return order(a.status) - order(b.status) || b.created_at.localeCompare(a.created_at);
       })
       .map((t) => ({
@@ -1549,18 +1796,34 @@ export async function startServer(options: ServerStartOptions = {}) {
           .filter(
             (m) =>
               m.tournament_id === t.id &&
-              (m.player1_id === authUser.id || m.player2_id === authUser.id)
+              (authUser.is_admin ||
+                m.player1_id === authUser.id ||
+                m.player2_id === authUser.id)
           )
           .sort((a, b) => b.created_at.localeCompare(a.created_at))
           .map((m) => {
             const u1 = db.users.find((u) => u.id === m.player1_id);
             const u2 = db.users.find((u) => u.id === m.player2_id);
+            const fixture = db.tournamentFixtures.find(
+              (item) => item.id === m.tournament_fixture_id
+            );
             return {
               id: m.id,
+              match_id: m.id,
               status: m.status,
               tournament_phase: m.tournament_phase,
+              phase: fixture?.phase || m.tournament_phase,
+              group_number: fixture?.group_number ?? null,
+              round_number: fixture?.round_number ?? null,
+              leg: fixture?.leg ?? null,
+              player1_id: m.player1_id,
+              player2_id: m.player2_id,
               is_sparring: Boolean(m.is_sparring),
               winner_id: m.winner_id,
+              winner: m.winner_id
+                ? db.users.find((u) => u.id === m.winner_id)?.display_name || null
+                : null,
+              move_count: m.final_step_count ?? null,
               created_at: m.created_at,
               completed_at: m.completed_at,
               replay_available: Boolean(m.replay_json),
@@ -1579,6 +1842,27 @@ export async function startServer(options: ServerStartOptions = {}) {
 
     const motivationBanner = buildTournamentMotivation(ownEntry, privateChallengerRank);
     const isCompleted = t.status === 'completed';
+    const groupEntries = entries
+      .filter((entry) => entry.group_number)
+      .map((entry) => ({
+        ...entry,
+        display_name: db.users.find((u) => u.id === entry.player_id)?.display_name || 'Đấu thủ',
+        avatar_id: db.users.find((u) => u.id === entry.player_id)?.avatar_id || 'pumpkin',
+        avatar_url: db.users.find((u) => u.id === entry.player_id)?.avatar_url || null,
+      }));
+    const groupFixtures = db.tournamentFixtures
+      .filter((fixture) => fixture.tournament_id === t.id)
+      .map((fixture) => ({
+        ...fixture,
+        player1: db.users.find((u) => u.id === fixture.player1_id)?.display_name || 'Đấu thủ',
+        player2: db.users.find((u) => u.id === fixture.player2_id)?.display_name || 'Đấu thủ',
+        winner: fixture.winner_id
+          ? db.users.find((u) => u.id === fixture.winner_id)?.display_name || null
+          : null,
+      }));
+    const groupStandings = t.format === 'group_knockout'
+      ? tournamentGroupStandings(t.id)
+      : [];
 
     res.json({
       tournament: t,
@@ -1595,6 +1879,17 @@ export async function startServer(options: ServerStartOptions = {}) {
       matches: myMatches,
       standings: isCompleted ? challengerStandings : [],
       finalStandings: isCompleted ? challengerStandings : null,
+      groups: t.format === 'group_knockout'
+        ? Array.from({ length: t.group_count || 0 }, (_, index) => ({
+            group_number: index + 1,
+            members: groupEntries.filter((entry) => entry.group_number === index + 1),
+            standings: ['group_running', 'group_complete', 'knockout', 'completed'].includes(t.status)
+              ? groupStandings.filter((entry) => entry.group_number === index + 1)
+              : [],
+          }))
+        : [],
+      fixtures: groupFixtures,
+      groupStandingsPublished: ['group_running', 'group_complete', 'knockout', 'completed'].includes(t.status),
     });
   });
 
@@ -1607,49 +1902,277 @@ export async function startServer(options: ServerStartOptions = {}) {
       }
       const name = String(req.body?.name || '').trim().slice(0, 100);
       const description = String(req.body?.description || '').trim().slice(0, 2000);
+      if (req.body?.registrationOpensAt === undefined && req.body?.tournamentStartsAt === undefined) {
+        if (!name) {
+          res.status(400).json({ error: 'Vui lòng nhập tên giải đấu.' });
+          return;
+        }
+        const registrationClosesAt = new Date(req.body?.registrationClosesAt);
+        const endsAt = new Date(req.body?.endsAt);
+        const maxTeams = Math.min(256, Math.max(2, Number(req.body?.maxTeams) || 64));
+        const sprintRules: string[] = Array.isArray(req.body?.sprintRules)
+          ? req.body.sprintRules
+          : DEFAULT_SPRINT_RULES;
+        if (sprintRules.length !== 4 || sprintRules.some((rule) => !SPRINT_RULE_LAYOUTS[rule])) {
+          res.status(400).json({ error: 'Hãy chọn luật hợp lệ cho đủ 4 Sprint.' });
+          return;
+        }
+        if (Number.isNaN(registrationClosesAt.getTime()) || registrationClosesAt <= new Date()) {
+          res.status(400).json({ error: 'Thời điểm đóng đăng ký phải nằm trong tương lai.' });
+          return;
+        }
+        if (Number.isNaN(endsAt.getTime()) || endsAt <= registrationClosesAt) {
+          res.status(400).json({ error: 'Thời điểm kết thúc giải phải sau thời điểm đóng đăng ký.' });
+          return;
+        }
+        const legacyTournament: TournamentRecord = {
+          id: randomUUID(),
+          name,
+          format: 'ranked_weekly',
+          description,
+          status: 'registration',
+          registration_closes_at: registrationClosesAt.toISOString(),
+          ends_at: endsAt.toISOString(),
+          max_teams: maxTeams,
+          current_week: 0,
+          last_reset_week: 0,
+          week_started_at: null,
+          rules_json: {},
+          rules_schedule: sprintRules,
+          created_at: new Date().toISOString(),
+        };
+        db.tournaments.unshift(legacyTournament);
+        saveDb();
+        res.status(201).json({ tournament: legacyTournament });
+        return;
+      }
+      const registrationOpensAt = new Date(req.body?.registrationOpensAt);
       const registrationClosesAt = new Date(req.body?.registrationClosesAt);
-      const endsAt = new Date(req.body?.endsAt);
-      const maxTeams = Math.min(256, Math.max(2, Number(req.body?.maxTeams) || 64));
-      const sprintRules: string[] = Array.isArray(req.body?.sprintRules)
-        ? req.body.sprintRules
-        : DEFAULT_SPRINT_RULES;
+      const tournamentStartsAt = new Date(req.body?.tournamentStartsAt);
 
       if (!name) {
         res.status(400).json({ error: 'Vui lòng nhập tên giải đấu.' });
         return;
       }
-      if (sprintRules.length !== 4 || sprintRules.some((r) => !SPRINT_RULE_LAYOUTS[r])) {
-        res.status(400).json({ error: 'Hãy chọn luật hợp lệ cho đủ 4 Sprint.' });
+      if (
+        Number.isNaN(registrationOpensAt.getTime()) ||
+        Number.isNaN(registrationClosesAt.getTime()) ||
+        Number.isNaN(tournamentStartsAt.getTime()) ||
+        registrationOpensAt.getTime() < Date.now() - 60000 ||
+        registrationClosesAt <= registrationOpensAt ||
+        tournamentStartsAt <= registrationClosesAt
+      ) {
+        res.status(400).json({
+          error: 'Thời gian cần theo thứ tự: mở đăng ký (không ở quá khứ), đóng đăng ký, bắt đầu giải.',
+        });
         return;
       }
-      if (Number.isNaN(registrationClosesAt.getTime()) || registrationClosesAt <= new Date()) {
-        res.status(400).json({ error: 'Thời điểm đóng đăng ký phải nằm trong tương lai.' });
-        return;
-      }
-      if (Number.isNaN(endsAt.getTime()) || endsAt <= registrationClosesAt) {
-        res.status(400).json({ error: 'Thời điểm kết thúc giải phải sau thời điểm đóng đăng ký.' });
+      let rules;
+      try {
+        rules = buildTournamentRules(
+          req.body?.blockedCells,
+          req.body?.moveLimitRule,
+          req.body?.capturedPieceValues
+        );
+      } catch (err: any) {
+        res.status(400).json({ error: err.message });
         return;
       }
 
       const created: TournamentRecord = {
         id: randomUUID(),
         name,
-        format: 'ranked_weekly',
+        format: 'group_knockout',
         description,
-        status: 'registration',
+        status: registrationOpensAt.getTime() > Date.now() ? 'scheduled' : 'registration',
+        registration_opens_at: registrationOpensAt.toISOString(),
         registration_closes_at: registrationClosesAt.toISOString(),
-        ends_at: endsAt.toISOString(),
-        max_teams: maxTeams,
+        tournament_starts_at: tournamentStartsAt.toISOString(),
+        ends_at: new Date(tournamentStartsAt.getTime() + 90 * 86400000).toISOString(),
+        max_teams: 2147483647,
+        group_count: null,
         current_week: 0,
         last_reset_week: 0,
         week_started_at: null,
-        rules_json: {},
-        rules_schedule: sprintRules,
+        rules_json: rules,
+        rules_schedule: [],
         created_at: new Date().toISOString(),
       };
       db.tournaments.unshift(created);
       saveDb();
       res.status(201).json({ tournament: created });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/groups', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để chia bảng.' });
+        return;
+      }
+      updateTournamentLifecycle();
+      const tournament = db.tournaments.find((item) => item.id === req.params.id);
+      if (!tournament || tournament.format !== 'group_knockout' ||
+          !['registration', 'grouping'].includes(tournament.status)) {
+        res.status(409).json({ error: 'Giải không ở trạng thái mở đăng ký hoặc chờ chia bảng.' });
+        return;
+      }
+      const entries = db.tournamentEntries.filter((entry) => entry.tournament_id === tournament.id);
+      let groups: Array<{ number: number; entrants: TournamentEntryRecord[] }>;
+      try {
+        groups = distributeTournamentGroups(entries, Number(req.body?.groupCount)) as Array<{
+          number: number;
+          entrants: TournamentEntryRecord[];
+        }>;
+      } catch (err: any) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      for (const group of groups) {
+        for (const entry of group.entrants) entry.group_number = group.number;
+      }
+      tournament.group_count = groups.length;
+      db.tournamentFixtures.push(
+        ...(createDoubleRoundRobinFixtures(groups) as Array<{
+          phase: 'group';
+          groupNumber: number;
+          roundNumber: number;
+          leg: number;
+          player1Id: string;
+          player2Id: string;
+          status: 'pending';
+        }>).map((fixture, fixtureIndex) =>
+          createTournamentFixture(tournament.id, {
+            phase: 'group',
+            group_number: fixture.groupNumber,
+            round_number: fixture.roundNumber,
+            match_number: fixtureIndex + 1,
+            leg: fixture.leg,
+            player1_id: fixture.player1Id,
+            player2_id: fixture.player2Id,
+            status: 'pending',
+          })
+        )
+      );
+      tournament.status = 'group_stage';
+      tournament.registration_closes_at = new Date().toISOString();
+      saveDb();
+      res.status(201).json({ tournament, groups });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/start-groups', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để khởi chạy vòng bảng.' });
+        return;
+      }
+      const tournament = db.tournaments.find((item) => item.id === req.params.id);
+      const fixtures = db.tournamentFixtures.filter((item) =>
+        item.tournament_id === req.params.id && item.phase === 'group'
+      );
+      if (!tournament || tournament.format !== 'group_knockout' ||
+          tournament.status !== 'group_stage' || !fixtures.length) {
+        res.status(409).json({ error: 'Giải chưa được chia bảng hoặc vòng bảng đã khởi chạy.' });
+        return;
+      }
+      tournament.status = 'group_running';
+      tournament.tournament_starts_at = new Date().toISOString();
+      saveDb();
+      res.json({ tournament });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/start-knockout', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để khởi chạy knock-out.' });
+        return;
+      }
+      const tournament = db.tournaments.find((item) => item.id === req.params.id);
+      const groupFixtures = db.tournamentFixtures.filter((item) =>
+        item.tournament_id === req.params.id && item.phase === 'group'
+      );
+      if (!tournament || tournament.format !== 'group_knockout' ||
+          tournament.status !== 'group_complete' || !groupFixtures.length ||
+          groupFixtures.some((fixture) => fixture.status !== 'completed')) {
+        res.status(409).json({ error: 'Vòng bảng chưa hoàn tất.' });
+        return;
+      }
+      const standings = tournamentGroupStandings(tournament.id);
+      const qualifiers = standings.filter((_, index) =>
+        standings.slice(0, index)
+          .filter((row) => row.group_number === standings[index].group_number).length < 2
+      );
+      const openingRound = createKnockoutOpeningRound(qualifiers);
+      db.tournamentFixtures.push(
+        ...openingRound.map((fixture) => createTournamentFixture(tournament.id, {
+          phase: 'knockout',
+          group_number: null,
+          round_number: fixture.roundNumber,
+          match_number: fixture.matchNumber,
+          leg: 1,
+          player1_id: fixture.player1Id,
+          player2_id: fixture.player2Id,
+          status: 'pending',
+        }))
+      );
+      tournament.status = 'knockout';
+      saveDb();
+      res.status(201).json({ tournament, fixtureCount: openingRound.length });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/cancel-all', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để hủy giải đấu.' });
+        return;
+      }
+      const activeTournaments = db.tournaments.filter(
+        (tournament) => !['completed', 'cancelled'].includes(tournament.status)
+      );
+      for (const tournament of activeTournaments) {
+        tournament.status = 'cancelled';
+        clearTournamentWaiters(tournament.id);
+        abandonActiveTournamentMatches(tournament.id, 'Ban Tổ Chức đã hủy tất cả giải đấu.');
+      }
+      if (activeTournaments.length) saveDb();
+      res.json({ cancelledCount: activeTournaments.length });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/tournaments/:id/cancel', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để hủy giải đấu.' });
+        return;
+      }
+      const tournament = db.tournaments.find((item) => item.id === req.params.id);
+      if (!tournament || ['completed', 'cancelled'].includes(tournament.status)) {
+        res.status(409).json({ error: 'Giải không tồn tại hoặc đã kết thúc/hủy.' });
+        return;
+      }
+      tournament.status = 'cancelled';
+      clearTournamentWaiters(tournament.id);
+      abandonActiveTournamentMatches(tournament.id, 'Ban Tổ Chức đã hủy giải đấu.');
+      saveDb();
+      res.json({ tournament });
     } catch (err: any) {
       res.status(err.status || 500).json({ error: err.message });
     }
@@ -1743,6 +2266,63 @@ export async function startServer(options: ServerStartOptions = {}) {
     }
   });
 
+  app.post('/api/tournaments/:id/copy-entrants', (req: Request, res: Response) => {
+    try {
+      const user = getAuthUser(req);
+      if (!user.is_admin) {
+        res.status(403).json({ error: 'Cần quyền Ban Tổ Chức để sao chép đấu thủ.' });
+        return;
+      }
+      const target = db.tournaments.find((item) => item.id === req.params.id);
+      const sourceId = req.body?.sourceTournamentId;
+      const source = db.tournaments.find((item) => item.id === sourceId);
+      if (!target || target.format !== 'group_knockout' || target.status !== 'registration' ||
+          !source || source.format !== 'group_knockout' || source.id === target.id) {
+        res.status(409).json({ error: 'Giải nguồn hoặc giải đích không hợp lệ để sao chép đấu thủ.' });
+        return;
+      }
+      const sourceEntries = db.tournamentEntries.filter((entry) => entry.tournament_id === source.id);
+      const targetEntries = db.tournamentEntries.filter((entry) => entry.tournament_id === target.id);
+      if (!sourceEntries.length || targetEntries.length) {
+        res.status(409).json({ error: 'Giải nguồn chưa có đấu thủ hoặc giải đích đã có đấu thủ.' });
+        return;
+      }
+      const sourceBots = sourceEntries.map((entry) => {
+        const player = db.users.find((candidate) => candidate.id === entry.player_id);
+        const bot = db.botVersions.find((candidate) =>
+          candidate.user_id === entry.player_id && candidate.version === entry.bot_version
+        );
+        if (!player || !bot) {
+          throw Object.assign(new Error('Có đấu thủ không còn tài khoản hoặc phiên bản bot đã đăng ký.'), {
+            status: 409,
+          });
+        }
+        return { entry, player };
+      });
+      const registeredAt = new Date().toISOString();
+      const copiedEntries: TournamentEntryRecord[] = sourceBots.map(({ entry, player }) => ({
+        tournament_id: target.id,
+        player_id: entry.player_id,
+        bot_version: entry.bot_version,
+        matches_played: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        points: 0,
+        tournament_elo: player.elo,
+        tier: 'Bronze',
+        rank_stars: 0,
+        season_points: 0,
+        registered_at: registeredAt,
+      }));
+      db.tournamentEntries.push(...copiedEntries);
+      saveDb();
+      res.status(201).json({ copiedCount: sourceBots.length });
+    } catch (err: any) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/tournaments/:id/register', (req: Request, res: Response) => {
     try {
       const user = getAuthUser(req);
@@ -1771,7 +2351,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         return;
       }
       const count = db.tournamentEntries.filter((e) => e.tournament_id === t.id).length;
-      if (count >= t.max_teams) {
+      if (t.format !== 'group_knockout' && count >= t.max_teams) {
         res.status(409).json({ error: 'Giải đấu đã đủ số lượng người chơi tối đa.' });
         return;
       }
@@ -1860,7 +2440,13 @@ export async function startServer(options: ServerStartOptions = {}) {
           t?.status === 'qualifying' &&
           new Date(t.ends_at) > new Date() &&
           Number(match.tournament_rules?.week) === Number(t.current_week);
-        if (!practiceOpen && !rankedOpen) {
+        const fixture = match.tournament_fixture_id
+          ? db.tournamentFixtures.find((item) =>
+              item.id === match.tournament_fixture_id && item.tournament_id === match.tournament_id
+            )
+          : undefined;
+        const groupKnockoutOpen = isCurrentGroupKnockoutFixture(match, t, fixture);
+        if (!practiceOpen && !rankedOpen && !groupKnockoutOpen) {
           match.status = 'abandoned';
           saveDb();
           res.status(409).json({
@@ -1950,6 +2536,8 @@ export async function startServer(options: ServerStartOptions = {}) {
       match.status = 'completed';
       match.winner_id =
         replayResult.winner === 1 ? u1.id : replayResult.winner === 2 ? u2.id : null;
+      match.final_step_count = replayResult.stepCount;
+      completeTournamentFixture(match, match.winner_id, replayResult.stepCount);
       match.final_state_hash = replayResult.finalHash;
       match.replay_sha256 = replayChecksum;
       match.replay_json = body.replay;
@@ -2278,6 +2866,8 @@ export async function startServer(options: ServerStartOptions = {}) {
       const completedAt = new Date().toISOString();
       match.status = 'completed';
       match.winner_id = winnerId;
+      match.final_step_count = verdict.stepCount;
+      completeTournamentFixture(match, winnerId, verdict.stepCount);
       match.final_state_hash = verdict.expectedHash;
       match.completed_at = completedAt;
 
@@ -2360,19 +2950,24 @@ export async function startServer(options: ServerStartOptions = {}) {
     u2: UserRecord,
     matchType: 'human' | 'bot',
     tournament: TournamentRecord | null = null,
-    isSparring = false
+    isSparring = false,
+    fixture: TournamentFixtureRecord | null = null
   ) {
     const firstIsP1 = Math.random() < 0.5;
     const p1 = firstIsP1 ? u1 : u2;
     const p2 = firstIsP1 ? u2 : u1;
     const seed = randomInt(100000, 2147483000);
-    const phase = tournament
+    const phase = fixture
+      ? fixture.phase
+      : tournament
       ? tournament.status === 'registration'
         ? 'practice'
         : 'ranked'
       : null;
     const rules =
-      tournament && tournament.status === 'qualifying'
+      fixture && tournament
+        ? tournament.rules_json
+        : tournament?.status === 'qualifying'
         ? tournament.rules_json || weeklyRules(tournament.current_week || 1, tournament.rules_schedule)
         : null;
 
@@ -2389,6 +2984,7 @@ export async function startServer(options: ServerStartOptions = {}) {
       tournament_id: tournament?.id || null,
       tournament_phase: phase,
       tournament_rules: rules,
+      tournament_fixture_id: fixture?.id || null,
       is_sparring: isSparring,
       player1_bot_version: p1Bot?.version,
       player2_bot_version: p2Bot?.version,
@@ -2408,6 +3004,12 @@ export async function startServer(options: ServerStartOptions = {}) {
       created_at: new Date().toISOString(),
       completed_at: null,
     };
+    if (fixture) {
+      fixture.status = 'active';
+      fixture.match_id = match.id;
+      fixture.player1_ready_at = new Date().toISOString();
+      fixture.player2_ready_at = new Date().toISOString();
+    }
     db.matches.push(match);
     saveDb();
 
@@ -2715,6 +3317,68 @@ export async function startServer(options: ServerStartOptions = {}) {
           clearUserQueues(user.id);
           updateTournamentLifecycle();
           const t = db.tournaments.find((tour) => tour.id === packet.tournamentId);
+          if (t?.format === 'group_knockout') {
+            const entry = db.tournamentEntries.find((item) =>
+              item.tournament_id === t.id && item.player_id === user.id
+            );
+            if (!entry) {
+              sendWs(ws, 'error', { message: 'Bạn cần đăng ký giải đấu trước khi tìm trận.' });
+              return;
+            }
+            if (!getActiveUserBot(user.id)) {
+              sendWs(ws, 'error', { message: 'Bạn cần lưu Bot Python hợp lệ trước khi thi đấu.' });
+              return;
+            }
+            const fixture = getPendingTournamentFixture(t, user.id);
+            if (!fixture) {
+              sendWs(ws, 'error', {
+                message: t.status === 'grouping'
+                  ? 'Ban Tổ Chức chưa chia bảng.'
+                  : t.status === 'scheduled' || t.status === 'registration'
+                  ? 'Giải chưa đến giờ thi đấu.'
+                  : 'Hiện chưa có trận hợp lệ của bạn để ghép.',
+              });
+              return;
+            }
+            const queue = tournamentQueue.get(t.id) || new Set<string>();
+            tournamentQueue.set(t.id, queue);
+            let opponent: UserRecord | null = null;
+            for (const candidateId of [...queue]) {
+              if (candidateId === user.id) continue;
+              const candidateSocket = liveSockets.get(candidateId);
+              if (!candidateSocket || candidateSocket.readyState !== WebSocket.OPEN) {
+                queue.delete(candidateId);
+                continue;
+              }
+              const candidateFixture = getPendingTournamentFixture(t, candidateId);
+              if (candidateFixture?.id !== fixture.id) continue;
+              const candidate = db.users.find((item) => item.id === candidateId);
+              if (candidate && getActiveUserBot(candidateId)) {
+                opponent = candidate;
+                break;
+              }
+            }
+            if (opponent) {
+              queue.delete(user.id);
+              queue.delete(opponent.id);
+              pairPlayers(user, opponent, 'bot', t, false, fixture);
+            } else {
+              queue.add(user.id);
+              ws.queueMode = 'tournament';
+              ws.tournamentId = t.id;
+              ws.searchStartedAt = Date.now();
+              sendWs(ws, 'searching', {
+                mode: 'tournament',
+                tournament: true,
+                tournamentId: t.id,
+                phase: fixture.phase,
+                groupNumber: fixture.group_number,
+                round: fixture.round_number,
+                rules: t.rules_json,
+              });
+            }
+            return;
+          }
           if (!t || !['registration', 'qualifying'].includes(t.status)) {
             sendWs(ws, 'error', { message: 'Giải đấu hiện không mở ghép trận.' });
             return;

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { Music2, Settings, Type, Volume2, VolumeX, X } from 'lucide-react';
 
 export type AppFont = 'jakarta' | 'outfit' | 'system';
@@ -34,28 +34,17 @@ export const AppSettingsModal: React.FC<AppSettingsModalProps> = ({
   soundVolume,
   onSoundVolumeChange,
 }) => {
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [open, onClose]);
-
   if (!open) return null;
 
   return (
     <div
       className="fixed inset-0 z-[80] flex items-end justify-start bg-black/70 p-4 backdrop-blur-sm sm:items-center sm:justify-center"
-      onClick={onClose}
     >
       <section
         role="dialog"
         aria-modal="true"
         aria-labelledby="app-settings-title"
         className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[#161024] p-5 shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
       >
         <header className="mb-5 flex items-center justify-between border-b border-[var(--border-subtle)] pb-4">
           <div className="flex items-center gap-2.5">

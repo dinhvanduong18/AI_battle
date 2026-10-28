@@ -19,6 +19,14 @@ import {
   tournamentRanks
 } from './tournament-ranks.js';
 import { areBothMatchPlayersOffline } from './match-disconnect.js';
+import {
+  buildTournamentRules,
+  calculateGroupStandings,
+  createDoubleRoundRobinFixtures,
+  createKnockoutOpeningRound,
+  createNextKnockoutRound,
+  distributeTournamentGroups
+} from './tournament-format.js';
 
 const pool = new Pool({ connectionString: config.databaseUrl });
 const redis = createClient({ url: config.redisUrl });
@@ -480,18 +488,38 @@ async function createTournamentMatch(user, pairing) {
 
 async function createIndividualTournamentMatch(user, pairing) {
   const tournamentResult = await pool.query(
-    `SELECT id,status,registration_closes_at,ends_at,max_teams,current_week,rules_json
+    `SELECT id,format,status,registration_closes_at,tournament_starts_at,ends_at,max_teams,current_week,rules_json
      FROM tournaments WHERE id=$1`,
     [pairing.tournamentId]
   );
   const tournament = tournamentResult.rows[0];
   if (!tournament) throw Object.assign(new Error('Không tìm thấy giải đấu.'), { status: 404 });
-  const phase = pairing.phase;
+  const fixture = pairing.fixtureId
+    ? (await pool.query(
+      `SELECT * FROM tournament_fixtures WHERE id=$1 AND tournament_id=$2 AND status='active'`,
+      [pairing.fixtureId, pairing.tournamentId]
+    )).rows[0]
+    : null;
+  if (pairing.fixtureId && !fixture) {
+    throw Object.assign(new Error('Trận theo lịch vừa được cập nhật; hãy tìm trận lại.'), { status: 409 });
+  }
+  const phase = fixture?.phase || pairing.phase;
   let rules = null;
-  if (phase === 'practice') {
+  if (fixture) {
+    if (tournament.format !== 'group_knockout' ||
+        !['group_running', 'knockout'].includes(tournament.status) ||
+        (tournament.status === 'knockout' && new Date(tournament.tournament_starts_at).getTime() > Date.now()) ||
+        ![fixture.player1_id, fixture.player2_id].includes(pairing.opponentUserId) ||
+        ![fixture.player1_id, fixture.player2_id].includes(user.id)) {
+      throw Object.assign(new Error('Lịch đấu không còn hợp lệ.'), { status: 409 });
+    }
+    rules = tournament.rules_json;
+    pairing.opponentUserId = user.id === fixture.player1_id ? fixture.player2_id : fixture.player1_id;
+  } else if (phase === 'practice') {
     const participantCount = await pool.query('SELECT count(*)::int AS count FROM tournament_entries WHERE tournament_id=$1', [pairing.tournamentId]);
     if (tournament.status !== 'registration' || new Date(tournament.registration_closes_at) <= new Date() ||
-        new Date(tournament.ends_at) <= new Date() || participantCount.rows[0].count >= tournament.max_teams) {
+        new Date(tournament.ends_at) <= new Date() ||
+        (tournament.format !== 'group_knockout' && participantCount.rows[0].count >= tournament.max_teams)) {
       throw Object.assign(new Error('Vòng chạy đà đã kết thúc; hãy tìm trận chính thức nếu giải đã mở.'), { status: 409 });
     }
   } else {
@@ -522,11 +550,69 @@ async function createIndividualTournamentMatch(user, pairing) {
   const matchId = randomUUID();
   const seed = randomInt(1, 0x7fffffff);
   const consensusState = createInitialConsensusState('bot');
-  await pool.query(
-    `INSERT INTO matches(id,seed,player1_id,player2_id,status,match_type,tournament_id,tournament_phase,tournament_rules,player1_bot_version,player2_bot_version,consensus_state)
-     VALUES($1,$2,$3,$4,'active','bot',$5,$6,$7,$8,$9,$10::jsonb)`,
-    [matchId, seed, first.id, second.id, pairing.tournamentId, phase, rules ? JSON.stringify(rules) : null, first.active_bot_version, second.active_bot_version, JSON.stringify(consensusState)]
-  );
+  const matchClient = fixture ? await pool.connect() : null;
+  const matchDb = matchClient || pool;
+  try {
+    if (matchClient) {
+      await matchClient.query('BEGIN');
+      const lockedTournament = await matchClient.query(
+        `SELECT format,status,tournament_starts_at FROM tournaments
+         WHERE id=$1 FOR UPDATE`,
+        [pairing.tournamentId]
+      );
+      const currentTournament = lockedTournament.rows[0];
+      const expectedStatus = phase === 'group' ? 'group_running' : 'knockout';
+      if (!currentTournament || currentTournament.format !== 'group_knockout' ||
+          currentTournament.status !== expectedStatus ||
+          new Date(currentTournament.tournament_starts_at).getTime() > Date.now()) {
+        throw Object.assign(new Error('Giải không còn mở để bắt đầu trận này.'), { status: 409 });
+      }
+      const lockedFixture = await matchClient.query(
+        `SELECT id FROM tournament_fixtures
+         WHERE id=$1 AND tournament_id=$2 AND phase=$3 AND status='active' AND match_id IS NULL
+         FOR UPDATE`,
+        [fixture.id, pairing.tournamentId, phase]
+      );
+      if (!lockedFixture.rowCount) {
+        throw Object.assign(new Error('Trận theo lịch đã được bắt đầu hoặc cập nhật.'), { status: 409 });
+      }
+    }
+    await matchDb.query(
+      `INSERT INTO matches(
+         id,seed,player1_id,player2_id,status,match_type,tournament_id,tournament_phase,
+         tournament_rules,tournament_fixture_id,player1_bot_version,player2_bot_version,consensus_state
+       )
+       VALUES($1,$2,$3,$4,'active','bot',$5,$6,$7,$8,$9,$10,$11::jsonb)`,
+      [
+        matchId,
+        seed,
+        first.id,
+        second.id,
+        pairing.tournamentId,
+        phase,
+        rules ? JSON.stringify(rules) : null,
+        fixture?.id || null,
+        first.active_bot_version,
+        second.active_bot_version,
+        JSON.stringify(consensusState)
+      ]
+    );
+    if (fixture) {
+      const linkedFixture = await matchDb.query(
+        'UPDATE tournament_fixtures SET match_id=$1 WHERE id=$2 AND status=$3 AND match_id IS NULL RETURNING id',
+        [matchId, fixture.id, 'active']
+      );
+      if (!linkedFixture.rowCount) {
+        throw Object.assign(new Error('Trận theo lịch đã được bắt đầu hoặc cập nhật.'), { status: 409 });
+      }
+    }
+    if (matchClient) await matchClient.query('COMMIT');
+  } catch (error) {
+    if (matchClient) await matchClient.query('ROLLBACK');
+    throw error;
+  } finally {
+    if (matchClient) matchClient.release();
+  }
   const baseMatch = {
     id: matchId,
     seed,
@@ -558,6 +644,71 @@ async function createIndividualTournamentMatch(user, pairing) {
   }
 }
 
+async function prepareGroupKnockoutFixture(tournamentId, userId) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const tournamentResult = await client.query(
+      `SELECT id,status,tournament_starts_at FROM tournaments
+       WHERE id=$1 AND format='group_knockout' FOR UPDATE`,
+      [tournamentId]
+    );
+    const tournament = tournamentResult.rows[0];
+    if (!tournament || !['group_running', 'knockout'].includes(tournament.status) ||
+        (tournament.status === 'knockout' && new Date(tournament.tournament_starts_at).getTime() > Date.now())) {
+      throw Object.assign(new Error('Giải chưa đến thời gian thi đấu.'), { status: 409 });
+    }
+    const fixtureResult = await client.query(
+      `SELECT * FROM tournament_fixtures
+       WHERE tournament_id=$1 AND status='pending' AND $2::uuid IN (player1_id,player2_id)
+       ORDER BY phase,round_number,match_number,leg
+       LIMIT 1 FOR UPDATE`,
+      [tournamentId, userId]
+    );
+    const fixture = fixtureResult.rows[0];
+    if (!fixture) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const readinessColumn = fixture.player1_id === userId ? 'player1_ready_at' : 'player2_ready_at';
+    const updated = await client.query(
+      `UPDATE tournament_fixtures SET ${readinessColumn}=COALESCE(${readinessColumn},now())
+       WHERE id=$1 AND status='pending' RETURNING *`,
+      [fixture.id]
+    );
+    const readyFixture = updated.rows[0];
+    if (!readyFixture.player1_ready_at || !readyFixture.player2_ready_at) {
+      await client.query('COMMIT');
+      return null;
+    }
+    const activated = await client.query(
+      `UPDATE tournament_fixtures SET status='active'
+       WHERE id=$1 AND status='pending' RETURNING *`,
+      [fixture.id]
+    );
+    await client.query('COMMIT');
+    return activated.rows[0] || null;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function clearGroupKnockoutReadiness(tournamentId, userId) {
+  await pool.query(
+    `UPDATE tournament_fixtures SET player1_ready_at=NULL
+     WHERE tournament_id=$1 AND player1_id=$2 AND status='pending'`,
+    [tournamentId, userId]
+  );
+  await pool.query(
+    `UPDATE tournament_fixtures SET player2_ready_at=NULL
+     WHERE tournament_id=$1 AND player2_id=$2 AND status='pending'`,
+    [tournamentId, userId]
+  );
+}
+
 async function runIndividualTournamentSearch(userId) {
   await updateTournamentLifecycle();
   searchTimers.delete(userId);
@@ -565,8 +716,9 @@ async function runIndividualTournamentSearch(userId) {
   const search = socket?.tournamentSearch;
   if (!socket || !search || socket.searchCancelled) return;
   const result = await pool.query(
-    `SELECT t.id AS tournament_id,t.status,t.registration_closes_at,t.ends_at,t.max_teams,
-            t.current_week,t.rules_json,e.rank_stars,e.season_points,e.tier,u.elo,u.active_bot_version,
+    `SELECT t.id AS tournament_id,t.format,t.status,t.registration_closes_at,
+            t.tournament_starts_at,t.ends_at,t.max_teams,t.current_week,t.rules_json,
+            e.rank_stars,e.season_points,e.tier,u.elo,u.active_bot_version,
             (SELECT count(*)::int FROM tournament_entries entries WHERE entries.tournament_id=t.id) AS participant_count
      FROM tournaments t JOIN tournament_entries e ON e.tournament_id=t.id AND e.player_id=$2
      JOIN users u ON u.id=e.player_id
@@ -585,10 +737,64 @@ async function runIndividualTournamentSearch(userId) {
     socket.tournamentSearch = null;
     return send(socket, 'error', { message: 'Bạn cần lưu Bot Python hợp lệ trong Phòng Lab trước khi tìm trận giải đấu.' });
   }
+  if (row.format === 'group_knockout') {
+    if (!['group_running', 'knockout'].includes(row.status)) {
+      socket.searchCancelled = true;
+      socket.searching = false;
+      socket.tournamentSearch = null;
+      return send(socket, 'error', { message: 'Giải chưa vào giai đoạn thi đấu.' });
+    }
+    const fixture = await prepareGroupKnockoutFixture(row.tournament_id, userId);
+    if (socket.searchCancelled || socket.tournamentSearch !== search) return;
+    if (!fixture) {
+      searchTimers.set(userId, setTimeout(() => runIndividualTournamentSearch(userId).catch(error => {
+        console.error('Group tournament fixture search failed:', error);
+        socket.searchCancelled = true;
+        socket.searching = false;
+        socket.tournamentSearch = null;
+        send(socket, 'error', { message: 'Không thể tìm lịch trận giải đấu lúc này.' });
+      }), 2000));
+      return;
+    }
+    const opponentUserId = fixture.player1_id === userId ? fixture.player2_id : fixture.player1_id;
+    const opponentSocket = userSocket(opponentUserId);
+    for (const [participantId, participantSocket] of [[userId, socket], [opponentUserId, opponentSocket]]) {
+      const timer = searchTimers.get(participantId);
+      if (timer) clearTimeout(timer);
+      searchTimers.delete(participantId);
+      if (participantSocket) {
+        participantSocket.searchCancelled = true;
+        participantSocket.searching = false;
+      }
+    }
+    try {
+      const userResult = await pool.query(
+        'SELECT id,email,display_name,elo,is_admin,active_bot_version FROM users WHERE id=$1',
+        [userId]
+      );
+      await createIndividualTournamentMatch(userResult.rows[0], {
+        tournamentId: row.tournament_id,
+        phase: fixture.phase,
+        opponentUserId,
+        fixtureId: fixture.id
+      });
+      if (socket.tournamentSearch) socket.tournamentSearch = null;
+      if (opponentSocket) opponentSocket.tournamentSearch = null;
+    } catch (error) {
+      await pool.query(
+        `UPDATE tournament_fixtures SET status='pending',match_id=NULL,
+           player1_ready_at=NULL,player2_ready_at=NULL
+         WHERE id=$1 AND status='active' AND match_id IS NULL`,
+        [fixture.id]
+      );
+      throw error;
+    }
+    return;
+  }
   if (socket.searchCancelled || socket.tournamentSearch !== search) return;
   const phase = row.status === 'registration' ? 'practice' : 'ranked';
   if (phase === 'practice' && (new Date(row.registration_closes_at).getTime() <= Date.now() ||
-      row.participant_count >= row.max_teams)) {
+      (row.format !== 'group_knockout' && row.participant_count >= row.max_teams))) {
     socket.searchCancelled = true; socket.searching = false;
     await cancelTournamentQueue(redis, search.tournamentId, userId, userId, search.week, tournamentQueueNamespace(search));
     socket.tournamentSearch = null;
@@ -841,7 +1047,15 @@ async function captureTournamentSprint(tournamentId, sprint) {
 }
 
 async function updateTournamentLifecycle() {
-  const uninitialized = await pool.query("SELECT id,rules_schedule,total_sprints FROM tournaments WHERE status='qualifying' AND week_started_at IS NULL");
+  await pool.query(
+    "UPDATE tournaments SET status='registration' WHERE format='group_knockout' AND status='scheduled' AND registration_opens_at<=now()"
+  );
+  await pool.query(
+    `UPDATE tournaments SET status='grouping'
+     WHERE format='group_knockout' AND status='registration'
+       AND registration_closes_at<=now()`
+  );
+  const uninitialized = await pool.query("SELECT id,rules_schedule,total_sprints FROM tournaments WHERE format='ranked_weekly' AND status='qualifying' AND week_started_at IS NULL");
   for (const tournament of uninitialized.rows) {
     const initialized = await pool.query(
       "UPDATE tournaments SET current_week=1,last_reset_week=1,week_started_at=now(),registration_closes_at=LEAST(registration_closes_at,now()),ends_at=now()+(total_sprints * interval '7 days'),rules_json=$1::jsonb WHERE id=$2 AND week_started_at IS NULL RETURNING id",
@@ -853,7 +1067,7 @@ async function updateTournamentLifecycle() {
   }
   const starting = await pool.query(
     `SELECT t.id,t.rules_schedule,t.total_sprints FROM tournaments t
-     WHERE t.status='registration' AND t.ends_at>now()
+     WHERE t.format='ranked_weekly' AND t.status='registration' AND t.ends_at>now()
        AND (t.registration_closes_at<=now() OR
          (SELECT count(*) FROM tournament_entries entries WHERE entries.tournament_id=t.id)>=t.max_teams)`
   );
@@ -873,7 +1087,7 @@ async function updateTournamentLifecycle() {
   await pool.query(
     `UPDATE matches m SET status='abandoned'
      FROM tournaments t
-     WHERE m.tournament_id=t.id AND m.status='active'
+     WHERE m.tournament_id=t.id AND m.status='active' AND t.format='ranked_weekly'
        AND (
          t.ends_at <= now() OR
          (m.tournament_phase='practice' AND (
@@ -896,7 +1110,7 @@ async function updateTournamentLifecycle() {
   const active = await pool.query(
     `SELECT id,current_week,total_sprints,COALESCE(last_reset_week, GREATEST(1, current_week)) AS last_reset_week,week_started_at,rules_schedule
      FROM tournaments
-     WHERE status='qualifying' AND week_started_at IS NOT NULL AND ends_at>now()`
+     WHERE format='ranked_weekly' AND status='qualifying' AND week_started_at IS NOT NULL AND ends_at>now()`
   );
   const now = Date.now();
   for (const tournament of active.rows) {
@@ -920,7 +1134,7 @@ async function updateTournamentLifecycle() {
     );
     await clearTournamentQueues(tournament.id, 0, tournament.current_week, nextWeek);
   }
-  await pool.query(`UPDATE tournaments SET status='completed' WHERE status <> 'completed' AND ends_at <= now()`);
+  await pool.query(  `UPDATE tournaments SET status='completed' WHERE format='ranked_weekly' AND status <> 'completed' AND ends_at <= now()`);
 }
 
 async function registerSessionKey(userId, packet) {
@@ -942,6 +1156,35 @@ async function registerSessionKey(userId, packet) {
 
 async function updateTournamentEntriesForResult(client, match, score1) {
   if (!match.tournament_id || match.tournament_phase === 'practice' || match.is_sparring) return new Map();
+  const tournamentType = await client.query(
+    'SELECT format FROM tournaments WHERE id=$1',
+    [match.tournament_id]
+  );
+  if (tournamentType.rows[0]?.format === 'group_knockout') {
+    const entries = await client.query(
+      'SELECT player_id FROM tournament_entries WHERE tournament_id=$1 AND player_id=ANY($2::uuid[]) ORDER BY player_id FOR UPDATE',
+      [match.tournament_id, [match.player1_id, match.player2_id]]
+    );
+    if (entries.rowCount !== 2) {
+      throw Object.assign(new Error('Tournament entry missing for this fixture'), { status: 409 });
+    }
+    for (const [playerId, score] of [
+      [match.player1_id, score1],
+      [match.player2_id, 1 - score1]
+    ]) {
+      await client.query(
+        `UPDATE tournament_entries SET
+           matches_played=matches_played+1,
+           wins=wins+CASE WHEN $3=1 THEN 1 ELSE 0 END,
+           draws=draws+CASE WHEN $3=0.5 THEN 1 ELSE 0 END,
+           losses=losses+CASE WHEN $3=0 THEN 1 ELSE 0 END,
+           points=points+CASE WHEN $3=1 THEN 3 WHEN $3=0.5 THEN 1 ELSE 0 END
+         WHERE tournament_id=$1 AND player_id=$2`,
+        [match.tournament_id, playerId, score]
+      );
+    }
+    return new Map();
+  }
   const updatesByPlayer = new Map();
   if (match.player1_team_id && match.player2_team_id) {
     const entries = await client.query(
@@ -991,6 +1234,103 @@ async function updateTournamentEntriesForResult(client, match, score1) {
   return updatesByPlayer;
 }
 
+async function completePostgresTournamentFixture(client, match, score1, moveCount) {
+  if (!match.tournament_id || !match.tournament_fixture_id) return;
+  const tournamentResult = await client.query(
+    'SELECT id,status,group_count FROM tournaments WHERE id=$1 AND format=$2 FOR UPDATE',
+    [match.tournament_id, 'group_knockout']
+  );
+  const tournament = tournamentResult.rows[0];
+  if (!tournament || !['group_running', 'knockout'].includes(tournament.status)) return;
+  const fixtureResult = await client.query(
+    `SELECT * FROM tournament_fixtures
+     WHERE id=$1 AND tournament_id=$2 AND status='active' FOR UPDATE`,
+    [match.tournament_fixture_id, match.tournament_id]
+  );
+  const fixture = fixtureResult.rows[0];
+  if (!fixture) return;
+  if (fixture.phase === 'knockout' && score1 === 0.5) {
+    await client.query(
+      `UPDATE tournament_fixtures SET status='pending',leg=leg+1,match_id=NULL,
+         player1_ready_at=NULL,player2_ready_at=NULL,winner_id=NULL,move_count=$1
+       WHERE id=$2`,
+      [moveCount, fixture.id]
+    );
+    return;
+  }
+  const winnerId = score1 === 1 ? match.player1_id : score1 === 0 ? match.player2_id : null;
+  await client.query(
+    `UPDATE tournament_fixtures SET status='completed',winner_id=$1,move_count=$2
+     WHERE id=$3`,
+    [winnerId, moveCount, fixture.id]
+  );
+
+  if (fixture.phase === 'group') {
+    const remaining = await client.query(
+      `SELECT 1 FROM tournament_fixtures
+       WHERE tournament_id=$1 AND phase='group' AND status<>'completed' LIMIT 1`,
+      [match.tournament_id]
+    );
+    if (remaining.rowCount) return;
+    await client.query(
+      "UPDATE tournaments SET status='group_complete' WHERE id=$1 AND status='group_running'",
+      [match.tournament_id]
+    );
+    return;
+  }
+
+  const currentRound = await client.query(
+    `SELECT * FROM tournament_fixtures
+     WHERE tournament_id=$1 AND phase='knockout'
+       AND round_number=(SELECT max(round_number) FROM tournament_fixtures
+                        WHERE tournament_id=$1 AND phase='knockout')
+     ORDER BY match_number FOR UPDATE`,
+    [match.tournament_id]
+  );
+  if (!currentRound.rows.length ||
+      currentRound.rows.some(item => item.status !== 'completed' || !item.winner_id)) return;
+  const winners = currentRound.rows.map(item => item.winner_id);
+  if (winners.length === 1) {
+    await client.query(
+      "UPDATE tournaments SET status='completed',ends_at=now() WHERE id=$1 AND status='knockout'",
+      [match.tournament_id]
+    );
+    return;
+  }
+  for (const next of createNextKnockoutRound(
+    winners,
+    Number(currentRound.rows[0].round_number) + 1
+  )) {
+    await client.query(
+      `INSERT INTO tournament_fixtures(
+         tournament_id,phase,round_number,match_number,leg,player1_id,player2_id,status
+       ) VALUES($1,'knockout',$2,$3,1,$4,$5,'pending')`,
+      [
+        match.tournament_id,
+        next.roundNumber,
+        next.matchNumber,
+        next.player1Id,
+        next.player2Id
+      ]
+    );
+  }
+}
+
+async function isCurrentGroupKnockoutFixture(client, match, tournament) {
+  const expectedStatus = match.tournament_phase === 'group' ? 'group_running'
+    : match.tournament_phase === 'knockout' ? 'knockout' : null;
+  if (!expectedStatus || tournament?.format !== 'group_knockout' ||
+      tournament.status !== expectedStatus || !tournament.before_start ||
+      !match.tournament_fixture_id) return false;
+  const fixture = await client.query(
+    `SELECT 1 FROM tournament_fixtures
+     WHERE id=$1 AND tournament_id=$2 AND match_id=$3
+       AND phase=$4 AND status='active'`,
+    [match.tournament_fixture_id, match.tournament_id, match.id, match.tournament_phase]
+  );
+  return fixture.rowCount === 1;
+}
+
 async function adjudicateMatchForfeit(matchId, offenderId, reasonCode, winnerMessage, loserMessage) {
   const client = await pool.connect();
   let outcome = null;
@@ -1001,6 +1341,19 @@ async function adjudicateMatchForfeit(matchId, offenderId, reasonCode, winnerMes
     if (!match || !canonicalMatchIds(match).includes(offenderId)) {
       await client.query('COMMIT');
       return null;
+    }
+    if (match.tournament_fixture_id) {
+      const tournamentResult = await client.query(
+        `WITH checked AS (SELECT clock_timestamp() AS at)
+         SELECT t.format,t.status,
+                checked.at >= t.tournament_starts_at AS before_start
+         FROM tournaments t CROSS JOIN checked WHERE t.id=$1`,
+        [match.tournament_id]
+      );
+      if (!await isCurrentGroupKnockoutFixture(client, match, tournamentResult.rows[0])) {
+        await client.query('COMMIT');
+        return null;
+      }
     }
     const winnerId = offenderId === match.player1_id ? match.player2_id : match.player1_id;
     const score1 = winnerId === match.player1_id ? 1 : 0;
@@ -1022,11 +1375,13 @@ async function adjudicateMatchForfeit(matchId, offenderId, reasonCode, winnerMes
       [match.id, player1.elo, player2.elo, p1After, p2After, score1]
     );
     const tournamentUpdates = await updateTournamentEntriesForResult(client, match, score1);
+    const finalStepCount = Number(match.consensus_state?.currentStep) || 0;
+    await completePostgresTournamentFixture(client, match, score1, finalStepCount);
     await client.query(
-      `UPDATE matches SET status='completed',winner_id=$1,completed_at=now(),
+      `UPDATE matches SET status='completed',winner_id=$1,final_step_count=$2,completed_at=now(),
          disconnected_player_id=NULL,disconnected_at=NULL
-       WHERE id=$2 AND status='active'`,
-      [winnerId, match.id]
+       WHERE id=$3 AND status='active'`,
+      [winnerId, finalStepCount, match.id]
     );
     await client.query('COMMIT');
     outcome = {
@@ -1099,20 +1454,25 @@ async function submitResult(userId, body) {
     if (match.tournament_id) {
       const lifecycle = await client.query(
         `WITH checked AS (SELECT clock_timestamp() AS at)
-         SELECT t.status,t.registration_closes_at,t.ends_at,t.max_teams,t.week_started_at,t.current_week,
+         SELECT t.format,t.status,t.registration_closes_at,t.tournament_starts_at,t.ends_at,t.max_teams,t.week_started_at,t.current_week,
                 checked.at < t.ends_at AS before_end,
                 checked.at < t.registration_closes_at AS before_registration_close,
+                checked.at >= t.tournament_starts_at AS before_start,
                 (SELECT count(*)::int FROM tournament_entries entries WHERE entries.tournament_id=t.id) AS participant_count
          FROM tournaments t CROSS JOIN checked WHERE t.id=$1`,
         [match.tournament_id]
       );
       const tournament = lifecycle.rows[0];
       const practiceStillOpen = tournament?.status === 'registration' && tournament.before_registration_close &&
-        tournament.participant_count < tournament.max_teams;
+        (tournament.format === 'group_knockout' || tournament.participant_count < tournament.max_teams);
       const matchWeek = Number(match.tournament_rules?.week);
       const rankedSprintStillOpen = tournament?.status === 'qualifying' && tournament.before_end &&
         Number.isInteger(matchWeek) && matchWeek === Number(tournament.current_week);
-      const validPhase = match.tournament_phase === 'practice' ? practiceStillOpen : rankedSprintStillOpen;
+      const groupKnockoutStillOpen = await isCurrentGroupKnockoutFixture(client, match, tournament);
+      const validPhase = match.tournament_phase === 'practice' ? practiceStillOpen
+        : ['group', 'knockout'].includes(match.tournament_phase)
+          ? groupKnockoutStillOpen
+          : rankedSprintStillOpen;
       if (!validPhase) {
         await client.query("UPDATE matches SET status='abandoned' WHERE id=$1 AND status='active'", [match.id]);
         await client.query('COMMIT');
@@ -1158,7 +1518,8 @@ async function submitResult(userId, body) {
     await client.query('INSERT INTO match_results(match_id,player1_elo_before,player2_elo_before,player1_elo_after,player2_elo_after,result_player1) VALUES($1,$2,$3,$4,$5,$6)', [match.id, u1.elo, u2.elo, elo1, elo2, score1]);
     const winnerId = replayResult.winner === 1 ? u1.id : replayResult.winner === 2 ? u2.id : null;
     const tournamentUpdates = await updateTournamentEntriesForResult(client, match, score1);
-    await client.query(`UPDATE matches SET status='completed', winner_id=$1, final_state_hash=$2, replay_key=$3, replay_sha256=$4, replay_json=$5::jsonb, player1_proof=$6::jsonb, player2_proof=$7::jsonb, completed_at=now() WHERE id=$8`, [winnerId, replayResult.finalHash, storedReplay.key, storedReplay.checksum, storedReplay.json ? JSON.stringify(storedReplay.json) : null, JSON.stringify(p1), JSON.stringify(p2), match.id]);
+    await completePostgresTournamentFixture(client, match, score1, replayResult.stepCount);
+    await client.query(`UPDATE matches SET status='completed', winner_id=$1, final_state_hash=$2, final_step_count=$3, replay_key=$4, replay_sha256=$5, replay_json=$6::jsonb, player1_proof=$7::jsonb, player2_proof=$8::jsonb, completed_at=now() WHERE id=$9`, [winnerId, replayResult.finalHash, replayResult.stepCount, storedReplay.key, storedReplay.checksum, storedReplay.json ? JSON.stringify(storedReplay.json) : null, JSON.stringify(p1), JSON.stringify(p2), match.id]);
     await client.query('COMMIT');
     sparringSessions.delete(match.id);
     return {
@@ -1216,9 +1577,10 @@ async function resolveDisconnectedMatch(matchId) {
     if (match.tournament_id) {
       const lifecycle = await client.query(
         `WITH checked AS (SELECT clock_timestamp() AS at)
-         SELECT t.status,t.registration_closes_at,t.ends_at,t.max_teams,
+         SELECT t.format,t.status,t.registration_closes_at,t.tournament_starts_at,t.ends_at,t.max_teams,
                 checked.at < t.ends_at AS before_end,
                 checked.at < t.registration_closes_at AS before_registration_close,
+                checked.at >= t.tournament_starts_at AS before_start,
                 (SELECT count(*)::int FROM tournament_entries entries WHERE entries.tournament_id=t.id) AS participant_count,
                 CASE WHEN t.week_started_at IS NULL THEN NULL
                      ELSE GREATEST(1, FLOOR(EXTRACT(EPOCH FROM (checked.at-t.week_started_at)) / 604800)::integer + 1)
@@ -1229,12 +1591,14 @@ async function resolveDisconnectedMatch(matchId) {
       const tournament = lifecycle.rows[0];
       const practiceStillOpen = match.tournament_phase === 'practice' &&
         tournament?.status === 'registration' && tournament.before_registration_close &&
-        tournament.before_end && tournament.participant_count < tournament.max_teams;
+        tournament.before_end &&
+        (tournament.format === 'group_knockout' || tournament.participant_count < tournament.max_teams);
       const matchWeek = Number(match.tournament_rules?.week);
       const rankedSprintStillOpen = match.tournament_phase === 'ranked' &&
         tournament?.status === 'qualifying' && tournament.before_end &&
         Number.isInteger(matchWeek) && matchWeek === Number(tournament.active_week);
-      if (!practiceStillOpen && !rankedSprintStillOpen) {
+      const groupKnockoutStillOpen = await isCurrentGroupKnockoutFixture(client, match, tournament);
+      if (!practiceStillOpen && !rankedSprintStillOpen && !groupKnockoutStillOpen) {
         await client.query("UPDATE matches SET status='abandoned',completed_at=now() WHERE id=$1 AND status='active'", [match.id]);
         await client.query('COMMIT');
         return { matchId: match.id, abandoned: true, player1Id: match.player1_id, player2Id: match.player2_id };
@@ -1266,11 +1630,13 @@ async function resolveDisconnectedMatch(matchId) {
       [match.id, player1.elo, player2.elo, player1EloAfter, player2EloAfter, score1]
     );
     await updateTournamentEntriesForResult(client, match, score1);
+    const finalStepCount = Number(match.consensus_state?.currentStep) || 0;
+    await completePostgresTournamentFixture(client, match, score1, finalStepCount);
     await client.query(
-      `UPDATE matches SET status='completed',winner_id=$1,completed_at=now(),
+      `UPDATE matches SET status='completed',winner_id=$1,final_step_count=$2,completed_at=now(),
          disconnected_player_id=NULL,disconnected_at=NULL
-       WHERE id=$2 AND status='active'`,
-      [winnerId, match.id]
+       WHERE id=$3 AND status='active'`,
+      [winnerId, finalStepCount, match.id]
     );
     await client.query('COMMIT');
     return {
@@ -1431,15 +1797,16 @@ async function submitConsensusDispute(userId, body) {
         [match.id, player1.elo, player2.elo, player1EloAfter, player2EloAfter, score1]
       );
       const tournamentUpdates = await updateTournamentEntriesForResult(client, match, score1);
+      await completePostgresTournamentFixture(client, match, score1, decision.stepCount);
       await client.query(
         `INSERT INTO match_disputes(match_id,claimant_id,evidence,status,offender_id,winner_id,reason)
          VALUES($1,$2,$3::jsonb,'adjudicated',$4,$5,$6)`,
         [match.id, userId, JSON.stringify(evidence), offenderId, winnerId, decision.reason]
       );
       await client.query(
-        `UPDATE matches SET status='completed',winner_id=$1,completed_at=now(),
-           disconnected_player_id=NULL,disconnected_at=NULL WHERE id=$2`,
-        [winnerId, match.id]
+        `UPDATE matches SET status='completed',winner_id=$1,final_step_count=$2,completed_at=now(),
+           disconnected_player_id=NULL,disconnected_at=NULL WHERE id=$3`,
+        [winnerId, decision.stepCount, match.id]
       );
       outcome = {
         matchId: match.id, resolved: true, winnerId,
@@ -1530,13 +1897,19 @@ const httpServer = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/tournaments') {
       await updateTournamentLifecycle();
       const result = await pool.query(
-      `SELECT t.id,t.name,t.format,t.description,t.status,t.registration_closes_at,t.ends_at,
-                t.max_teams,t.current_week,t.total_sprints,t.rules_json,t.created_at,
+      `SELECT t.id,t.name,t.format,t.description,t.status,t.registration_opens_at,
+                t.registration_closes_at,t.tournament_starts_at,t.ends_at,t.max_teams,
+                t.group_count,t.current_week,t.total_sprints,t.rules_json,t.created_at,
                 count(e.tournament_id)::int AS participant_count,
                 count(e.tournament_id)::int AS team_count
          FROM tournaments t LEFT JOIN tournament_entries e ON e.tournament_id=t.id
-         WHERE t.status IN ('registration','qualifying','completed')
-         GROUP BY t.id ORDER BY CASE t.status WHEN 'registration' THEN 0 WHEN 'qualifying' THEN 1 ELSE 2 END,t.created_at DESC`
+                WHERE t.format='group_knockout'
+                AND t.status IN ('scheduled','registration','grouping','group_stage','group_running','group_complete','knockout','completed')
+                GROUP BY t.id ORDER BY CASE t.status
+                  WHEN 'scheduled' THEN 0 WHEN 'registration' THEN 1 WHEN 'grouping' THEN 2
+                WHEN 'group_stage' THEN 3 WHEN 'group_running' THEN 4
+                WHEN 'group_complete' THEN 5 WHEN 'knockout' THEN 6
+                WHEN 'completed' THEN 7 ELSE 8 END,t.created_at DESC`
       );
       return json(res, 200, { tournaments: result.rows });
     }
@@ -1554,7 +1927,8 @@ const httpServer = createServer(async (req, res) => {
         pool.query('SELECT count(*)::int AS count FROM tournament_entries WHERE tournament_id=$1', [tournamentId]),
         auth
           ? pool.query(
-            `SELECT entry.player_id, entry.tier, entry.rank_stars, entry.season_points,
+            `SELECT entry.player_id, entry.group_number, entry.points, entry.registered_at,
+                    entry.tier, entry.rank_stars, entry.season_points,
                     entry.matches_played, entry.wins, entry.draws, entry.losses,
                     u.elo,
                     CASE WHEN entry.tier='Challenger' THEN (
@@ -1573,14 +1947,21 @@ const httpServer = createServer(async (req, res) => {
           )
           : Promise.resolve({ rows: [] }),
         pool.query(
-          `SELECT m.id,m.status,m.seed,m.tournament_phase,
+          `SELECT m.id,m.id AS match_id,m.status,m.seed,m.tournament_phase,
+                  m.player1_id,m.player2_id,m.final_step_count AS move_count,
+                  fixture.phase,fixture.group_number,fixture.round_number,fixture.leg,
                   m.created_at,m.completed_at,m.winner_id,
+                  winner.display_name AS winner,
                   (m.replay_json IS NOT NULL) AS replay_available,
                   u1.display_name AS player1,u2.display_name AS player2
            FROM matches m
            JOIN users u1 ON u1.id=m.player1_id JOIN users u2 ON u2.id=m.player2_id
+           LEFT JOIN tournament_fixtures fixture ON fixture.id=m.tournament_fixture_id
+           LEFT JOIN users winner ON winner.id=m.winner_id
            WHERE m.tournament_id=$1 AND $2::uuid IS NOT NULL
-             AND (m.player1_id=$2 OR m.player2_id=$2)
+             AND (m.player1_id=$2 OR m.player2_id=$2 OR EXISTS (
+               SELECT 1 FROM users viewer WHERE viewer.id=$2 AND viewer.is_admin
+             ))
            ORDER BY m.created_at DESC LIMIT 100`, [tournamentId, auth?.sub || null]
         ),
         tournament.status === 'completed'
@@ -1594,6 +1975,44 @@ const httpServer = createServer(async (req, res) => {
           )
           : Promise.resolve({ rows: [] })
       ]);
+      const groupEntries = tournament.format === 'group_knockout'
+        ? (await pool.query(
+          `SELECT entry.player_id,entry.group_number,entry.registered_at,
+                  entry.matches_played,entry.wins,entry.draws,entry.losses,entry.points,
+                  user.display_name,user.elo,user.avatar_id,user.avatar_url
+           FROM tournament_entries entry JOIN users user ON user.id=entry.player_id
+           WHERE entry.tournament_id=$1 AND entry.group_number IS NOT NULL
+           ORDER BY entry.group_number,entry.registered_at,entry.player_id`,
+          [tournamentId]
+        )).rows
+        : [];
+      const groupFixtures = tournament.format === 'group_knockout'
+        ? (await pool.query(
+          `SELECT fixture.*,p1.display_name AS player1,p2.display_name AS player2,
+                  winner.display_name AS winner
+           FROM tournament_fixtures fixture
+           JOIN users p1 ON p1.id=fixture.player1_id
+           JOIN users p2 ON p2.id=fixture.player2_id
+           LEFT JOIN users winner ON winner.id=fixture.winner_id
+           WHERE fixture.tournament_id=$1
+           ORDER BY fixture.phase,fixture.group_number NULLS LAST,fixture.round_number,
+                    fixture.match_number,fixture.leg`,
+          [tournamentId]
+        )).rows
+        : [];
+      const calculatedGroupStandings = tournament.format === 'group_knockout'
+        ? calculateGroupStandings(groupEntries, groupFixtures)
+        : [];
+      const groupStandingsPublished = ['group_running', 'group_complete', 'knockout', 'completed'].includes(tournament.status);
+      const groups = tournament.format === 'group_knockout'
+        ? Array.from({ length: Number(tournament.group_count || 0) }, (_, index) => ({
+          group_number: index + 1,
+          members: groupEntries.filter(entry => Number(entry.group_number) === index + 1),
+          standings: groupStandingsPublished
+            ? calculatedGroupStandings.filter(entry => Number(entry.group_number) === index + 1)
+            : []
+        }))
+        : [];
       const rawOwn = ownEntry.rows[0] || null;
       const challengerRank = rawOwn?.privateRank ?? null;
       const motivationBanner = buildTournamentMotivation(rawOwn, challengerRank);
@@ -1607,10 +2026,15 @@ const httpServer = createServer(async (req, res) => {
         ranks: tournamentRanks(),
         myEntry: rawOwn,
         motivationBanner,
-        leaderboardHidden: !isCompleted,
+        leaderboardHidden: tournament.format === 'group_knockout'
+          ? !groupStandingsPublished
+          : !isCompleted,
         matches: matches.rows,
         standings: isCompleted ? finalStandings.rows : [],
-        finalStandings: isCompleted ? finalStandings.rows : null
+        finalStandings: isCompleted ? finalStandings.rows : null,
+        groups,
+        fixtures: groupFixtures,
+        groupStandingsPublished
       });
     }
     if (req.method === 'POST' && url.pathname === '/api/tournaments') {
@@ -1619,31 +2043,265 @@ const httpServer = createServer(async (req, res) => {
       if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Tournament organizer permission required'), { status: 403 });
       const body = await readBody(req);
       const name = String(body.name || '').trim().slice(0, 100);
-      const format = String(body.format || 'ranked_weekly').trim();
       const description = String(body.description || '').trim().slice(0, 2000);
-      const registrationDays = Number(body.registrationDays);
-      const sprintCount = Number(body.sprintCount);
-      const maxTeams = Math.min(256, Math.max(2, Number(body.maxTeams) || 64));
-      const sprintRules = Array.isArray(body.sprintRules) ? body.sprintRules : DEFAULT_SPRINT_RULES;
-      if (format !== 'ranked_weekly') return json(res, 400, { error: 'Thể thức này chưa được hỗ trợ.' });
+      if (body.registrationOpensAt === undefined && body.tournamentStartsAt === undefined) {
+        const registrationClosesAt = new Date(body.registrationClosesAt);
+        const endsAt = new Date(body.endsAt);
+        const maxTeams = Math.min(256, Math.max(2, Number(body.maxTeams) || 64));
+        const sprintRules = Array.isArray(body.sprintRules) ? body.sprintRules : DEFAULT_SPRINT_RULES;
+        if (!name) return json(res, 400, { error: 'Vui lòng nhập tên giải.' });
+        if (sprintRules.length !== 4 || sprintRules.some(rule => !Object.hasOwn(SPRINT_RULE_LAYOUTS, rule))) {
+          return json(res, 400, { error: 'Hãy chọn luật hợp lệ cho đủ 4 Sprint.' });
+        }
+        if (Number.isNaN(registrationClosesAt.getTime()) || registrationClosesAt <= new Date() ||
+            Number.isNaN(endsAt.getTime()) || endsAt <= registrationClosesAt) {
+          return json(res, 400, { error: 'Thời gian đăng ký và kết thúc giải không hợp lệ.' });
+        }
+        const legacyTournament = await pool.query(
+          `INSERT INTO tournaments(
+             name,format,description,status,registration_closes_at,ends_at,max_teams,
+             total_sprints,rules_schedule
+           ) VALUES($1,'ranked_weekly',$2,'registration',$3,$4,$5,4,$6::jsonb)
+           RETURNING *`,
+          [name, description, registrationClosesAt, endsAt, maxTeams, JSON.stringify(sprintRules)]
+        );
+        return json(res, 201, { tournament: legacyTournament.rows[0] });
+      }
+      const registrationOpensAt = new Date(body.registrationOpensAt);
+      const registrationClosesAt = new Date(body.registrationClosesAt);
+      const tournamentStartsAt = new Date(body.tournamentStartsAt);
       if (!name) return json(res, 400, { error: 'Vui lòng nhập tên giải.' });
-      if (!Number.isInteger(registrationDays) || registrationDays < 1 || registrationDays > 30) {
-        return json(res, 400, { error: 'Số ngày đăng ký phải từ 1 đến 30 ngày.' });
+      if (Number.isNaN(registrationOpensAt.getTime()) || Number.isNaN(registrationClosesAt.getTime()) ||
+          Number.isNaN(tournamentStartsAt.getTime()) || registrationOpensAt.getTime() < Date.now() - 60000 ||
+          registrationClosesAt <= registrationOpensAt || tournamentStartsAt <= registrationClosesAt) {
+        return json(res, 400, { error: 'Thời gian cần theo thứ tự: mở đăng ký, đóng đăng ký, bắt đầu giải.' });
       }
-      if (!Number.isInteger(sprintCount) || sprintCount < 1 || sprintCount > 52) {
-        return json(res, 400, { error: 'Số Sprint phải từ 1 đến 52.' });
+      let rules;
+      try {
+        rules = buildTournamentRules(body.blockedCells, body.moveLimitRule, body.capturedPieceValues);
+      } catch (error) {
+        return json(res, 400, { error: error.message });
       }
-      if (sprintRules.length !== sprintCount || sprintRules.some(rule => !Object.hasOwn(SPRINT_RULE_LAYOUTS, rule))) {
-        return json(res, 400, { error: 'Hãy chọn thể lệ hợp lệ cho từng Sprint.' });
-      }
-      const registrationClosesAt = new Date(Date.now() + registrationDays * 86400000);
-      const endsAt = new Date(registrationClosesAt.getTime() + sprintCount * WEEK_MS);
+      const status = registrationOpensAt.getTime() > Date.now() ? 'scheduled' : 'registration';
       const created = await pool.query(
-        `INSERT INTO tournaments(name,format,description,registration_closes_at,ends_at,max_teams,total_sprints,rules_schedule)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *`,
-        [name, format, description, registrationClosesAt, endsAt, maxTeams, sprintCount, JSON.stringify(sprintRules)]
+        `INSERT INTO tournaments(
+           name,format,description,status,registration_opens_at,registration_closes_at,
+           tournament_starts_at,ends_at,max_teams,group_count,rules_json,rules_schedule
+         )
+         VALUES($1,'group_knockout',$2,$3,$4,$5,$6,$7,$8,NULL,$9::jsonb,'[]'::jsonb)
+         RETURNING *`,
+        [
+          name,
+          description,
+          status,
+          registrationOpensAt,
+          registrationClosesAt,
+          tournamentStartsAt,
+          new Date(tournamentStartsAt.getTime() + 90 * 86400000),
+          2147483647,
+          JSON.stringify(rules)
+        ]
       );
       return json(res, 201, { tournament: created.rows[0] });
+    }
+    if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/groups$/i.test(url.pathname)) {
+      const auth = authFromHeader(req);
+      const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+      if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Tournament organizer permission required'), { status: 403 });
+      await updateTournamentLifecycle();
+      const tournamentId = url.pathname.split('/')[3];
+      const body = await readBody(req);
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const tournamentResult = await client.query(
+          "SELECT id,status,format FROM tournaments WHERE id=$1 FOR UPDATE",
+          [tournamentId]
+        );
+        const tournament = tournamentResult.rows[0];
+        if (!tournament || tournament.format !== 'group_knockout' ||
+            !['registration', 'grouping'].includes(tournament.status)) {
+          throw Object.assign(new Error('Giải không ở trạng thái mở đăng ký hoặc chờ chia bảng.'), { status: 409 });
+        }
+        const entriesResult = await client.query(
+          `SELECT entry.player_id,entry.registered_at,entry.group_number
+           FROM tournament_entries entry
+           JOIN users ON users.id=entry.player_id
+           WHERE entry.tournament_id=$1 AND users.is_admin IS NOT NULL
+           ORDER BY entry.registered_at,entry.player_id FOR UPDATE`,
+          [tournamentId]
+        );
+        const groups = distributeTournamentGroups(entriesResult.rows, Number(body.groupCount));
+        for (const group of groups) {
+          for (const entry of group.entrants) {
+            await client.query(
+              'UPDATE tournament_entries SET group_number=$1 WHERE tournament_id=$2 AND player_id=$3',
+              [group.number, tournamentId, entry.player_id]
+            );
+          }
+        }
+        if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/start-groups$/i.test(url.pathname)) {
+          const auth = authFromHeader(req);
+          const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+          if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Tournament organizer permission required'), { status: 403 });
+          const tournamentId = url.pathname.split('/')[3];
+          const started = await pool.query(
+            `UPDATE tournaments tournament
+             SET status='group_running',tournament_starts_at=now()
+             WHERE tournament.id=$1 AND tournament.format='group_knockout'
+               AND tournament.status='group_stage'
+               AND EXISTS (
+                 SELECT 1 FROM tournament_fixtures fixture
+                 WHERE fixture.tournament_id=tournament.id AND fixture.phase='group'
+               )
+             RETURNING tournament.*`,
+            [tournamentId]
+          );
+          if (!started.rowCount) throw Object.assign(new Error('Giải chưa được chia bảng hoặc vòng bảng đã khởi chạy.'), { status: 409 });
+          return json(res, 200, { tournament: started.rows[0] });
+        }
+        if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/start-knockout$/i.test(url.pathname)) {
+          const auth = authFromHeader(req);
+          const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+          if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Tournament organizer permission required'), { status: 403 });
+          const tournamentId = url.pathname.split('/')[3];
+          const client = await pool.connect();
+          try {
+            await client.query('BEGIN');
+            const tournamentResult = await client.query(
+              "SELECT id,status FROM tournaments WHERE id=$1 AND format='group_knockout' FOR UPDATE",
+              [tournamentId]
+            );
+            if (tournamentResult.rows[0]?.status !== 'group_complete') {
+              throw Object.assign(new Error('Vòng bảng chưa hoàn tất.'), { status: 409 });
+            }
+            const remaining = await client.query(
+              `SELECT 1 FROM tournament_fixtures
+               WHERE tournament_id=$1 AND phase='group' AND status<>'completed' LIMIT 1`,
+              [tournamentId]
+            );
+            if (remaining.rowCount) throw Object.assign(new Error('Vòng bảng chưa hoàn tất.'), { status: 409 });
+            const [entrants, fixtures] = await Promise.all([
+              client.query(
+                `SELECT entry.player_id,entry.group_number,entry.registered_at,user.display_name
+                 FROM tournament_entries entry JOIN users user ON user.id=entry.player_id
+                 WHERE entry.tournament_id=$1 AND entry.group_number IS NOT NULL
+                 ORDER BY entry.group_number,entry.registered_at,entry.player_id`,
+                [tournamentId]
+              ),
+              client.query(
+                `SELECT player1_id,player2_id,winner_id,move_count,status
+                 FROM tournament_fixtures WHERE tournament_id=$1 AND phase='group'`,
+                [tournamentId]
+              )
+            ]);
+            const standings = calculateGroupStandings(entrants.rows, fixtures.rows);
+            const qualifiers = standings.filter((row, index) =>
+              standings.slice(0, index).filter(previous =>
+                Number(previous.group_number) === Number(row.group_number)
+              ).length < 2
+            );
+            const openingRound = createKnockoutOpeningRound(qualifiers);
+            for (const fixture of openingRound) {
+              await client.query(
+                `INSERT INTO tournament_fixtures(
+                   tournament_id,phase,round_number,match_number,leg,player1_id,player2_id,status
+                 ) VALUES($1,'knockout',$2,$3,1,$4,$5,'pending')`,
+                [tournamentId, fixture.roundNumber, fixture.matchNumber, fixture.player1Id, fixture.player2Id]
+              );
+            }
+            await client.query(
+              "UPDATE tournaments SET status='knockout' WHERE id=$1 AND status='group_complete'",
+              [tournamentId]
+            );
+            await client.query('COMMIT');
+            return json(res, 201, { fixtureCount: openingRound.length });
+          } catch (error) {
+            await client.query('ROLLBACK');
+            throw error;
+          } finally {
+            client.release();
+          }
+        }
+        const fixtures = createDoubleRoundRobinFixtures(groups);
+        for (const [fixtureIndex, fixture] of fixtures.entries()) {
+          await client.query(
+            `INSERT INTO tournament_fixtures(
+               tournament_id,phase,group_number,round_number,match_number,leg,
+               player1_id,player2_id,status
+             ) VALUES($1,'group',$2,$3,$4,$5,$6,$7,'pending')`,
+            [
+              tournamentId,
+              fixture.groupNumber,
+              fixture.roundNumber,
+              fixtureIndex + 1,
+              fixture.leg,
+              fixture.player1Id,
+              fixture.player2Id
+            ]
+          );
+        }
+        await client.query(
+          "UPDATE tournaments SET status='group_stage',group_count=$1,registration_closes_at=now() WHERE id=$2",
+          [groups.length, tournamentId]
+        );
+        await client.query('COMMIT');
+        return json(res, 201, { groupCount: groups.length, fixtureCount: fixtures.length });
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+    if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/cancel$/i.test(url.pathname)) {
+      const auth = authFromHeader(req);
+      const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+      if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Tournament organizer permission required'), { status: 403 });
+      const tournamentId = url.pathname.split('/')[3];
+      const result = await pool.query(
+        `UPDATE tournaments SET status='cancelled'
+         WHERE id=$1 AND status NOT IN ('completed','cancelled') RETURNING *`,
+        [tournamentId]
+      );
+      if (!result.rowCount) throw Object.assign(new Error('Giải không tồn tại hoặc đã kết thúc/hủy.'), { status: 409 });
+      await pool.query(
+        "UPDATE matches SET status='abandoned',completed_at=now() WHERE tournament_id=$1 AND status='active'",
+        [tournamentId]
+      );
+      await clearTournamentQueues(tournamentId, 0, 1, 2, 3, 4);
+      return json(res, 200, { tournament: result.rows[0] });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/tournaments/cancel-all') {
+      const auth = authFromHeader(req);
+      const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+      if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Tournament organizer permission required'), { status: 403 });
+      const client = await pool.connect();
+      let cancelledIds;
+      try {
+        await client.query('BEGIN');
+        const cancelled = await client.query(
+          `UPDATE tournaments SET status='cancelled'
+           WHERE status NOT IN ('completed','cancelled') RETURNING id`
+        );
+        cancelledIds = cancelled.rows.map((row) => row.id);
+        if (cancelledIds.length) {
+          await client.query(
+            "UPDATE matches SET status='abandoned',completed_at=now() WHERE tournament_id=ANY($1::uuid[]) AND status='active'",
+            [cancelledIds]
+          );
+        }
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+      for (const tournamentId of cancelledIds) {
+        await clearTournamentQueues(tournamentId, 0, 1, 2, 3, 4);
+      }
+      return json(res, 200, { cancelledCount: cancelledIds.length });
     }
     if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/start$/i.test(url.pathname)) {
       const auth = authFromHeader(req);
@@ -1823,6 +2481,64 @@ const httpServer = createServer(async (req, res) => {
       } catch (error) { await client.query('ROLLBACK'); throw error; }
       finally { client.release(); }
     }
+    if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/copy-entrants$/i.test(url.pathname)) {
+      const auth = authFromHeader(req);
+      const tournamentId = url.pathname.split('/')[3];
+      const body = await readBody(req);
+      const sourceTournamentId = String(body.sourceTournamentId || '');
+      const actor = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+      if (!actor.rows[0]?.is_admin) return json(res, 403, { error: 'Admin access required' });
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const tournaments = await client.query(
+          'SELECT id,format,status FROM tournaments WHERE id=ANY($1::uuid[]) FOR UPDATE',
+          [[tournamentId, sourceTournamentId]]
+        );
+        const target = tournaments.rows.find(row => row.id === tournamentId);
+        const source = tournaments.rows.find(row => row.id === sourceTournamentId);
+        if (!target || target.format !== 'group_knockout' || target.status !== 'registration' ||
+            !source || source.format !== 'group_knockout' || source.id === target.id) {
+          throw Object.assign(new Error('Source or target tournament is not eligible for copying entrants'), { status: 409 });
+        }
+        const targetCount = await client.query(
+          'SELECT count(*)::int AS count FROM tournament_entries WHERE tournament_id=$1',
+          [target.id]
+        );
+        if (targetCount.rows[0].count) {
+          throw Object.assign(new Error('The target tournament already has entrants'), { status: 409 });
+        }
+        const sourceEntries = await client.query(
+          `SELECT entry.player_id,entry.bot_version,u.elo,
+                  (bot.user_id IS NOT NULL) AS has_bot
+           FROM tournament_entries entry
+           JOIN users u ON u.id=entry.player_id
+           LEFT JOIN user_bot_versions bot
+             ON bot.user_id=entry.player_id AND bot.version=entry.bot_version
+           WHERE entry.tournament_id=$1 AND entry.player_id IS NOT NULL
+           ORDER BY entry.registered_at,entry.player_id`,
+          [source.id]
+        );
+        if (!sourceEntries.rowCount ||
+            sourceEntries.rows.some(row => !row.bot_version || !row.has_bot)) {
+          throw Object.assign(new Error('The source tournament has no entrants or a registered bot version is missing'), { status: 409 });
+        }
+        for (const entry of sourceEntries.rows) {
+          await client.query(
+            `INSERT INTO tournament_entries
+               (tournament_id,player_id,bot_version,tier,rank_stars,season_points,tournament_elo)
+             VALUES($1,$2,$3,'Bronze',0,0,$4)`,
+            [target.id, entry.player_id, entry.bot_version, entry.elo]
+          );
+        }
+        await client.query('COMMIT');
+        await updateTournamentLifecycle();
+        return json(res, 201, { copiedCount: sourceEntries.rowCount });
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally { client.release(); }
+    }
     if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/register$/i.test(url.pathname)) {
       const auth = authFromHeader(req);
       const tournamentId = url.pathname.split('/')[3];
@@ -1841,7 +2557,9 @@ const httpServer = createServer(async (req, res) => {
         const existing = await client.query('SELECT 1 FROM tournament_entries WHERE tournament_id=$1 AND player_id=$2', [tournamentId, auth.sub]);
         if (existing.rowCount) throw Object.assign(new Error('Bạn đã đăng ký giải này rồi.'), { status: 409 });
         const total = await client.query('SELECT count(*)::int AS count FROM tournament_entries WHERE tournament_id=$1', [tournamentId]);
-        if (total.rows[0].count >= tournament.max_teams) throw Object.assign(new Error('Giải đã đủ số người tham gia.'), { status: 409 });
+        if (tournament.format !== 'group_knockout' && total.rows[0].count >= tournament.max_teams) {
+          throw Object.assign(new Error('Giải đã đủ số người tham gia.'), { status: 409 });
+        }
         const inserted = await client.query(
           `INSERT INTO tournament_entries(tournament_id,player_id,bot_version,tier,rank_stars,season_points)
            VALUES($1,$2,$3,$4,0,0) ON CONFLICT (tournament_id,player_id) WHERE player_id IS NOT NULL DO NOTHING RETURNING player_id`,
@@ -2142,7 +2860,7 @@ wss.on('connection', ws => {
         }
         await updateTournamentLifecycle();
         const result = await pool.query(
-          `SELECT t.id,t.name,t.status,t.registration_closes_at,t.ends_at,t.max_teams,
+          `SELECT t.id,t.name,t.format,t.status,t.registration_closes_at,t.ends_at,t.max_teams,
                   t.current_week,t.rules_json,e.rank_stars,e.tier,u.elo,
                   (SELECT count(*)::int FROM tournament_entries entries WHERE entries.tournament_id=t.id) AS participant_count
            FROM tournaments t JOIN tournament_entries e ON e.tournament_id=t.id
@@ -2155,7 +2873,7 @@ wss.on('connection', ws => {
         }
         const phase = entry.status === 'registration' ? 'practice' : 'ranked';
         if (phase === 'practice' && (new Date(entry.registration_closes_at) <= new Date() ||
-            entry.participant_count >= entry.max_teams)) {
+            (entry.format !== 'group_knockout' && entry.participant_count >= entry.max_teams))) {
           throw Object.assign(new Error('Vòng chạy đà đã kết thúc; hãy tìm trận chính thức nếu giải đã mở.'), { status: 409 });
         }
         ws.searching = true;
@@ -2184,6 +2902,7 @@ wss.on('connection', ws => {
         await cancelQueue(redis, userId);
         if (ws.tournamentSearch) {
           await cancelTournamentQueue(redis, ws.tournamentSearch.tournamentId, ws.tournamentSearch.teamId, userId, ws.tournamentSearch.week, tournamentQueueNamespace(ws.tournamentSearch));
+          await clearGroupKnockoutReadiness(ws.tournamentSearch.tournamentId, userId);
           ws.tournamentSearch = null;
         }
         send(ws, 'search-cancelled');
@@ -2381,7 +3100,10 @@ wss.on('connection', ws => {
     const timer = searchTimers.get(ws.user.id); if (timer) clearTimeout(timer);
     searchTimers.delete(ws.user.id);
     await cancelQueue(redis, ws.user.id).catch(() => {});
-    if (ws.tournamentSearch) await cancelTournamentQueue(redis, ws.tournamentSearch.tournamentId, ws.tournamentSearch.teamId, ws.user.id, ws.tournamentSearch.week, tournamentQueueNamespace(ws.tournamentSearch)).catch(() => {});
+    if (ws.tournamentSearch) {
+      await cancelTournamentQueue(redis, ws.tournamentSearch.tournamentId, ws.tournamentSearch.teamId, ws.user.id, ws.tournamentSearch.week, tournamentQueueNamespace(ws.tournamentSearch)).catch(() => {});
+      await clearGroupKnockoutReadiness(ws.tournamentSearch.tournamentId, ws.user.id).catch(() => {});
+    }
     const presence = await redis.get(`ottv2:presence:${ws.user.id}`).catch(() => null);
     if (presence === instanceId) await redis.del(`ottv2:presence:${ws.user.id}`).catch(() => {});
     const active = await pool.query("SELECT id, player1_id, player2_id FROM matches WHERE status='active' AND is_sparring=FALSE AND (player1_id=$1 OR player2_id=$1)", [ws.user.id]).catch(() => ({ rows: [] }));
@@ -2453,6 +3175,8 @@ async function main() {
   await pool.query(await readFile(new URL('../migrations/012_admin_sprints_and_user_elo.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/013_profile_appearance.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/014_profile_background_url.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/015_group_knockout_tournaments.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/016_group_knockout_launch_controls.sql', import.meta.url), 'utf8'));
   await updateTournamentLifecycle();
   tournamentLifecycleTimer = setInterval(() => updateTournamentLifecycle().catch(error => {
     console.error('Tournament lifecycle update failed:', error.message);

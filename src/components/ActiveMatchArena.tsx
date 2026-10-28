@@ -1427,16 +1427,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (!leaveConfirmOpen) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !leavingMatch) setLeaveConfirmOpen(false);
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [leaveConfirmOpen, leavingMatch]);
-
   const handleBoardClick = (index: number) => {
     if (
       session.mySeat === null ||
@@ -1503,6 +1493,12 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
   const bannerIsWin =
     session.mySeat !== null && effectiveWinner === session.mySeat;
   const bannerIsDraw = effectiveWinner === 0;
+
+  useEffect(() => {
+    if (!session.tournamentId || !isMatchFinished) return;
+    const timer = window.setTimeout(onExit, 5000);
+    return () => window.clearTimeout(timer);
+  }, [isMatchFinished, onExit, session.tournamentId]);
 
   return (
     <div className="space-y-5">
@@ -1749,6 +1745,11 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
                     </>
                   )}
                 </div>
+                {session.tournamentId && (
+                  <p className="text-xs text-[var(--text-muted)]">
+                    Tự động quay lại giải sau 5 giây để tiếp tục lịch đấu.
+                  </p>
+                )}
               </div>
 
               <div className="flex items-center gap-2.5">
@@ -1882,9 +1883,6 @@ export const ActiveMatchArena: React.FC<ActiveMatchArenaProps> = ({
       {leaveConfirmOpen && (
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-          onClick={() => {
-            if (!leavingMatch) setLeaveConfirmOpen(false);
-          }}
         >
           <div
             role="dialog"
