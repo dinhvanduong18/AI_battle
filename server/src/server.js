@@ -65,6 +65,114 @@ function weeklyRules(week, schedule = DEFAULT_SPRINT_RULES) {
   return { id: `sprint-${sprint}-${layoutId}`, week: sprint, title: layout.title, rows: 9, cols: 9, blockedCells: [...layout.blockedCells] };
 }
 
+function knockoutRoundName(round, totalRounds) {
+  const remaining = totalRounds - round + 1;
+  if (remaining === 1) return 'Trận Chung Kết';
+  if (remaining === 2) return 'Vòng Bán Kết';
+  if (remaining === 3) return 'Vòng Tứ Kết';
+  return `Vòng ${round}`;
+}
+
+function knockoutRules(schedule, round) {
+  const layoutId = schedule?.[round - 1] || 'standard';
+  const layout = SPRINT_RULE_LAYOUTS[layoutId] || SPRINT_RULE_LAYOUTS.standard;
+  return { id: `knockout-r${round}-${layoutId}`, round, title: layout.title, rows: 9, cols: 9, blockedCells: [...layout.blockedCells] };
+}
+
+function makeKnockoutBracket(tournament, playerIds) {
+  const shuffled = [...playerIds];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1); [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  const size = 2 ** Math.ceil(Math.log2(Math.max(2, shuffled.length)));
+  const rounds = Math.log2(size);
+  const matchups = [];
+  for (let round = 1, count = size / 2; round <= rounds; round++, count /= 2) {
+    for (let index = 0; index < count; index++) {
+      const player1 = round === 1 ? shuffled[index * 2] || null : null;
+      const player2 = round === 1 ? shuffled[index * 2 + 1] || null : null;
+      const bye = round === 1 && player1 && !player2;
+      matchups.push({
+        id: `ko-${tournament.id.slice(0, 8)}-r${round}-m${index}`, round, match_index: index,
+        round_name: knockoutRoundName(round, rounds), player1_id: player1, player2_id: player2,
+        score1: bye ? 3 : 0, score2: 0, winner_id: bye ? player1 : null,
+        status: bye ? 'completed' : player1 && player2 ? 'ready' : 'pending',
+        current_game: 1, max_games: 5, break_until: null,
+        rule_id: tournament.rules_schedule?.[round - 1] || 'standard', games: []
+      });
+    }
+  }
+  for (const matchup of matchups.filter(item => item.round === 1 && item.winner_id)) {
+    const next = matchups.find(item => item.round === 2 && item.match_index === Math.floor(matchup.match_index / 2));
+    if (!next) continue;
+    if (matchup.match_index % 2 === 0) next.player1_id = matchup.winner_id;
+    else next.player2_id = matchup.winner_id;
+    if (next.player1_id && next.player2_id) next.status = 'ready';
+  }
+  return { total_rounds: rounds, current_round: 1, round_break_until: null, matchups, champion_id: null };
+}
+
+function advanceKnockoutBracket(data, schedule, match, winnerId) {
+  const matchup = data?.matchups?.find(item => item.round === data.current_round && item.status !== 'completed' &&
+    ((item.player1_id === match.player1_id && item.player2_id === match.player2_id) ||
+     (item.player1_id === match.player2_id && item.player2_id === match.player1_id)));
+  if (!matchup) return false;
+  if (winnerId === matchup.player1_id) matchup.score1++;
+  else if (winnerId === matchup.player2_id) matchup.score2++;
+  matchup.games.push({ game_index: matchup.current_game, match_id: match.id, winner_id: winnerId, status: 'completed', completed_at: new Date().toISOString() });
+  if (matchup.score1 < 3 && matchup.score2 < 3 && matchup.games.length < matchup.max_games) {
+    matchup.status = 'waiting_break';
+    matchup.break_until = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    matchup.current_game++;
+    return true;
+  }
+  matchup.status = 'completed';
+  matchup.winner_id = matchup.score1 === matchup.score2
+    ? (winnerId || (randomInt(2) === 0 ? matchup.player1_id : matchup.player2_id))
+    : matchup.score1 > matchup.score2 ? matchup.player1_id : matchup.player2_id;
+  matchup.break_until = null;
+  if (matchup.round < data.total_rounds) {
+    const next = data.matchups.find(item => item.round === matchup.round + 1 && item.match_index === Math.floor(matchup.match_index / 2));
+    if (next) {
+      if (matchup.match_index % 2 === 0) next.player1_id = matchup.winner_id;
+      else next.player2_id = matchup.winner_id;
+      if (next.player1_id && next.player2_id) next.status = 'ready';
+    }
+  }
+  const roundGames = data.matchups.filter(item => item.round === data.current_round);
+  if (roundGames.every(item => item.status === 'completed')) {
+    if (data.current_round >= data.total_rounds) data.champion_id = matchup.winner_id;
+    else {
+      data.current_round++;
+      data.round_break_until = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    }
+  }
+  return true;
+}
+
+function generateTournamentCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  return Array.from({ length: 6 }, () => alphabet[randomInt(alphabet.length)]).join('');
+}
+
+async function persistKnockoutResult(client, match, winnerId) {
+  if (match.tournament_phase !== 'knockout' || !match.tournament_id) return;
+  const found = await client.query("SELECT format,knockout_data,rules_schedule FROM tournaments WHERE id=$1 FOR UPDATE", [match.tournament_id]);
+  const tournament = found.rows[0];
+  if (tournament?.format !== 'knockout' || !advanceKnockoutBracket(tournament.knockout_data, tournament.rules_schedule, match, winnerId)) {
+    throw Object.assign(new Error('Không tìm thấy cặp đấu Knockout tương ứng để cập nhật nhánh.'), { status: 409 });
+  }
+  const bracket = tournament.knockout_data;
+  const finished = Boolean(bracket.champion_id);
+  await client.query(
+    `UPDATE tournaments SET knockout_data=$2::jsonb,current_week=$3,rules_json=$4::jsonb,
+       status=CASE WHEN $5 THEN 'completed' ELSE status END,
+       ends_at=CASE WHEN $5 THEN LEAST(ends_at,now()) ELSE GREATEST(ends_at,now()+interval '2 days') END
+     WHERE id=$1`,
+    [match.tournament_id, JSON.stringify(bracket), bracket.current_round, JSON.stringify(knockoutRules(tournament.rules_schedule, bracket.current_round)), finished]
+  );
+}
+
 async function clearTournamentQueues(tournamentId, ...weeks) {
   const keys = [...new Set(weeks.flatMap(week => ['ottv2:tournament', 'ottv2:tournament-player', 'ottv2:tournament-practice'].flatMap(namespace => TOURNAMENT_QUEUE_TIERS.map(tier => `${namespace}:${tournamentId}:${week}:${tier}`))))];
   if (keys.length) await redis.del(keys);
@@ -480,7 +588,7 @@ async function createTournamentMatch(user, pairing) {
 
 async function createIndividualTournamentMatch(user, pairing) {
   const tournamentResult = await pool.query(
-    `SELECT id,status,registration_closes_at,ends_at,max_teams,current_week,rules_json
+    `SELECT id,status,registration_closes_at,ends_at,max_teams,current_week,rules_json,rules_schedule,format
      FROM tournaments WHERE id=$1`,
     [pairing.tournamentId]
   );
@@ -494,6 +602,11 @@ async function createIndividualTournamentMatch(user, pairing) {
         new Date(tournament.ends_at) <= new Date() || participantCount.rows[0].count >= tournament.max_teams) {
       throw Object.assign(new Error('Vòng chạy đà đã kết thúc; hãy tìm trận chính thức nếu giải đã mở.'), { status: 409 });
     }
+  } else if (phase === 'knockout') {
+    if (tournament.format !== 'knockout' || tournament.status !== 'qualifying' || new Date(tournament.ends_at) <= new Date()) {
+      throw Object.assign(new Error('Giải Knockout chưa bắt đầu hoặc đã kết thúc.'), { status: 409 });
+    }
+    rules = pairing.rules;
   } else {
     if (tournament.status !== 'qualifying' || new Date(tournament.ends_at) <= new Date()) {
       throw Object.assign(new Error('Giải chưa mở thi đấu chính thức hoặc đã kết thúc.'), { status: 409 });
@@ -565,7 +678,7 @@ async function runIndividualTournamentSearch(userId) {
   const search = socket?.tournamentSearch;
   if (!socket || !search || socket.searchCancelled) return;
   const result = await pool.query(
-    `SELECT t.id AS tournament_id,t.status,t.registration_closes_at,t.ends_at,t.max_teams,
+    `SELECT t.id AS tournament_id,t.format,t.status,t.registration_closes_at,t.ends_at,t.max_teams,
             t.current_week,t.rules_json,e.rank_stars,e.season_points,e.tier,u.elo,u.active_bot_version,
             (SELECT count(*)::int FROM tournament_entries entries WHERE entries.tournament_id=t.id) AS participant_count
      FROM tournaments t JOIN tournament_entries e ON e.tournament_id=t.id AND e.player_id=$2
@@ -584,6 +697,12 @@ async function runIndividualTournamentSearch(userId) {
     await cancelTournamentQueue(redis, search.tournamentId, userId, userId, search.week, tournamentQueueNamespace(search));
     socket.tournamentSearch = null;
     return send(socket, 'error', { message: 'Bạn cần lưu Bot Python hợp lệ trong Phòng Lab trước khi tìm trận giải đấu.' });
+  }
+  if (row.format === 'knockout') {
+    socket.searchCancelled = true; socket.searching = false;
+    await cancelTournamentQueue(redis, search.tournamentId, userId, userId, search.week, tournamentQueueNamespace(search));
+    socket.tournamentSearch = null;
+    return send(socket, 'error', { message: 'Giải Knockout ghép trận theo cặp đã bốc thăm; hãy mở cặp đấu của bạn để bắt đầu trận.' });
   }
   if (socket.searchCancelled || socket.tournamentSearch !== search) return;
   const phase = row.status === 'registration' ? 'practice' : 'ranked';
@@ -841,7 +960,7 @@ async function captureTournamentSprint(tournamentId, sprint) {
 }
 
 async function updateTournamentLifecycle() {
-  const uninitialized = await pool.query("SELECT id,rules_schedule,total_sprints FROM tournaments WHERE status='qualifying' AND week_started_at IS NULL");
+  const uninitialized = await pool.query("SELECT id,rules_schedule,total_sprints FROM tournaments WHERE format='ranked_weekly' AND status='qualifying' AND week_started_at IS NULL");
   for (const tournament of uninitialized.rows) {
     const initialized = await pool.query(
       "UPDATE tournaments SET current_week=1,last_reset_week=1,week_started_at=now(),registration_closes_at=LEAST(registration_closes_at,now()),ends_at=now()+(total_sprints * interval '7 days'),rules_json=$1::jsonb WHERE id=$2 AND week_started_at IS NULL RETURNING id",
@@ -853,7 +972,7 @@ async function updateTournamentLifecycle() {
   }
   const starting = await pool.query(
     `SELECT t.id,t.rules_schedule,t.total_sprints FROM tournaments t
-     WHERE t.status='registration' AND t.ends_at>now()
+     WHERE t.format='ranked_weekly' AND t.status='registration' AND t.ends_at>now()
        AND (t.registration_closes_at<=now() OR
          (SELECT count(*) FROM tournament_entries entries WHERE entries.tournament_id=t.id)>=t.max_teams)`
   );
@@ -896,7 +1015,7 @@ async function updateTournamentLifecycle() {
   const active = await pool.query(
     `SELECT id,current_week,total_sprints,COALESCE(last_reset_week, GREATEST(1, current_week)) AS last_reset_week,week_started_at,rules_schedule
      FROM tournaments
-     WHERE status='qualifying' AND week_started_at IS NOT NULL AND ends_at>now()`
+     WHERE format='ranked_weekly' AND status='qualifying' AND week_started_at IS NOT NULL AND ends_at>now()`
   );
   const now = Date.now();
   for (const tournament of active.rows) {
@@ -920,7 +1039,7 @@ async function updateTournamentLifecycle() {
     );
     await clearTournamentQueues(tournament.id, 0, tournament.current_week, nextWeek);
   }
-  await pool.query(`UPDATE tournaments SET status='completed' WHERE status <> 'completed' AND ends_at <= now()`);
+  await pool.query(`UPDATE tournaments SET status='completed' WHERE format='ranked_weekly' AND status <> 'completed' AND ends_at <= now()`);
 }
 
 async function registerSessionKey(userId, packet) {
@@ -942,6 +1061,8 @@ async function registerSessionKey(userId, packet) {
 
 async function updateTournamentEntriesForResult(client, match, score1) {
   if (!match.tournament_id || match.tournament_phase === 'practice' || match.is_sparring) return new Map();
+  const tournamentFormat = await client.query('SELECT format FROM tournaments WHERE id=$1', [match.tournament_id]);
+  if (tournamentFormat.rows[0]?.format === 'knockout') return new Map();
   const updatesByPlayer = new Map();
   if (match.player1_team_id && match.player2_team_id) {
     const entries = await client.query(
@@ -1022,6 +1143,7 @@ async function adjudicateMatchForfeit(matchId, offenderId, reasonCode, winnerMes
       [match.id, player1.elo, player2.elo, p1After, p2After, score1]
     );
     const tournamentUpdates = await updateTournamentEntriesForResult(client, match, score1);
+    await persistKnockoutResult(client, match, winnerId);
     await client.query(
       `UPDATE matches SET status='completed',winner_id=$1,completed_at=now(),
          disconnected_player_id=NULL,disconnected_at=NULL
@@ -1099,7 +1221,7 @@ async function submitResult(userId, body) {
     if (match.tournament_id) {
       const lifecycle = await client.query(
         `WITH checked AS (SELECT clock_timestamp() AS at)
-         SELECT t.status,t.registration_closes_at,t.ends_at,t.max_teams,t.week_started_at,t.current_week,
+         SELECT t.status,t.format,t.registration_closes_at,t.ends_at,t.max_teams,t.week_started_at,t.current_week,t.knockout_data,t.rules_schedule,
                 checked.at < t.ends_at AS before_end,
                 checked.at < t.registration_closes_at AS before_registration_close,
                 (SELECT count(*)::int FROM tournament_entries entries WHERE entries.tournament_id=t.id) AS participant_count
@@ -1112,7 +1234,10 @@ async function submitResult(userId, body) {
       const matchWeek = Number(match.tournament_rules?.week);
       const rankedSprintStillOpen = tournament?.status === 'qualifying' && tournament.before_end &&
         Number.isInteger(matchWeek) && matchWeek === Number(tournament.current_week);
-      const validPhase = match.tournament_phase === 'practice' ? practiceStillOpen : rankedSprintStillOpen;
+      const knockoutStillOpen = tournament?.format === 'knockout' && tournament.status === 'qualifying' && tournament.before_end &&
+        match.tournament_phase === 'knockout' && Number(match.tournament_rules?.round) === Number(tournament.current_week);
+      const validPhase = match.tournament_phase === 'practice' ? practiceStillOpen :
+        match.tournament_phase === 'knockout' ? knockoutStillOpen : rankedSprintStillOpen;
       if (!validPhase) {
         await client.query("UPDATE matches SET status='abandoned' WHERE id=$1 AND status='active'", [match.id]);
         await client.query('COMMIT');
@@ -1159,6 +1284,7 @@ async function submitResult(userId, body) {
     const winnerId = replayResult.winner === 1 ? u1.id : replayResult.winner === 2 ? u2.id : null;
     const tournamentUpdates = await updateTournamentEntriesForResult(client, match, score1);
     await client.query(`UPDATE matches SET status='completed', winner_id=$1, final_state_hash=$2, replay_key=$3, replay_sha256=$4, replay_json=$5::jsonb, player1_proof=$6::jsonb, player2_proof=$7::jsonb, completed_at=now() WHERE id=$8`, [winnerId, replayResult.finalHash, storedReplay.key, storedReplay.checksum, storedReplay.json ? JSON.stringify(storedReplay.json) : null, JSON.stringify(p1), JSON.stringify(p2), match.id]);
+    await persistKnockoutResult(client, match, winnerId);
     await client.query('COMMIT');
     sparringSessions.delete(match.id);
     return {
@@ -1216,7 +1342,7 @@ async function resolveDisconnectedMatch(matchId) {
     if (match.tournament_id) {
       const lifecycle = await client.query(
         `WITH checked AS (SELECT clock_timestamp() AS at)
-         SELECT t.status,t.registration_closes_at,t.ends_at,t.max_teams,
+         SELECT t.status,t.format,t.registration_closes_at,t.ends_at,t.max_teams,t.current_week,
                 checked.at < t.ends_at AS before_end,
                 checked.at < t.registration_closes_at AS before_registration_close,
                 (SELECT count(*)::int FROM tournament_entries entries WHERE entries.tournament_id=t.id) AS participant_count,
@@ -1234,7 +1360,9 @@ async function resolveDisconnectedMatch(matchId) {
       const rankedSprintStillOpen = match.tournament_phase === 'ranked' &&
         tournament?.status === 'qualifying' && tournament.before_end &&
         Number.isInteger(matchWeek) && matchWeek === Number(tournament.active_week);
-      if (!practiceStillOpen && !rankedSprintStillOpen) {
+      const knockoutStillOpen = match.tournament_phase === 'knockout' && tournament?.format === 'knockout' &&
+        tournament.status === 'qualifying' && tournament.before_end && Number(match.tournament_rules?.round) === Number(tournament.current_week);
+      if (!practiceStillOpen && !rankedSprintStillOpen && !knockoutStillOpen) {
         await client.query("UPDATE matches SET status='abandoned',completed_at=now() WHERE id=$1 AND status='active'", [match.id]);
         await client.query('COMMIT');
         return { matchId: match.id, abandoned: true, player1Id: match.player1_id, player2Id: match.player2_id };
@@ -1266,6 +1394,7 @@ async function resolveDisconnectedMatch(matchId) {
       [match.id, player1.elo, player2.elo, player1EloAfter, player2EloAfter, score1]
     );
     await updateTournamentEntriesForResult(client, match, score1);
+    await persistKnockoutResult(client, match, winnerId);
     await client.query(
       `UPDATE matches SET status='completed',winner_id=$1,completed_at=now(),
          disconnected_player_id=NULL,disconnected_at=NULL
@@ -1431,6 +1560,7 @@ async function submitConsensusDispute(userId, body) {
         [match.id, player1.elo, player2.elo, player1EloAfter, player2EloAfter, score1]
       );
       const tournamentUpdates = await updateTournamentEntriesForResult(client, match, score1);
+      await persistKnockoutResult(client, match, winnerId);
       await client.query(
         `INSERT INTO match_disputes(match_id,claimant_id,evidence,status,offender_id,winner_id,reason)
          VALUES($1,$2,$3::jsonb,'adjudicated',$4,$5,$6)`,
@@ -1600,9 +1730,27 @@ const httpServer = createServer(async (req, res) => {
       if (rawOwn) delete rawOwn.privateRank;
       const isCompleted = tournament.status === 'completed';
       const tournamentForViewer = { ...tournament };
-      if (!adminResult.rows[0]?.is_admin) delete tournamentForViewer.rules_schedule;
+      const isCreator = Boolean(auth && tournament.created_by === auth.sub);
+      if (tournament.format !== 'knockout' && !adminResult.rows[0]?.is_admin && !isCreator) delete tournamentForViewer.rules_schedule;
+      if (tournament.knockout_data?.matchups) {
+        const ids = [...new Set(tournament.knockout_data.matchups.flatMap(item => [item.player1_id, item.player2_id]).filter(Boolean))];
+        const names = ids.length ? await pool.query('SELECT id,display_name,avatar_id FROM users WHERE id=ANY($1::uuid[])', [ids]) : { rows: [] };
+        const usersById = new Map(names.rows.map(user => [user.id, user]));
+        tournamentForViewer.knockout_data = {
+          ...tournament.knockout_data,
+          matchups: tournament.knockout_data.matchups.map(item => ({
+            ...item,
+            player1_name: usersById.get(item.player1_id)?.display_name || (item.player1_id ? 'Kỳ thủ' : 'Chờ xác định'),
+            player1_avatar: usersById.get(item.player1_id)?.avatar_id || 'pumpkin',
+            player2_name: usersById.get(item.player2_id)?.display_name || (item.player2_id ? 'Kỳ thủ' : 'Chờ xác định'),
+            player2_avatar: usersById.get(item.player2_id)?.avatar_id || 'bat'
+          }))
+        };
+      }
+      if (!adminResult.rows[0]?.is_admin && !isCreator) delete tournamentForViewer.join_code;
       return json(res, 200, {
         tournament: tournamentForViewer,
+        isCreator,
         participantCount: participants.rows[0].count,
         ranks: tournamentRanks(),
         myEntry: rawOwn,
@@ -1625,7 +1773,7 @@ const httpServer = createServer(async (req, res) => {
       const sprintCount = Number(body.sprintCount);
       const maxTeams = Math.min(256, Math.max(2, Number(body.maxTeams) || 64));
       const sprintRules = Array.isArray(body.sprintRules) ? body.sprintRules : DEFAULT_SPRINT_RULES;
-      if (format !== 'ranked_weekly') return json(res, 400, { error: 'Thể thức này chưa được hỗ trợ.' });
+      if (!['ranked_weekly', 'knockout'].includes(format)) return json(res, 400, { error: 'Thể thức giải đấu không hợp lệ.' });
       if (!name) return json(res, 400, { error: 'Vui lòng nhập tên giải.' });
       if (!Number.isInteger(registrationDays) || registrationDays < 1 || registrationDays > 30) {
         return json(res, 400, { error: 'Số ngày đăng ký phải từ 1 đến 30 ngày.' });
@@ -1633,15 +1781,31 @@ const httpServer = createServer(async (req, res) => {
       if (!Number.isInteger(sprintCount) || sprintCount < 1 || sprintCount > 52) {
         return json(res, 400, { error: 'Số Sprint phải từ 1 đến 52.' });
       }
-      if (sprintRules.length !== sprintCount || sprintRules.some(rule => !Object.hasOwn(SPRINT_RULE_LAYOUTS, rule))) {
+      const requiredRuleCount = format === 'knockout' ? Math.log2(maxTeams) : sprintCount;
+      if (format === 'knockout' && ![4, 8, 16].includes(maxTeams)) {
+        return json(res, 400, { error: 'Giải Knockout chỉ hỗ trợ 4, 8 hoặc 16 kỳ thủ.' });
+      }
+      if (format === 'knockout' && sprintCount !== requiredRuleCount) {
+        return json(res, 400, { error: 'Số luật phải bằng số vòng của nhánh Knockout.' });
+      }
+      if (sprintRules.length !== requiredRuleCount || sprintRules.some(rule => !Object.hasOwn(SPRINT_RULE_LAYOUTS, rule))) {
         return json(res, 400, { error: 'Hãy chọn thể lệ hợp lệ cho từng Sprint.' });
       }
       const registrationClosesAt = new Date(Date.now() + registrationDays * 86400000);
-      const endsAt = new Date(registrationClosesAt.getTime() + sprintCount * WEEK_MS);
+      const endsAt = new Date(registrationClosesAt.getTime() + (format === 'knockout' ? (requiredRuleCount * 2 + 2) * 86400000 : sprintCount * WEEK_MS));
+      let joinCode = null;
+      if (format === 'knockout') {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const candidate = generateTournamentCode();
+          const exists = await pool.query('SELECT 1 FROM tournaments WHERE join_code=$1', [candidate]);
+          if (!exists.rowCount) { joinCode = candidate; break; }
+        }
+        if (!joinCode) throw new Error('Không thể tạo mã giải, vui lòng thử lại.');
+      }
       const created = await pool.query(
-        `INSERT INTO tournaments(name,format,description,registration_closes_at,ends_at,max_teams,total_sprints,rules_schedule)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING *`,
-        [name, format, description, registrationClosesAt, endsAt, maxTeams, sprintCount, JSON.stringify(sprintRules)]
+        `INSERT INTO tournaments(name,format,description,registration_closes_at,ends_at,max_teams,total_sprints,rules_schedule,created_by,join_code)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10) RETURNING *`,
+        [name, format, description, registrationClosesAt, endsAt, maxTeams, sprintCount, JSON.stringify(sprintRules), auth.sub, joinCode]
       );
       return json(res, 201, { tournament: created.rows[0] });
     }
@@ -1650,8 +1814,22 @@ const httpServer = createServer(async (req, res) => {
       const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
       if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Tournament organizer permission required'), { status: 403 });
       const tournamentId = url.pathname.split('/')[3];
-      const scheduleResult = await pool.query("SELECT rules_schedule,total_sprints FROM tournaments WHERE id=$1 AND status='registration' AND ends_at>now()", [tournamentId]);
+      const scheduleResult = await pool.query("SELECT id,format,max_teams,rules_schedule,total_sprints FROM tournaments WHERE id=$1 AND status='registration' AND ends_at>now()", [tournamentId]);
       if (!scheduleResult.rowCount) throw Object.assign(new Error('Không tìm thấy giải đang trong giai đoạn đăng ký.'), { status: 409 });
+      const tournament = scheduleResult.rows[0];
+      if (tournament.format === 'knockout') {
+        const entries = await pool.query('SELECT player_id FROM tournament_entries WHERE tournament_id=$1 AND player_id IS NOT NULL', [tournamentId]);
+        if (entries.rowCount < 2) throw Object.assign(new Error('Cần ít nhất 2 kỳ thủ đã đăng ký để bắt đầu giải.'), { status: 409 });
+        const bracket = makeKnockoutBracket(tournament, entries.rows.map(entry => entry.player_id));
+        const rules = knockoutRules(tournament.rules_schedule, 1);
+        const endsAt = new Date(Date.now() + (bracket.total_rounds * 2 + 2) * 86400000);
+        const started = await pool.query(
+          `UPDATE tournaments SET status='qualifying',current_week=1,week_started_at=now(),registration_closes_at=LEAST(registration_closes_at,now()),ends_at=$2,rules_json=$3::jsonb,knockout_data=$4::jsonb
+           WHERE id=$1 AND status='registration' RETURNING *`,
+          [tournamentId, endsAt, JSON.stringify(rules), JSON.stringify(bracket)]
+        );
+        return json(res, 200, { tournament: started.rows[0] });
+      }
       const result = await pool.query(
         `UPDATE tournaments SET status='qualifying',current_week=1,last_reset_week=1,week_started_at=now(),
            registration_closes_at=LEAST(registration_closes_at,now()),ends_at=now()+(total_sprints * interval '7 days'),rules_json=$2::jsonb
@@ -1823,6 +2001,90 @@ const httpServer = createServer(async (req, res) => {
       } catch (error) { await client.query('ROLLBACK'); throw error; }
       finally { client.release(); }
     }
+    if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/knockout\/skip-break$/i.test(url.pathname)) {
+      const auth = authFromHeader(req);
+      const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+      if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Chỉ BTC mới có thể bỏ qua thời gian nghỉ.'), { status: 403 });
+      const tournamentId = url.pathname.split('/')[3];
+      const body = await readBody(req);
+      const found = await pool.query("SELECT knockout_data FROM tournaments WHERE id=$1 AND format='knockout'", [tournamentId]);
+      const bracket = found.rows[0]?.knockout_data;
+      if (!bracket) throw Object.assign(new Error('Không tìm thấy nhánh Knockout.'), { status: 404 });
+      if (body.matchupId) {
+        const matchup = bracket.matchups.find(item => item.id === body.matchupId);
+        if (matchup) { matchup.break_until = null; if (matchup.status === 'waiting_break') matchup.status = 'ready'; }
+      } else {
+        bracket.round_break_until = null;
+        for (const matchup of bracket.matchups.filter(item => item.round === bracket.current_round)) {
+          if (matchup.player1_id && matchup.player2_id && matchup.status !== 'completed') { matchup.status = 'ready'; matchup.break_until = null; }
+        }
+      }
+      await pool.query('UPDATE tournaments SET knockout_data=$2::jsonb WHERE id=$1', [tournamentId, JSON.stringify(bracket)]);
+      return json(res, 200, { success: true });
+    }
+    if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/knockout\/launch-match$/i.test(url.pathname)) {
+      const auth = authFromHeader(req);
+      const tournamentId = url.pathname.split('/')[3];
+      const body = await readBody(req);
+      const found = await pool.query("SELECT id,status,ends_at,current_week,rules_schedule,knockout_data FROM tournaments WHERE id=$1 AND format='knockout'", [tournamentId]);
+      const tournament = found.rows[0];
+      if (!tournament?.knockout_data) throw Object.assign(new Error('Không tìm thấy giải Knockout.'), { status: 404 });
+      if (tournament.status !== 'qualifying' || new Date(tournament.ends_at) <= new Date()) throw Object.assign(new Error('Giải chưa bắt đầu hoặc đã kết thúc.'), { status: 409 });
+      const matchup = tournament.knockout_data.matchups.find(item => item.id === String(body.matchupId || ''));
+      if (!matchup || matchup.round !== tournament.knockout_data.current_round || !matchup.player1_id || !matchup.player2_id) throw Object.assign(new Error('Cặp đấu chưa đủ kỳ thủ hoặc chưa tới lượt.'), { status: 409 });
+      if (auth.sub !== matchup.player1_id && auth.sub !== matchup.player2_id) {
+        const admin = await pool.query('SELECT is_admin FROM users WHERE id=$1', [auth.sub]);
+        if (!admin.rows[0]?.is_admin) throw Object.assign(new Error('Chỉ kỳ thủ trong cặp đấu hoặc BTC mới có thể bắt đầu.'), { status: 403 });
+      }
+      if (matchup.status === 'in_progress') throw Object.assign(new Error('Cặp đấu này đang diễn ra.'), { status: 409 });
+      if (tournament.knockout_data.round_break_until && new Date(tournament.knockout_data.round_break_until) > new Date()) throw Object.assign(new Error('Thời gian nghỉ giữa vòng chưa kết thúc.'), { status: 409 });
+      if (matchup.break_until && new Date(matchup.break_until) > new Date()) throw Object.assign(new Error('Thời gian nghỉ giữa các ván chưa kết thúc.'), { status: 409 });
+      const rules = { ...knockoutRules(tournament.rules_schedule, matchup.round), id: `knockout-${matchup.id}-${matchup.current_game}`, round: matchup.round, week: matchup.round, matchupId: matchup.id };
+      matchup.status = 'in_progress'; matchup.break_until = null;
+      await pool.query('UPDATE tournaments SET knockout_data=$2::jsonb WHERE id=$1', [tournamentId, JSON.stringify(tournament.knockout_data)]);
+      try {
+        const users = await pool.query('SELECT id,email,display_name,elo,is_admin,active_bot_version FROM users WHERE id=ANY($1::uuid[])', [[matchup.player1_id, matchup.player2_id]]);
+        const initiatingUser = users.rows.find(user => user.id === auth.sub) || users.rows[0];
+        await createIndividualTournamentMatch(initiatingUser, { tournamentId, phase: 'knockout', week: matchup.round, rules, opponentUserId: matchup.player1_id === auth.sub ? matchup.player2_id : matchup.player1_id });
+        return json(res, 200, { success: true });
+      } catch (error) {
+        matchup.status = 'ready';
+        await pool.query('UPDATE tournaments SET knockout_data=$2::jsonb WHERE id=$1', [tournamentId, JSON.stringify(tournament.knockout_data)]);
+        throw error;
+      }
+    }
+    if (req.method === 'POST' && url.pathname === '/api/tournaments/join-by-code') {
+      const auth = authFromHeader(req);
+      const body = await readBody(req);
+      const code = String(body.code || '').trim().toUpperCase().replace(/^OTT-/, '');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const found = await client.query('SELECT * FROM tournaments WHERE join_code=$1 AND format=$2 FOR UPDATE', [code, 'knockout']);
+        const tournament = found.rows[0];
+        if (!tournament) throw Object.assign(new Error('Mã giải Knockout không hợp lệ.'), { status: 404 });
+        const existing = await client.query('SELECT player_id FROM tournament_entries WHERE tournament_id=$1 AND player_id=$2', [tournament.id, auth.sub]);
+        if (existing.rowCount) {
+          await client.query('COMMIT');
+          return json(res, 200, { entry: existing.rows[0], alreadyRegistered: true, tournamentId: tournament.id });
+        }
+        if (tournament.status !== 'registration' || new Date(tournament.registration_closes_at) <= new Date()) {
+          throw Object.assign(new Error('Giải Knockout đã đóng đăng ký.'), { status: 409 });
+        }
+        const player = await client.query('SELECT active_bot_version FROM users WHERE id=$1', [auth.sub]);
+        if (!player.rowCount) throw Object.assign(new Error('Không tìm thấy tài khoản.'), { status: 404 });
+        const count = await client.query('SELECT count(*)::int AS count FROM tournament_entries WHERE tournament_id=$1', [tournament.id]);
+        if (count.rows[0].count >= tournament.max_teams) throw Object.assign(new Error('Giải đã đủ số lượng kỳ thủ.'), { status: 409 });
+        const inserted = await client.query(
+          `INSERT INTO tournament_entries(tournament_id,player_id,bot_version,tier,rank_stars,season_points)
+           VALUES($1,$2,$3,'Bronze',0,0) RETURNING player_id`,
+          [tournament.id, auth.sub, player.rows[0].active_bot_version || null]
+        );
+        await client.query('COMMIT');
+        return json(res, 201, { entry: inserted.rows[0], alreadyRegistered: false, tournamentId: tournament.id });
+      } catch (error) { await client.query('ROLLBACK'); throw error; }
+      finally { client.release(); }
+    }
     if (req.method === 'POST' && /^\/api\/tournaments\/[0-9a-f-]+\/register$/i.test(url.pathname)) {
       const auth = authFromHeader(req);
       const tournamentId = url.pathname.split('/')[3];
@@ -1832,6 +2094,7 @@ const httpServer = createServer(async (req, res) => {
         await client.query('BEGIN');
         const tournamentResult = await client.query('SELECT * FROM tournaments WHERE id=$1 FOR UPDATE', [tournamentId]);
         const tournament = tournamentResult.rows[0];
+        if (tournament?.format === 'knockout') throw Object.assign(new Error('Giải Knockout yêu cầu nhập mã riêng để tham gia.'), { status: 409 });
         if (!tournament || tournament.status !== 'registration' || new Date(tournament.registration_closes_at) <= new Date()) {
           throw Object.assign(new Error('Giải không nhận đăng ký ở thời điểm này (đã chuyển sang Thực chiến hoặc kết thúc).'), { status: 409 });
         }
@@ -2453,6 +2716,8 @@ async function main() {
   await pool.query(await readFile(new URL('../migrations/012_admin_sprints_and_user_elo.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/013_profile_appearance.sql', import.meta.url), 'utf8'));
   await pool.query(await readFile(new URL('../migrations/014_profile_background_url.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/015_tournament_partner_invites.sql', import.meta.url), 'utf8'));
+  await pool.query(await readFile(new URL('../migrations/016_knockout_tournaments.sql', import.meta.url), 'utf8'));
   await updateTournamentLifecycle();
   tournamentLifecycleTimer = setInterval(() => updateTournamentLifecycle().catch(error => {
     console.error('Tournament lifecycle update failed:', error.message);

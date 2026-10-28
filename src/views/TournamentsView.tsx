@@ -362,6 +362,21 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       return;
     }
     try {
+      const currentTournament = detail?.tournament;
+      if (currentTournament?.id === tournamentId && currentTournament.format === 'knockout') {
+        const bracket = currentTournament.knockout_data;
+        const matchup = bracket?.matchups?.find((item: any) => item.round === bracket.current_round &&
+          (item.player1_id === user.id || item.player2_id === user.id) &&
+          ['ready', 'waiting_break'].includes(item.status));
+        if (!matchup) {
+          notify('Hiện chưa có cặp đấu sẵn sàng cho bạn. Hãy chờ BTC bắt đầu giải hoặc vòng tiếp theo.', 'error');
+          return;
+        }
+        await backendClient.launchKnockoutMatch(tournamentId, matchup.id);
+        await loadTournamentDetail(tournamentId);
+        notify('Đã bắt đầu ván Knockout của cặp đấu bạn.', 'success');
+        return;
+      }
       setQueuingTournament(true);
       await backendClient.findTournamentMatch(tournamentId);
     } catch (err: any) {
@@ -655,7 +670,39 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     </div>
 
                     <div className="overflow-x-auto pb-4">
-                      
+                      <div className="flex min-w-max gap-3">
+                        {Array.from({ length: t.knockout_data!.total_rounds }, (_, roundIndex) => {
+                          const round = roundIndex + 1;
+                          const roundMatches = t.knockout_data!.matchups.filter((item: any) => item.round === round);
+                          return (
+                            <section key={round} className="w-64 space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                              <h4 className="text-xs font-bold text-amber-300">{getKnockoutRoundName(round, t.knockout_data!.total_rounds)}</h4>
+                              {roundMatches.map((matchup: any) => {
+                                const canLaunch = round === t.knockout_data!.current_round && matchup.player1_id && matchup.player2_id &&
+                                  ['ready', 'waiting_break'].includes(matchup.status) &&
+                                  (user?.isAdmin || user?.id === matchup.player1_id || user?.id === matchup.player2_id);
+                                return (
+                                  <div key={matchup.id} className="space-y-2 rounded-lg border border-[var(--border-subtle)] p-2.5 text-[11px]">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="truncate">{matchup.player1_name || 'Chờ xác định'}</span>
+                                      <strong className="shrink-0 text-amber-300">{matchup.score1} : {matchup.score2}</strong>
+                                      <span className="truncate text-right">{matchup.player2_name || 'Chờ xác định'}</span>
+                                    </div>
+                                    <div className="flex items-center justify-between text-[var(--text-muted)]">
+                                      <span>{matchup.status === 'completed' ? (matchup.winner_id ? 'Đã hoàn tất' : 'Chờ xử lý') : matchup.status === 'in_progress' ? 'Đang thi đấu' : matchup.status === 'waiting_break' ? 'Đang nghỉ' : matchup.status === 'ready' ? 'Sẵn sàng' : 'Chờ cặp trước'}</span>
+                                      {canLaunch && (
+                                        <button type="button" disabled={submittingAction} onClick={() => handleLaunchKnockoutMatch(t.id, matchup.id)} className="rounded-md bg-amber-400 px-2 py-1 font-semibold text-black disabled:opacity-50">
+                                          Bắt đầu ván {matchup.current_game || 1}
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </section>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 )}
