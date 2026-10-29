@@ -1718,7 +1718,7 @@ const httpServer = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/maintenance') {
       return json(res, 200, getMaintenanceStatus());
     }
-    if (isMaintenanceActive(req)) {
+    if (isMaintenanceActive(req) && url.pathname.startsWith('/api')) {
       const status = getMaintenanceStatus();
       return json(res, 503, {
         error: status.message,

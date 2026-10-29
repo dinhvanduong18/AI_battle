@@ -1546,7 +1546,10 @@ export async function startServer(options: ServerStartOptions = {}) {
   });
 
   app.use((req, res, next) => {
-    if (req.path === '/health' || req.path === '/api/maintenance' || req.path.startsWith('/@') || req.path.startsWith('/src/')) return next();
+    // Chỉ chặn các yêu cầu gọi vào API (/api/*)
+    // Các file HTML, CSS/JS giao diện vẫn được tải để trình duyệt hiển thị Giao diện Thông Báo Bảo Trì (MaintenanceOverlay)
+    if (!req.path.startsWith('/api')) return next();
+    if (req.path === '/api/maintenance') return next();
     if (isMaintenanceActive(req)) {
       const status = getMaintenanceStatus();
       return res.status(503).json({
