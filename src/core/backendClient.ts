@@ -154,6 +154,14 @@ export interface KnockoutDataSummary {
   champion_id: string | null;
 }
 
+export interface SavedBotVersionItem {
+  version: number;
+  code: string;
+  sha256: string;
+  createdAt: string;
+  isActive: boolean;
+}
+
 export interface TournamentItem {
   id: string;
   name: string;
@@ -371,6 +379,25 @@ export class BackendClient {
   async getMyBot(): Promise<{ version: number; code: string; sha256: string; createdAt?: string }> {
     const res = await this.request('/api/bots/me', 'GET', undefined, true);
     return res.bot || { version: 0, code: '', sha256: '' };
+  }
+
+  async getMyBotVersions(): Promise<{
+    bot: { version: number; code: string; sha256: string; createdAt?: string } | null;
+    activeVersion: number;
+    versions: SavedBotVersionItem[];
+  }> {
+    const res = await this.request('/api/bots/me', 'GET', undefined, true);
+    return {
+      bot: res.bot || null,
+      activeVersion: res.activeVersion || res.bot?.version || 0,
+      versions: Array.isArray(res.versions) ? res.versions : [],
+    };
+  }
+
+  async selectBotVersion(version: number): Promise<{ success: boolean; activeVersion: number; code: string; message: string }> {
+    const res = await this.request('/api/bots/select-version', 'POST', { version }, true);
+    await this.refreshMe().catch(() => {});
+    return res;
   }
 
   async saveMyBot(code: string): Promise<{ version: number; sha256: string }> {
@@ -602,6 +629,11 @@ export class BackendClient {
   async findTournamentMatch(tournamentId: string) {
     await this.connectWs();
     this.sendWs({ type: 'find-tournament-match', tournamentId });
+  }
+
+  async findBossMatch(tournamentId: string) {
+    await this.connectWs();
+    this.sendWs({ type: 'find-boss-match', tournamentId });
   }
 
   async findSparringMatch(mode: 'human' | 'bot', tournamentId?: string) {

@@ -24,6 +24,131 @@ export const TIER_BASE_STARS = {
   Challenger: 100
 };
 
+export const RANK_BOSS_CONFIG = {
+  Bronze: {
+    level: 1,
+    name: 'Thủ Hộ Kỵ Sĩ (Bậc Đồng)',
+    difficulty: 'medium',
+    difficultyLabel: 'Vừa',
+    description: 'Chiến binh canh gác cổng Bạc. Chiến thuật linh hoạt, ưu tiên phản công và tiến nhanh về đền thờ đối phương.',
+    avatarId: 'knight',
+    starsRequired: 10,
+    promoteTo: 'Silver',
+  },
+  Silver: {
+    level: 2,
+    name: 'Ảo Ảnh Kỵ Sĩ (Bậc Bạc)',
+    difficulty: 'hard',
+    difficultyLabel: 'Khá',
+    description: 'Thủ lĩnh bóng đêm. Tính toán 2 nước cờ, né bẫy khắc hệ và bảo vệ chặt chẽ các quân then chốt.',
+    avatarId: 'ghost',
+    starsRequired: 20,
+    promoteTo: 'Gold',
+  },
+  Gold: {
+    level: 3,
+    name: 'Chiến Tướng Hoàng Kim (Bậc Vàng)',
+    difficulty: 'very_hard',
+    difficultyLabel: 'Rất Khó',
+    description: 'Bậc thầy Minimax chiến thuật. Kiểm soát khu trung tâm, ép góc và truy kích triệt để hệ quân mỏng nhất.',
+    avatarId: 'pumpkin',
+    starsRequired: 30,
+    promoteTo: 'Master',
+  },
+  Master: {
+    level: 4,
+    name: 'Bá Vương Hắc Ám (Bậc Cao Thủ)',
+    difficulty: 'extreme',
+    difficultyLabel: 'Siêu Cao',
+    description: 'Boss tối thượng của Đấu Trường. Trí tuệ AI đỉnh cao, tìm đường chiến thắng tuyệt đối và tận diệt mọi sơ hở.',
+    avatarId: 'dragon',
+    starsRequired: 40,
+    promoteTo: 'Challenger',
+  },
+};
+
+/**
+ * applyBossResult:
+ * - Thắng (score = 1): PASS -> thăng hạng lên bậc tiếp theo, sao reset về 0
+ * - Thua / Hòa (score = 0 hoặc 0.5): K-PASS -> giảm 2/3 số sao hiện tại (ví dụ 30 sao -> 20 sao)
+ */
+export function applyBossResult(tier, currentStars, score) {
+  const rankIndex = TOURNAMENT_RANKS.indexOf(tier);
+  if (rankIndex < 0 || tier === 'Challenger') {
+    throw new Error('Hạng không hợp lệ để khiêu chiến Boss: ' + tier);
+  }
+  const maxStars = RANK_PROMOTION_STARS[tier];
+  const safeCurrentStars = Math.max(0, Math.min(maxStars, Math.floor(Number(currentStars) || 0)));
+
+  if (score === 1) {
+    const nextTier = TOURNAMENT_RANKS[rankIndex + 1];
+    return {
+      tier: nextTier,
+      stars: 0,
+      seasonPoints: 0,
+      passed: true,
+      promotedTo: nextTier,
+      message: 'Xuất sắc vượt qua Boss thăng hạng! Bạn đã chính thức bước lên bậc ' + RANK_LABELS[nextTier] + '!'
+    };
+  }
+
+  // K-PASS: Giảm 2/3 số sao hiện tại (ví dụ 30 * 2 / 3 = 20)
+  const remainingStars = Math.floor((safeCurrentStars * 2) / 3);
+  return {
+    tier,
+    stars: remainingStars,
+    seasonPoints: 0,
+    passed: false,
+    promotedTo: null,
+    message: 'Khiêu chiến thất bại! Bạn bị trừ 2/3 số sao hiện tại (còn ' + remainingStars + ' sao). Hãy tiếp tục rèn luyện để thách đấu lại!'
+  };
+}
+
+/**
+ * applyRankedMatchResult:
+ * Luật leo rank giải đấu có chốt chặn Boss:
+ * - Khi thắng trong rank: tăng +1 sao, CAPPED tại RANK_PROMOTION_STARS[tier].
+ * - Khi đạt đủ số sao yêu cầu (ví dụ 30 sao ở Gold): KHÔNG tự động lên hạng mà chuyển sang trạng thái canChallengeBoss = true!
+ */
+export function applyRankedMatchResult(tier, stars, seasonPoints, score) {
+  const rankIndex = TOURNAMENT_RANKS.indexOf(tier);
+  if (rankIndex < 0) throw new Error('Unknown tournament rank: ' + tier);
+  if (![0, 0.5, 1].includes(score)) throw new RangeError('Invalid tournament score: ' + score);
+
+  if (tier === 'Challenger') {
+    const delta = score === 1 ? 1 : score === 0 ? -1 : 0;
+    const newPoints = Math.max(0, (Number(seasonPoints) || 0) + delta);
+    return { tier: 'Challenger', stars: 0, seasonPoints: newPoints, canChallengeBoss: false };
+  }
+
+  const maxStars = RANK_PROMOTION_STARS[tier];
+  let curStars = Math.max(0, Math.min(maxStars, Math.floor(Number(stars) || 0)));
+
+  if (score === 1) {
+    curStars = Math.min(maxStars, curStars + 1);
+  } else if (score === 0) {
+    if (curStars > 0) {
+      curStars -= 1;
+    } else if (rankIndex > 0) {
+      const prevTier = TOURNAMENT_RANKS[rankIndex - 1];
+      return {
+        tier: prevTier,
+        stars: Math.max(0, RANK_PROMOTION_STARS[prevTier] - 1),
+        seasonPoints: 0,
+        canChallengeBoss: false
+      };
+    }
+  }
+
+  return {
+    tier,
+    stars: curStars,
+    seasonPoints: 0,
+    canChallengeBoss: curStars >= maxStars
+  };
+}
+
+
 export function rankTier(elo) {
   if (elo >= 1600) return 'Gold';
   if (elo >= 1350) return 'Silver';
@@ -71,18 +196,33 @@ export function applyTournamentResult(tier, stars, seasonPoints, score) {
 }
 
 /**
- * Weekly Sprint rank reset:
- * Total = cumulative stars (10 + 20 + 30 + 40 ladder) + Challenger BXH points
- * Next total = floor((Total * 2) / 3)
- * Example: Gold 7 stars -> (10 + 20 + 7) + 0 = 37 -> floor(37 * 2 / 3) = 24 -> Silver 14 stars
+ * Weekly Sprint rank reset formula:
+ * hạng mới = x - x * (x / (x + k))
+ * trong đó:
+ * - x là điểm tích lũy hiện tại của người được xét (bậc + sao + điểm mùa Thách Đấu)
+ * - k là điểm của người có điểm cao nhất nhân đôi (k = 2 * x_max)
+ *
+ * @param {string} tier
+ * @param {number} [stars=0]
+ * @param {number} [seasonPoints=0]
+ * @param {number | null} [maxTotalScore=null]
  */
-export function applySprintRankReset(tier, stars = 0, seasonPoints = 0) {
+export function applySprintRankReset(tier, stars = 0, seasonPoints = 0, maxTotalScore = null) {
   const previousTotal = toCumulativeScore(tier, stars, seasonPoints);
-  const resetTotal = Math.floor((previousTotal * 2) / 3);
+  const effectiveMax = maxTotalScore != null
+    ? Math.max(previousTotal, Math.max(0, Math.floor(Number(maxTotalScore) || 0)))
+    : previousTotal;
+  const k = 2 * effectiveMax;
+  let resetTotal = 0;
+  if (previousTotal > 0 && (previousTotal + k) > 0) {
+    resetTotal = Math.floor(previousTotal - previousTotal * (previousTotal / (previousTotal + k)));
+  }
   return {
     ...fromCumulativeScore(resetTotal),
     previousTotal,
-    resetTotal
+    resetTotal,
+    k,
+    maxTotalScore: effectiveMax
   };
 }
 
@@ -90,8 +230,9 @@ export function applySprintRankReset(tier, stars = 0, seasonPoints = 0) {
  * Builds private motivational / competitive messaging without leaking Challenger standings.
  * @param {any} entry
  * @param {number | null} [challengerRank=null]
+ * @param {number | null} [maxTotalScore=null]
  */
-export function buildTournamentMotivation(entry, challengerRank = null) {
+export function buildTournamentMotivation(entry, challengerRank = null, maxTotalScore = null) {
   if (!entry) {
     return {
       tier: null,
@@ -106,8 +247,9 @@ export function buildTournamentMotivation(entry, challengerRank = null) {
   const stars = Number(entry.stars ?? entry.rank_stars ?? 0);
   const seasonPoints = Number(entry.seasonPoints ?? entry.season_points ?? 0);
   const currentTotal = toCumulativeScore(tier, stars, seasonPoints);
-  const nextSprintTotal = Math.floor((currentTotal * 2) / 3);
-  const nextSprintPreview = fromCumulativeScore(nextSprintTotal);
+  const resetResult = applySprintRankReset(tier, stars, seasonPoints, maxTotalScore);
+  const nextSprintTotal = resetResult.resetTotal;
+  const nextSprintPreview = resetResult;
 
   if (tier === 'Bronze') {
     return {
@@ -232,6 +374,7 @@ export function tournamentRanks() {
     tier,
     label: RANK_LABELS[tier],
     index,
-    starsToPromote: RANK_PROMOTION_STARS[tier]
+    starsToPromote: RANK_PROMOTION_STARS[tier],
+    boss: RANK_BOSS_CONFIG[tier] || null
   }));
 }

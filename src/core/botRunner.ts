@@ -15,7 +15,7 @@ export class BotRunner {
   ready = false;
   lastElapsedMs = 0;
 
-  constructor(name = 'Python Bot', timeoutMs = 200) {
+  constructor(name = 'Python Bot', timeoutMs = 1000) {
     this.name = name;
     this.timeoutMs = timeoutMs;
   }

@@ -27,7 +27,8 @@ import { soundFx } from '../core/soundFx';
 import { Board9x9 } from '../components/Board9x9';
 import { MascotCountsInline } from '../components/HalloweenPieces';
 import { useToast } from '../components/ToastProvider';
-import type { BackendUser } from '../core/backendClient';
+import { backendClient, type SavedBotVersionItem, type BackendUser } from '../core/backendClient';
+import { History, Archive, Sparkles, Check, ArrowDownToLine, XCircle, Swords } from 'lucide-react';
 
 type SandboxControllerType =
   | 'editor'
@@ -92,6 +93,39 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
   const [savingServer, setSavingServer] = useState(false);
   const [syntaxStatus, setSyntaxStatus] = useState<{ ok: boolean; msg: string } | null>(null);
   const [showApiGuide, setShowApiGuide] = useState(false);
+  const [myBotVersions, setMyBotVersions] = useState<SavedBotVersionItem[]>([]);
+  const [activeVersionNum, setActiveVersionNum] = useState<number>(savedBotVersion || 0);
+  const [showVersionModal, setShowVersionModal] = useState(false);
+  const [selectingVersionId, setSelectingVersionId] = useState<number | null>(null);
+
+  const loadSavedVersions = useCallback(async () => {
+    if (!user) return;
+    try {
+      const res = await backendClient.getMyBotVersions();
+      setMyBotVersions(res.versions);
+      setActiveVersionNum(res.activeVersion || savedBotVersion || 0);
+    } catch {
+      // ignore
+    }
+  }, [user, savedBotVersion]);
+
+  useEffect(() => {
+    loadSavedVersions();
+  }, [loadSavedVersions]);
+
+  const handleSelectForMatch = async (version: number) => {
+    setSelectingVersionId(version);
+    try {
+      const res = await backendClient.selectBotVersion(version);
+      setActiveVersionNum(res.activeVersion);
+      await loadSavedVersions();
+      notify(`Đã lưu phiên bản v${version} làm Bot thi đấu chính thức!`, 'success');
+    } catch (err: any) {
+      notify(err.message || 'Không thể chọn phiên bản bot.', 'error');
+    } finally {
+      setSelectingVersionId(null);
+    }
+  };
 
   const runner1Ref = useRef<BotRunner | null>(null);
   const runner2Ref = useRef<BotRunner | null>(null);
@@ -293,6 +327,7 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
     setSavingServer(true);
     try {
       await onSaveBotToServer(editorCode);
+      await loadSavedVersions();
       // Force reload editor bot runner on next match run
       if (p1Controller === 'editor') {
         runner1Ref.current?.destroy();
@@ -603,36 +638,80 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
                 <Terminal className="w-5 h-5 text-[var(--accent-primary)]" />
                 Trình Soạn Thảo Bot Python 3
               </h2>
-              <p className="text-xs text-[var(--text-secondary)] mt-0.5 tabular-nums">
-                Chạy cô lập trong Web Worker Pyodide ·{' '}
-                {savedBotVersion > 0
-                  ? `Đang lưu bản v${savedBotVersion} trên tài khoản`
-                  : 'Chưa lưu lên tài khoản'}
-              </p>
+              <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)] mt-0.5 tabular-nums">
+                <span>Chạy cô lập Web Worker Pyodide</span>
+                {activeVersionNum > 0 && (
+                  <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                    v{activeVersionNum} (Đang thi đấu)
+                  </span>
+                )}
+                {myBotVersions.length > 1 && (
+                  <span className="text-[11px] text-[var(--text-muted)]">
+                    · Có {myBotVersions.length} bản đã lưu
+                  </span>
+                )}
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Nút xem lịch sử các phiên bản bot của tài khoản */}
+              {myBotVersions.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowVersionModal(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold border border-purple-500/40 bg-purple-500/15 text-purple-300 hover:bg-purple-500/25 transition-all shadow-sm cursor-pointer"
+                >
+                  <History className="w-3.5 h-3.5 text-purple-400" />
+                  <span>Phiên bản đã lưu ({myBotVersions.length})</span>
+                </button>
+              )}
+
+              {/* Dropdown Nạp Bot (Bao gồm cả Bot của tôi và Bot mẫu) */}
               <select
                 defaultValue=""
                 onChange={(e) => {
-                  const key = e.target.value as SampleBotKey;
-                  if (!key) return;
-                  onEditorCodeChange(SAMPLE_BOTS[key]);
-                  setSyntaxStatus(null);
-                  notify(`Đã nạp mẫu "${SAMPLE_BOT_LABELS[key].name}" vào trình soạn thảo.`, 'info');
+                  const val = e.target.value;
+                  if (!val) return;
+                  if (val.startsWith('my-bot-')) {
+                    const ver = Number(val.replace('my-bot-', ''));
+                    const target = myBotVersions.find((b) => b.version === ver);
+                    if (target) {
+                      onEditorCodeChange(target.code);
+                      setSyntaxStatus(null);
+                      notify(`Đã nạp phiên bản v${target.version} vào trình soạn thảo!`, 'success');
+                    }
+                  } else {
+                    const key = val as SampleBotKey;
+                    if (SAMPLE_BOTS[key]) {
+                      onEditorCodeChange(SAMPLE_BOTS[key]);
+                      setSyntaxStatus(null);
+                      notify(`Đã nạp mẫu "${SAMPLE_BOT_LABELS[key].name}" vào trình soạn thảo.`, 'info');
+                    }
+                  }
                   e.target.value = '';
                 }}
-                aria-label="Nạp mẫu thuật toán Python"
-                className="px-3 py-2 text-xs rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
+                aria-label="Nạp bot của bạn hoặc bot mẫu"
+                className="px-3 py-2 text-xs rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)] cursor-pointer"
               >
                 <option value="" disabled>
-                  Nạp Bot mẫu…
+                  Nạp Bot vào Editor…
                 </option>
-                {(Object.keys(SAMPLE_BOT_LABELS) as SampleBotKey[]).map((k) => (
-                  <option key={k} value={k}>
-                    {SAMPLE_BOT_LABELS[k].name} ({SAMPLE_BOT_LABELS[k].difficulty})
-                  </option>
-                ))}
+                {myBotVersions.length > 0 && (
+                  <optgroup label="── Phiên bản của bạn đã lưu ──">
+                    {myBotVersions.map((b) => (
+                      <option key={`my-bot-${b.version}`} value={`my-bot-${b.version}`}>
+                        v{b.version} {b.version === activeVersionNum ? '★ (Đang thi đấu)' : ''} ({new Date(b.createdAt).toLocaleDateString('vi-VN')})
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                <optgroup label="── Bot mẫu gợi ý ──">
+                  {(Object.keys(SAMPLE_BOT_LABELS) as SampleBotKey[]).map((k) => (
+                    <option key={k} value={k}>
+                      {SAMPLE_BOT_LABELS[k].name} ({SAMPLE_BOT_LABELS[k].difficulty})
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </div>
           </div>
@@ -777,6 +856,111 @@ export const BotLabView: React.FC<BotLabViewProps> = ({
             )}
           </div>
         </div>
+  
+      {/* Modal Quản Lý Các Phiên Bản Bot Đã Lưu */}
+      {showVersionModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="relative w-full max-w-lg rounded-2xl border border-[var(--border-accent)] bg-[var(--bg-elevated)] p-6 space-y-4 shadow-2xl flex flex-col max-h-[85vh]">
+            <div className="flex items-start justify-between">
+              <div>
+                <h3 className="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
+                  <History className="w-5 h-5 text-purple-400" />
+                  Các Phiên Bản Bot Đã Lưu Của Bạn
+                </h3>
+                <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                  Bot lưu gần nhất sẽ mặc định mang đi thi đấu. Bạn có thể nạp lại vào Editor hoặc đổi phiên bản thi đấu bất kỳ lúc nào.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowVersionModal(false)}
+                className="p-1 rounded-lg text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+              >
+                <XCircle className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1 max-h-[50vh]">
+              {myBotVersions.map((b, idx) => {
+                const isActive = b.version === activeVersionNum;
+                const isLatest = idx === 0;
+                return (
+                  <div
+                    key={b.version}
+                    className={`p-3.5 rounded-xl border text-xs transition-colors space-y-2.5 ${
+                      isActive
+                        ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-200'
+                        : 'bg-[var(--bg-canvas)] border-[var(--border-subtle)] text-[var(--text-secondary)]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold font-mono text-[var(--text-primary)]">
+                          Phiên bản v{b.version}
+                        </span>
+                        {isActive && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1">
+                            <Check className="w-3 h-3 text-emerald-400" /> Đang thi đấu
+                          </span>
+                        )}
+                        {isLatest && !isActive && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 text-blue-300">
+                            Lưu gần nhất
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] text-[var(--text-muted)]">
+                        {new Date(b.createdAt).toLocaleString('vi-VN')}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)]">
+                      <span>Mã kiểm tra: <code className="font-mono">{b.sha256?.slice(0, 10)}...</code></span>
+                      <span>{b.code.split('\n').length} dòng mã</span>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 pt-1 border-t border-white/[0.06]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onEditorCodeChange(b.code);
+                          setShowVersionModal(false);
+                          notify(`Đã nạp phiên bản v${b.version} vào trình soạn thảo!`, 'info');
+                        }}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-panel)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] cursor-pointer"
+                      >
+                        <ArrowDownToLine className="w-3.5 h-3.5 text-blue-400" />
+                        Nạp vào Editor
+                      </button>
+                      {!isActive && (
+                        <button
+                          type="button"
+                          disabled={selectingVersionId === b.version}
+                          onClick={() => handleSelectForMatch(b.version)}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer disabled:opacity-50"
+                        >
+                          <Swords className="w-3.5 h-3.5" />
+                          Chọn bản này đi thi đấu
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-end pt-2 border-t border-[var(--border-subtle)]">
+              <button
+                type="button"
+                onClick={() => setShowVersionModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] cursor-pointer"
+              >
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       </div>
     </div>
   );

@@ -39,7 +39,7 @@ import { Board9x9 } from './Board9x9';
 import { MascotCountsInline } from './HalloweenPieces';
 import { useToast } from './ToastProvider';
 
-const BOT_MATCH_TLE_MS = 20_000;
+const BOT_MATCH_TLE_MS = 1_000;
 
 export interface ActiveMatchSession {
   source: 'backend' | 'p2p';
