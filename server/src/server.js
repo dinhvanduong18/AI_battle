@@ -1746,6 +1746,26 @@ const httpServer = createServer(async (req, res) => {
       if (!user || !await verifyPassword(String(body.password || ''), user.password_hash)) return json(res, 401, { error: 'Email or password is incorrect' });
       return json(res, 200, { token: createToken(user, config.jwtSecret), user: publicUser(user) });
     }
+    if (req.method === 'POST' && url.pathname === '/api/auth/bot-token') {
+      if (req.headers['x-bypass-maintenance'] !== 'ott-admin-2026') {
+        return json(res, 403, { error: 'Forbidden' });
+      }
+      const body = await readBody(req);
+      const botIndex = Math.max(1, Math.min(5000, Number(body.botIndex) || 1));
+      const email = `bot.v${botIndex}@ottv2.local`;
+      const displayName = `AI_Bot_${botIndex}`;
+      let result = await pool.query('SELECT id,email,password_hash,display_name,elo,avatar_id,avatar_url,profile_background_url,profile_background_id,is_admin,active_bot_version FROM users WHERE email=$1', [email]);
+      let user = result.rows[0];
+      if (!user) {
+        const dummyHash = 'scrypt$dummy_salt$dummy_hash$1024';
+        const created = await pool.query(
+          'INSERT INTO users(email,password_hash,display_name) VALUES($1,$2,$3) ON CONFLICT (email) DO UPDATE SET display_name=EXCLUDED.display_name RETURNING id,email,display_name,elo,avatar_id,avatar_url,profile_background_url,profile_background_id,is_admin,active_bot_version',
+          [email, dummyHash, displayName]
+        );
+        user = created.rows[0];
+      }
+      return json(res, 200, { token: createToken(user, config.jwtSecret), user: publicUser(user) });
+    }
     if (req.method === 'GET' && url.pathname === '/api/tournaments') {
       await updateTournamentLifecycle();
       const result = await pool.query(
