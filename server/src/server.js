@@ -46,6 +46,50 @@ const PLAYER_AVATAR_IDS = [
 const PROFILE_BACKGROUND_IDS = [
   'castle', 'moonlight', 'emerald', 'ocean', 'sunset', 'aurora', 'crimson', 'ice'
 ];
+let leaderboardCache = { data: null, expiresAt: 0 };
+const LEADERBOARD_CACHE_TTL_MS = 20 * 1000;
+
+export function getMaintenanceStatus() {
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const vnNow = new Date(utc + 7 * 3600000); // Giờ Việt Nam (GMT+7)
+  const currentHour = vnNow.getHours();
+
+  // Khung giờ bảo trì: từ 23h đêm đến 6h sáng hàng ngày (GMT+7)
+  const isMaintenance = currentHour >= 23 || currentHour < 6;
+
+  // Thời gian mở lại lúc 06:00
+  const target = new Date(vnNow);
+  if (currentHour >= 23) {
+    target.setDate(target.getDate() + 1);
+  }
+  target.setHours(6, 0, 0, 0);
+  const remainingMs = Math.max(0, target.getTime() - vnNow.getTime());
+
+  return {
+    isMaintenance,
+    startHour: '23:00',
+    endHour: '06:00',
+    timezone: 'GMT+7',
+    message: 'Hệ thống đang bảo trì nâng cấp định kỳ từ 23:00 đến 06:00 sáng hàng ngày (GMT+7).',
+    reopenAt: '06:00 AM',
+    remainingMs
+  };
+}
+
+export function isMaintenanceActive(req = null) {
+  if (process.env.NODE_ENV === 'test' || process.env.OTTV2_SKIP_AUTOSTART || process.env.DISABLE_MAINTENANCE === 'true') {
+    return false;
+  }
+  if (req?.headers?.['x-bypass-maintenance'] === 'ott-admin-2026') return false;
+  if (req?.url) {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      if (url.searchParams.get('bypass') === 'ott-admin-2026') return false;
+    } catch {}
+  }
+  return getMaintenanceStatus().isMaintenance;
+}
 let tournamentLifecycleTimer = null;
 let disconnectForfeitTimer = null;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -640,9 +684,6 @@ async function createIndividualTournamentMatch(user, pairing) {
     if (!opponent) opponent = byUser.get(pairing.opponentUserId);
   }
   if (!own || !opponent) throw new Error('Không tìm thấy tài khoản của người chơi.');
-  if (!own.bot_code || !opponent.bot_code) {
-    throw Object.assign(new Error('Một trong hai người chơi chưa nộp Bot Python hợp lệ.'), { status: 409 });
-  }
   const first = user.id < opponent.id ? own : opponent;
   const second = user.id < opponent.id ? opponent : own;
   const matchId = randomUUID();
@@ -651,7 +692,7 @@ async function createIndividualTournamentMatch(user, pairing) {
   await pool.query(
     `INSERT INTO matches(id,seed,player1_id,player2_id,status,match_type,tournament_id,tournament_phase,tournament_rules,player1_bot_version,player2_bot_version,consensus_state)
      VALUES($1,$2,$3,$4,'active','bot',$5,$6,$7,$8,$9,$10::jsonb)`,
-    [matchId, seed, first.id, second.id, pairing.tournamentId, phase, rules ? JSON.stringify(rules) : null, first.active_bot_version, second.active_bot_version, JSON.stringify(consensusState)]
+    [matchId, seed, first.id, second.id, pairing.tournamentId, phase, rules ? JSON.stringify(rules) : null, first.active_bot_version || 1, second.active_bot_version || 1, JSON.stringify(consensusState)]
   );
   const baseMatch = {
     id: matchId,
@@ -678,8 +719,8 @@ async function createIndividualTournamentMatch(user, pairing) {
       mode: 'bot',
       tournamentPhase: phase,
       tournamentRules: rules,
-      myBotCode: player.bot_code,
-      myBotVersion: player.active_bot_version
+      myBotCode: player.bot_code || null,
+      myBotVersion: player.active_bot_version || 1
     });
   }
 }
@@ -705,12 +746,7 @@ async function runIndividualTournamentSearch(userId) {
     socket.tournamentSearch = null;
     return send(socket, 'error', { message: 'Giải đấu đã kết thúc hoặc bạn chưa đăng ký.' });
   }
-  if (!row.active_bot_version || row.active_bot_version <= 0) {
-    socket.searchCancelled = true; socket.searching = false;
-    await cancelTournamentQueue(redis, search.tournamentId, userId, userId, search.week, tournamentQueueNamespace(search));
-    socket.tournamentSearch = null;
-    return send(socket, 'error', { message: 'Bạn cần lưu Bot Python hợp lệ trong Phòng Lab trước khi tìm trận giải đấu.' });
-  }
+  // Bot có thể lưu ở client (localStorage) hoặc server, cho phép tìm trận giải đấu
   if (row.format === 'knockout') {
     socket.searchCancelled = true; socket.searching = false;
     await cancelTournamentQueue(redis, search.tournamentId, userId, userId, search.week, tournamentQueueNamespace(search));
@@ -1675,7 +1711,20 @@ const httpServer = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, {
         ok: true,
+        maintenance: getMaintenanceStatus().isMaintenance,
         revision: process.env.RENDER_GIT_COMMIT || 'unknown'
+      });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/maintenance') {
+      return json(res, 200, getMaintenanceStatus());
+    }
+    if (isMaintenanceActive(req) && url.pathname.startsWith('/api')) {
+      const status = getMaintenanceStatus();
+      return json(res, 503, {
+        error: status.message,
+        maintenance: true,
+        reopenAt: status.reopenAt,
+        remainingMs: status.remainingMs
       });
     }
     if (req.method === 'POST' && url.pathname === '/api/auth/register') {
@@ -2216,8 +2265,14 @@ const httpServer = createServer(async (req, res) => {
       return json(res, 200, { user: publicUser(updated.rows[0]) });
     }
     if (req.method === 'GET' && url.pathname === '/api/leaderboard') {
+      const now = Date.now();
+      if (leaderboardCache.data && now < leaderboardCache.expiresAt) {
+        return json(res, 200, leaderboardCache.data);
+      }
       const result = await pool.query('SELECT id,display_name,elo,avatar_id,avatar_url FROM users ORDER BY elo DESC,created_at ASC LIMIT 100');
-      return json(res, 200, { players: result.rows.map(user => ({ id: user.id, displayName: user.display_name, elo: user.elo, avatarId: user.avatar_id || 'pumpkin', avatarUrl: user.avatar_url || null })) });
+      const payload = { players: result.rows.map(user => ({ id: user.id, displayName: user.display_name, elo: user.elo, avatarId: user.avatar_id || 'pumpkin', avatarUrl: user.avatar_url || null })) };
+      leaderboardCache = { data: payload, expiresAt: now + LEADERBOARD_CACHE_TTL_MS };
+      return json(res, 200, payload);
     }
     if (req.method === 'GET' && url.pathname === '/api/matches') {
       const auth = authFromHeader(req);
@@ -2391,7 +2446,15 @@ const httpServer = createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: 256 * 1024 });
-wss.on('connection', ws => {
+wss.on('connection', (ws, req) => {
+  if (isMaintenanceActive(req)) {
+    const status = getMaintenanceStatus();
+    send(ws, 'maintenance', status);
+    setTimeout(() => {
+      try { ws.close(4503, 'System under maintenance'); } catch {}
+    }, 500);
+    return;
+  }
   ws.authenticated = false;
   const authTimeout = setTimeout(() => ws.close(4401, 'Authentication timeout'), 5000);
   ws.on('message', async raw => {

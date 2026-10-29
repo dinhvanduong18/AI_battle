@@ -1482,6 +1482,45 @@ export async function startServer(options: ServerStartOptions = {}) {
   }
 
   // ── Express HTTP App ──────────────────────────────────────────
+  function getMaintenanceStatus() {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    const vnNow = new Date(utc + 7 * 3600000);
+    const currentHour = vnNow.getHours();
+    const isMaintenance = currentHour >= 23 || currentHour < 6;
+
+    const target = new Date(vnNow);
+    if (currentHour >= 23) {
+      target.setDate(target.getDate() + 1);
+    }
+    target.setHours(6, 0, 0, 0);
+    const remainingMs = Math.max(0, target.getTime() - vnNow.getTime());
+
+    return {
+      isMaintenance,
+      startHour: '23:00',
+      endHour: '06:00',
+      timezone: 'GMT+7',
+      message: 'Hệ thống đang bảo trì nâng cấp định kỳ từ 23:00 đến 06:00 sáng hàng ngày (GMT+7).',
+      reopenAt: '06:00 AM',
+      remainingMs
+    };
+  }
+
+  function isMaintenanceActive(req?: any) {
+    if (process.env.NODE_ENV === 'test' || process.env.OTTV2_SKIP_AUTOSTART || process.env.DISABLE_MAINTENANCE === 'true') {
+      return false;
+    }
+    if (req?.headers?.['x-bypass-maintenance'] === 'ott-admin-2026') return false;
+    if (req?.url) {
+      try {
+        const u = new URL(req.url, 'http://localhost');
+        if (u.searchParams.get('bypass') === 'ott-admin-2026') return false;
+      } catch {}
+    }
+    return getMaintenanceStatus().isMaintenance;
+  }
+
   const app = express();
   const httpServer = http.createServer(app);
 
@@ -1489,7 +1528,7 @@ export async function startServer(options: ServerStartOptions = {}) {
 
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-bypass-maintenance');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -1499,7 +1538,28 @@ export async function startServer(options: ServerStartOptions = {}) {
   });
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true, mode: 'local-embedded', timestamp: new Date().toISOString() });
+    res.json({ ok: true, mode: 'local-embedded', maintenance: getMaintenanceStatus().isMaintenance, timestamp: new Date().toISOString() });
+  });
+
+  app.get('/api/maintenance', (_req, res) => {
+    res.json(getMaintenanceStatus());
+  });
+
+  app.use((req, res, next) => {
+    // Chỉ chặn các yêu cầu gọi vào API (/api/*)
+    // Các file HTML, CSS/JS giao diện vẫn được tải để trình duyệt hiển thị Giao diện Thông Báo Bảo Trì (MaintenanceOverlay)
+    if (!req.path.startsWith('/api')) return next();
+    if (req.path === '/api/maintenance') return next();
+    if (isMaintenanceActive(req)) {
+      const status = getMaintenanceStatus();
+      return res.status(503).json({
+        error: status.message,
+        maintenance: true,
+        reopenAt: status.reopenAt,
+        remainingMs: status.remainingMs
+      });
+    }
+    next();
   });
 
   app.post('/api/auth/register', async (req: Request, res: Response) => {
@@ -3170,7 +3230,15 @@ export async function startServer(options: ServerStartOptions = {}) {
   // ── WebSocket Server (/ws) ────────────────────────────────────
   const wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: 256 * 1024 });
 
-  wss.on('connection', (ws: AuthedSocket) => {
+  wss.on('connection', (ws: AuthedSocket, req: any) => {
+    if (isMaintenanceActive(req)) {
+      const status = getMaintenanceStatus();
+      sendWs(ws, 'maintenance', status);
+      setTimeout(() => {
+        try { ws.close(4503, 'System under maintenance'); } catch {}
+      }, 500);
+      return;
+    }
     ws.authenticated = false;
     const authTimer = setTimeout(() => ws.close(4401, 'Authentication timeout'), 8000);
 

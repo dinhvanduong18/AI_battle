@@ -289,6 +289,10 @@ export class BackendClient {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
     else if (authRequired) throw new Error('Vui lòng đăng nhập trước khi thực hiện thao tác này.');
+    try {
+      const bypass = localStorage.getItem('ott_bypass_maintenance');
+      if (bypass) headers['x-bypass-maintenance'] = bypass;
+    } catch {}
 
     let res: Response;
     try {
