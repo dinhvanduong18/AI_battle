@@ -642,9 +642,6 @@ async function createIndividualTournamentMatch(user, pairing) {
     if (!opponent) opponent = byUser.get(pairing.opponentUserId);
   }
   if (!own || !opponent) throw new Error('Không tìm thấy tài khoản của người chơi.');
-  if (!own.bot_code || !opponent.bot_code) {
-    throw Object.assign(new Error('Một trong hai người chơi chưa nộp Bot Python hợp lệ.'), { status: 409 });
-  }
   const first = user.id < opponent.id ? own : opponent;
   const second = user.id < opponent.id ? opponent : own;
   const matchId = randomUUID();
@@ -653,7 +650,7 @@ async function createIndividualTournamentMatch(user, pairing) {
   await pool.query(
     `INSERT INTO matches(id,seed,player1_id,player2_id,status,match_type,tournament_id,tournament_phase,tournament_rules,player1_bot_version,player2_bot_version,consensus_state)
      VALUES($1,$2,$3,$4,'active','bot',$5,$6,$7,$8,$9,$10::jsonb)`,
-    [matchId, seed, first.id, second.id, pairing.tournamentId, phase, rules ? JSON.stringify(rules) : null, first.active_bot_version, second.active_bot_version, JSON.stringify(consensusState)]
+    [matchId, seed, first.id, second.id, pairing.tournamentId, phase, rules ? JSON.stringify(rules) : null, first.active_bot_version || 1, second.active_bot_version || 1, JSON.stringify(consensusState)]
   );
   const baseMatch = {
     id: matchId,
@@ -680,8 +677,8 @@ async function createIndividualTournamentMatch(user, pairing) {
       mode: 'bot',
       tournamentPhase: phase,
       tournamentRules: rules,
-      myBotCode: player.bot_code,
-      myBotVersion: player.active_bot_version
+      myBotCode: player.bot_code || null,
+      myBotVersion: player.active_bot_version || 1
     });
   }
 }
@@ -707,12 +704,7 @@ async function runIndividualTournamentSearch(userId) {
     socket.tournamentSearch = null;
     return send(socket, 'error', { message: 'Giải đấu đã kết thúc hoặc bạn chưa đăng ký.' });
   }
-  if (!row.active_bot_version || row.active_bot_version <= 0) {
-    socket.searchCancelled = true; socket.searching = false;
-    await cancelTournamentQueue(redis, search.tournamentId, userId, userId, search.week, tournamentQueueNamespace(search));
-    socket.tournamentSearch = null;
-    return send(socket, 'error', { message: 'Bạn cần lưu Bot Python hợp lệ trong Phòng Lab trước khi tìm trận giải đấu.' });
-  }
+  // Bot có thể lưu ở client (localStorage) hoặc server, cho phép tìm trận giải đấu
   if (row.format === 'knockout') {
     socket.searchCancelled = true; socket.searching = false;
     await cancelTournamentQueue(redis, search.tournamentId, userId, userId, search.week, tournamentQueueNamespace(search));

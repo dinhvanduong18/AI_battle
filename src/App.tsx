@@ -154,8 +154,24 @@ function AppWorkspace() {
       return SAMPLE_BOTS.phantom_hunter;
     }
   });
-  const [savedBotCode, setSavedBotCode] = useState<string>('');
-  const [savedBotVersion, setSavedBotVersion] = useState<number>(user?.activeBotVersion || 0);
+  const [savedBotCode, setSavedBotCode] = useState<string>(() => {
+    try {
+      return (
+        localStorage.getItem('ottv2-saved-bot-code') ||
+        localStorage.getItem('ottv2-draft-bot-code') ||
+        SAMPLE_BOTS.phantom_hunter
+      );
+    } catch {
+      return SAMPLE_BOTS.phantom_hunter;
+    }
+  });
+  const [savedBotVersion, setSavedBotVersion] = useState<number>(() => {
+    try {
+      return Number(localStorage.getItem('ottv2-saved-bot-version')) || user?.activeBotVersion || 1;
+    } catch {
+      return 1;
+    }
+  });
 
   const [leaderboard, setLeaderboard] = useState<
     Array<{
@@ -213,12 +229,33 @@ function AppWorkspace() {
         ]);
         setUser(me);
         setMatches(myMatches);
-        setSavedBotVersion(myBot.version || 0);
-        setSavedBotCode(myBot.code || '');
+        if (myBot.code) {
+          setSavedBotVersion(myBot.version || 1);
+          setSavedBotCode(myBot.code);
+          try {
+            localStorage.setItem('ottv2-saved-bot-code', myBot.code);
+            localStorage.setItem('ottv2-saved-bot-version', String(myBot.version || 1));
+          } catch {}
+        } else {
+          try {
+            const localCode =
+              localStorage.getItem('ottv2-saved-bot-code') ||
+              localStorage.getItem('ottv2-draft-bot-code') ||
+              SAMPLE_BOTS.phantom_hunter;
+            setSavedBotCode(localCode);
+            setSavedBotVersion(Number(localStorage.getItem('ottv2-saved-bot-version')) || 1);
+          } catch {}
+        }
       } else {
         setMatches([]);
-        setSavedBotVersion(0);
-        setSavedBotCode('');
+        try {
+          const localCode =
+            localStorage.getItem('ottv2-saved-bot-code') ||
+            localStorage.getItem('ottv2-draft-bot-code') ||
+            SAMPLE_BOTS.phantom_hunter;
+          setSavedBotCode(localCode);
+          setSavedBotVersion(Number(localStorage.getItem('ottv2-saved-bot-version')) || 1);
+        } catch {}
       }
     } finally {
       setLoadingData(false);
@@ -276,12 +313,20 @@ function AppWorkspace() {
 
   const handleSaveBotToServer = async (code: string) => {
     try {
-      const res = await backendClient.saveMyBot(code);
+      // 1. Lưu ngay tức thì vào LocalStorage trên máy Client
+      const nextVer = (savedBotVersion || 0) + 1;
+      try {
+        localStorage.setItem('ottv2-saved-bot-code', code);
+        localStorage.setItem('ottv2-saved-bot-version', String(nextVer));
+      } catch {}
       setSavedBotCode(code);
-      setSavedBotVersion(res.version);
-      notify(`Đã lưu Bot Python phiên bản v${res.version} lên máy chủ!`, 'success');
+      setSavedBotVersion(nextVer);
+
+      // 2. Đồng bộ tùy chọn lên máy chủ (không chặn giao diện nếu mạng chậm)
+      backendClient.saveMyBot(code).catch(() => {});
+      notify(`Đã lưu Bot Python (v${nextVer}) vào bộ nhớ máy của bạn!`, 'success');
     } catch (err: any) {
-      notify(err.message || 'Không thể lưu mã Bot lên máy chủ.', 'error');
+      notify(err.message || 'Không thể lưu mã Bot.', 'error');
       throw err;
     }
   };
