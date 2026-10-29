@@ -46,6 +46,8 @@ const PLAYER_AVATAR_IDS = [
 const PROFILE_BACKGROUND_IDS = [
   'castle', 'moonlight', 'emerald', 'ocean', 'sunset', 'aurora', 'crimson', 'ice'
 ];
+let leaderboardCache = { data: null, expiresAt: 0 };
+const LEADERBOARD_CACHE_TTL_MS = 20 * 1000;
 let tournamentLifecycleTimer = null;
 let disconnectForfeitTimer = null;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -2216,8 +2218,14 @@ const httpServer = createServer(async (req, res) => {
       return json(res, 200, { user: publicUser(updated.rows[0]) });
     }
     if (req.method === 'GET' && url.pathname === '/api/leaderboard') {
+      const now = Date.now();
+      if (leaderboardCache.data && now < leaderboardCache.expiresAt) {
+        return json(res, 200, leaderboardCache.data);
+      }
       const result = await pool.query('SELECT id,display_name,elo,avatar_id,avatar_url FROM users ORDER BY elo DESC,created_at ASC LIMIT 100');
-      return json(res, 200, { players: result.rows.map(user => ({ id: user.id, displayName: user.display_name, elo: user.elo, avatarId: user.avatar_id || 'pumpkin', avatarUrl: user.avatar_url || null })) });
+      const payload = { players: result.rows.map(user => ({ id: user.id, displayName: user.display_name, elo: user.elo, avatarId: user.avatar_id || 'pumpkin', avatarUrl: user.avatar_url || null })) };
+      leaderboardCache = { data: payload, expiresAt: now + LEADERBOARD_CACHE_TTL_MS };
+      return json(res, 200, payload);
     }
     if (req.method === 'GET' && url.pathname === '/api/matches') {
       const auth = authFromHeader(req);
