@@ -623,16 +623,22 @@ async function createIndividualTournamentMatch(user, pairing) {
     }
     rules = tournament.rules_json?.id ? tournament.rules_json : weeklyRules(tournament.current_week || 1);
   }
-  const participants = await pool.query(
-    `SELECT u.id,u.email,u.display_name,u.elo,u.is_admin,u.active_bot_version,b.code AS bot_code
-     FROM users u
-     LEFT JOIN user_bot_versions b ON b.user_id=u.id AND b.version=u.active_bot_version
-     WHERE u.id=ANY($1::uuid[])`,
-    [[user.id, pairing.opponentUserId]]
-  );
-  const byUser = new Map(participants.rows.map(row => [row.id, row]));
-  const own = byUser.get(user.id);
-  const opponent = byUser.get(pairing.opponentUserId);
+  const sockOwn = userSocket(user.id);
+  const sockOpp = userSocket(pairing.opponentUserId);
+  let own = sockOwn?.user?.bot_code ? sockOwn.user : null;
+  let opponent = sockOpp?.user?.bot_code ? sockOpp.user : null;
+  if (!own || !opponent) {
+    const participants = await pool.query(
+      `SELECT u.id,u.email,u.display_name,u.elo,u.is_admin,u.active_bot_version,b.code AS bot_code
+       FROM users u
+       LEFT JOIN user_bot_versions b ON b.user_id=u.id AND b.version=u.active_bot_version
+       WHERE u.id=ANY($1::uuid[])`,
+      [[user.id, pairing.opponentUserId]]
+    );
+    const byUser = new Map(participants.rows.map(row => [row.id, row]));
+    if (!own) own = byUser.get(user.id);
+    if (!opponent) opponent = byUser.get(pairing.opponentUserId);
+  }
   if (!own || !opponent) throw new Error('Không tìm thấy tài khoản của người chơi.');
   if (!own.bot_code || !opponent.bot_code) {
     throw Object.assign(new Error('Một trong hai người chơi chưa nộp Bot Python hợp lệ.'), { status: 409 });
@@ -865,8 +871,12 @@ async function runSearch(userId, mode = 'human') {
   searchTimers.delete(userId);
   const socket = userSocket(userId);
   if (!socket || socket.searchCancelled) return;
-  const userResult = await pool.query('SELECT id, email, display_name, elo FROM users WHERE id=$1', [userId]);
-  const user = userResult.rows[0];
+  let user = socket.user;
+  if (!user || user.elo === undefined) {
+    const userResult = await pool.query('SELECT id, email, display_name, elo FROM users WHERE id=$1', [userId]);
+    user = userResult.rows[0];
+    if (user && socket) socket.user = { ...socket.user, ...user };
+  }
   if (!user) return;
   const started = socket.searchStartedAt || Date.now();
   const gap = Math.min(config.maxEloGap, config.minEloGap + Math.floor((Date.now() - started) / config.expandEveryMs) * config.minEloGap);
@@ -1945,6 +1955,10 @@ const httpServer = createServer(async (req, res) => {
           );
           for (const entry of activeEntries.rows) await cancelTournamentQueue(redis, entry.id, auth.sub, auth.sub, entry.current_week, 'ottv2:tournament-player');
           const socket = userSocket(auth.sub);
+          if (socket?.user) {
+            socket.user.active_bot_version = version;
+            socket.user.bot_code = code;
+          }
           if (socket?.tournamentSearch) {
             socket.searchCancelled = true;
             socket.searching = false;
