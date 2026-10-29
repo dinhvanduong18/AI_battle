@@ -28,6 +28,7 @@ import { HalloweenBackdrop } from './components/HalloweenBackdrop';
 import { AppSettingsModal, type AppFont } from './components/AppSettingsModal';
 import { AuthSettingsModal, type ModalTab } from './components/AuthSettingsModal';
 import { ReplayModal } from './components/ReplayModal';
+import { MaintenanceOverlay } from './components/MaintenanceOverlay';
 import { ActiveMatchArena, type ActiveMatchSession } from './components/ActiveMatchArena';
 import { OverviewView } from './views/OverviewView';
 import { BotLabView } from './views/BotLabView';
@@ -183,6 +184,40 @@ function AppWorkspace() {
       isSystemBot?: boolean;
     }>
   >([]);
+
+  // Maintenance Mode (23:00 - 06:00 GMT+7)
+  const [isMaintenance, setIsMaintenance] = useState(false);
+  const [maintenanceBypassed, setMaintenanceBypassed] = useState(() => {
+    try {
+      return localStorage.getItem('ott_bypass_maintenance') === 'ott-admin-2026';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    const checkMaintenance = async () => {
+      try {
+        const res = await fetch('/api/maintenance');
+        if (res.ok) {
+          const data = await res.json();
+          setIsMaintenance(Boolean(data.isMaintenance));
+        } else if (res.status === 503) {
+          setIsMaintenance(true);
+        }
+      } catch {
+        const now = new Date();
+        const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+        const vnHour = new Date(utc + 7 * 3600000).getHours();
+        if (vnHour >= 23 || vnHour < 6) {
+          setIsMaintenance(true);
+        }
+      }
+    };
+    checkMaintenance();
+    const interval = setInterval(checkMaintenance, 60000);
+    return () => clearInterval(interval);
+  }, []);
   const [matches, setMatches] = useState<MatchSummary[]>([]);
   const [tournaments, setTournaments] = useState<TournamentItem[]>([]);
   const [loadingData, setLoadingData] = useState<boolean>(true);
@@ -667,6 +702,33 @@ function AppWorkspace() {
         soundVolume={soundVolume}
         onSoundVolumeChange={handleSoundVolumeChange}
       />
+
+      {/* Maintenance Overlay (23:00 - 06:00 GMT+7) */}
+      {isMaintenance && !maintenanceBypassed && (
+        <MaintenanceOverlay
+          onBypass={() => {
+            setMaintenanceBypassed(true);
+            notify('Đã mở khóa quyền truy cập Quản trị viên!', 'success');
+          }}
+        />
+      )}
+
+      {/* Admin Bypass Floating Indicator */}
+      {isMaintenance && maintenanceBypassed && (
+        <div className="fixed bottom-4 right-4 z-50 flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs shadow-xl backdrop-blur-md">
+          <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+          <span>Bypass bảo trì (23:00 — 06:00)</span>
+          <button
+            onClick={() => {
+              localStorage.removeItem('ott_bypass_maintenance');
+              setMaintenanceBypassed(false);
+            }}
+            className="ml-1 text-[11px] underline text-slate-300 hover:text-white"
+          >
+            Khóa lại
+          </button>
+        </div>
+      )}
     </div>
   );
 }
