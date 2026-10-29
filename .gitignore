@@ -10,3 +10,11 @@ data/
 !server/.env.example
 public/assets/aistudio/
 .aistudio
+
+# Load test scripts & reports
+loadtest-*.js
+k6-*.html
+*-report.html
+scripts/stress-test.mjs
+scripts/k6-reporter.js
+scripts/k6-summary.js

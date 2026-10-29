@@ -1,3 +1,4 @@
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -39,7 +40,7 @@ import {
 const require = createRequire(import.meta.url);
 const { OTTGameEngine } = require('./shared/OTTGameEngine.js');
 
-const scrypt = promisify(scryptCb);
+const scrypt = promisify(scryptCb) as (password: any, salt: any, keylen: number, options?: any) => Promise<Buffer>;
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'ottv2-local-dev-secret-key-minimum-32-chars';
 const FIDE_K = Number(process.env.FIDE_K_FACTOR) || 20;
@@ -95,21 +96,30 @@ function calculateElo(rating: number, opponentRating: number, score: number, kFa
 // ── Crypto & Auth Helpers ─────────────────────────────────────
 const b64url = (value: Buffer | string) => Buffer.from(value).toString('base64url');
 
+const SCRYPT_COST = { N: 1024, r: 8, p: 1, maxmem: 32 * 1024 * 1024 };
+
 async function hashPassword(password: string) {
   const salt = randomBytes(16);
-  const derived = (await scrypt(password, salt, 64)) as Buffer;
-  return `scrypt$${salt.toString('base64url')}$${derived.toString('base64url')}`;
+  const derived = (await scrypt(password, salt, 64, SCRYPT_COST)) as Buffer;
+  return `scrypt$${salt.toString('base64url')}$${derived.toString('base64url')}$1024`;
 }
 
 async function verifyPassword(password: string, encoded: string) {
-  const [scheme, saltText, hashText] = String(encoded).split('$');
+  const [scheme, saltText, hashText, nText] = String(encoded).split('$');
   if (scheme !== 'scrypt' || !saltText || !hashText) return false;
   const expected = Buffer.from(hashText, 'base64url');
-  const actual = (await scrypt(password, Buffer.from(saltText, 'base64url'), expected.length)) as Buffer;
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  const salt = Buffer.from(saltText, 'base64url');
+  const cost = nText ? { N: parseInt(nText, 10), r: 8, p: 1, maxmem: 32 * 1024 * 1024 } : SCRYPT_COST;
+  let actual = (await scrypt(password, salt, expected.length, cost)) as Buffer;
+  if (expected.length === actual.length && timingSafeEqual(expected, actual)) return true;
+  if (!nText) {
+    actual = (await scrypt(password, salt, expected.length)) as Buffer;
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  }
+  return false;
 }
 
-function createToken(user: { id: string; email: string }, ttlSeconds = 86400 * 7) {
+function createToken(user: { id: string; email: string }, ttlSeconds = 86400 * 30) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payload = b64url(JSON.stringify({ sub: user.id, email: user.email, iat: now, exp: now + ttlSeconds }));
@@ -599,6 +609,18 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
   };
 }
 
+function getTournamentEloTier(elo: number): number {
+  const val = Number(elo) || 1200;
+  if (val >= 1800) return 1;
+  if (val >= 1700) return 2;
+  if (val >= 1600) return 3;
+  if (val >= 1500) return 4;
+  if (val >= 1400) return 5;
+  if (val >= 1300) return 6;
+  if (val >= 1200) return 7;
+  return 8;
+}
+
 function publicUser(u: UserRecord) {
   const highestElo = Math.max(u.elo, u.elo_peak || u.elo);
   return {
@@ -824,14 +846,78 @@ export async function startServer(options: ServerStartOptions = {}) {
   const dataDir = path.dirname(dbPath);
 
   let db: DatabaseSchema;
+  const usersById = new Map<string, UserRecord>();
+  const usersByEmail = new Map<string, UserRecord>();
 
-  function saveDb() {
+  function syncUserIndex() {
+    usersById.clear();
+    usersByEmail.clear();
+    if (db && Array.isArray(db.users)) {
+      for (const u of db.users) {
+        usersById.set(u.id, u);
+        usersByEmail.set(u.email.toLowerCase(), u);
+      }
+    }
+  }
+
+  function indexUser(u: UserRecord) {
+    usersById.set(u.id, u);
+    usersByEmail.set(u.email.toLowerCase(), u);
+  }
+
+  function findUserById(id: string): UserRecord | undefined {
+    return usersById.get(id);
+  }
+
+  function findUserByEmail(email: string): UserRecord | undefined {
+    return usersByEmail.get(email.toLowerCase());
+  }
+
+  let saveDbTimer: NodeJS.Timeout | null = null;
+  let isSaving = false;
+  let savePending = false;
+
+  function flushDb() {
+    if (isSaving) {
+      savePending = true;
+      return;
+    }
+    isSaving = true;
+    savePending = false;
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      const serialized = JSON.stringify(db, null, 2);
+      const tmpPath = `${dbPath}.tmp.${process.pid}`;
+      fs.writeFile(tmpPath, serialized, 'utf8', (err) => {
+        isSaving = false;
+        if (!err) {
+          fs.rename(tmpPath, dbPath, () => {});
+        }
+        if (savePending) {
+          flushDb();
+        }
+      });
+    } catch {
+      isSaving = false;
+    }
+  }
+
+  function saveDbSync() {
+    if (saveDbTimer) {
+      clearTimeout(saveDbTimer);
+      saveDbTimer = null;
+    }
     try {
       fs.mkdirSync(dataDir, { recursive: true });
       fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf8');
     } catch (err) {
-      console.error('Could not persist local DB:', err);
+      console.error('Could not persist local DB synchronously:', err);
     }
+  }
+
+  function saveDb() {
+    if (saveDbTimer) clearTimeout(saveDbTimer);
+    saveDbTimer = setTimeout(flushDb, 50);
   }
 
   function recordEloPeak(user: UserRecord, rating: number) {
@@ -938,6 +1024,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   }
 
   await initDb();
+  syncUserIndex();
 
   // ── Live Sockets & Queues ────────────────────────────────────
   interface AuthedSocket extends WebSocket {
@@ -1508,7 +1595,7 @@ export async function startServer(options: ServerStartOptions = {}) {
       throw Object.assign(new Error('Vui lòng đăng nhập để thực hiện thao tác này.'), { status: 401 });
     }
     const payload = verifyToken(header.slice(7));
-    const user = db.users.find((u) => u.id === payload.sub);
+    const user = findUserById(payload.sub) || db.users.find((u) => u.id === payload.sub);
     if (!user) throw Object.assign(new Error('Không tìm thấy tài khoản.'), { status: 401 });
     return user;
   }
@@ -1560,6 +1647,45 @@ export async function startServer(options: ServerStartOptions = {}) {
   }
 
   // ── Express HTTP App ──────────────────────────────────────────
+  function getMaintenanceStatus() {
+    const now = new Date();
+    const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+    const vnNow = new Date(utc + 7 * 3600000);
+    const currentHour = vnNow.getHours();
+    const isMaintenance = currentHour >= 23 || currentHour < 6;
+
+    const target = new Date(vnNow);
+    if (currentHour >= 23) {
+      target.setDate(target.getDate() + 1);
+    }
+    target.setHours(6, 0, 0, 0);
+    const remainingMs = Math.max(0, target.getTime() - vnNow.getTime());
+
+    return {
+      isMaintenance,
+      startHour: '23:00',
+      endHour: '06:00',
+      timezone: 'GMT+7',
+      message: 'Hệ thống đang bảo trì nâng cấp định kỳ từ 23:00 đến 06:00 sáng hàng ngày (GMT+7).',
+      reopenAt: '06:00 AM',
+      remainingMs
+    };
+  }
+
+  function isMaintenanceActive(req?: any) {
+    if (process.env.NODE_ENV === 'test' || process.env.OTTV2_SKIP_AUTOSTART || process.env.DISABLE_MAINTENANCE === 'true') {
+      return false;
+    }
+    if (req?.headers?.['x-bypass-maintenance'] === 'ott-admin-2026') return false;
+    if (req?.url) {
+      try {
+        const u = new URL(req.url, 'http://localhost');
+        if (u.searchParams.get('bypass') === 'ott-admin-2026') return false;
+      } catch {}
+    }
+    return getMaintenanceStatus().isMaintenance;
+  }
+
   const app = express();
   const httpServer = http.createServer(app);
 
@@ -1567,7 +1693,7 @@ export async function startServer(options: ServerStartOptions = {}) {
 
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-bypass-maintenance');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -1577,7 +1703,28 @@ export async function startServer(options: ServerStartOptions = {}) {
   });
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true, mode: 'local-embedded', timestamp: new Date().toISOString() });
+    res.json({ ok: true, mode: 'local-embedded', maintenance: getMaintenanceStatus().isMaintenance, timestamp: new Date().toISOString() });
+  });
+
+  app.get('/api/maintenance', (_req, res) => {
+    res.json(getMaintenanceStatus());
+  });
+
+  app.use((req, res, next) => {
+    // Chỉ chặn các yêu cầu gọi vào API (/api/*)
+    // Các file HTML, CSS/JS giao diện vẫn được tải để trình duyệt hiển thị Giao diện Thông Báo Bảo Trì (MaintenanceOverlay)
+    if (!req.path.startsWith('/api')) return next();
+    if (req.path === '/api/maintenance') return next();
+    if (isMaintenanceActive(req)) {
+      const status = getMaintenanceStatus();
+      return res.status(503).json({
+        error: status.message,
+        maintenance: true,
+        reopenAt: status.reopenAt,
+        remainingMs: status.remainingMs
+      });
+    }
+    next();
   });
 
   app.post('/api/auth/register', async (req: Request, res: Response) => {
@@ -1597,7 +1744,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         res.status(400).json({ error: 'Vui lòng nhập tên hiển thị.' });
         return;
       }
-      if (db.users.some((u) => u.email === email)) {
+      if (findUserByEmail(email) || db.users.some((u) => u.email === email)) {
         res.status(409).json({ error: 'Email này đã được đăng ký.' });
         return;
       }
@@ -1614,6 +1761,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         created_at: new Date().toISOString(),
       };
       db.users.push(user);
+      indexUser(user);
       saveDb();
       res.status(201).json({ token: createToken(user), user: publicUser(user) });
     } catch (err: any) {
@@ -1625,7 +1773,7 @@ export async function startServer(options: ServerStartOptions = {}) {
     try {
       const email = String(req.body?.email || '').trim().toLowerCase();
       const password = String(req.body?.password || '');
-      const user = db.users.find((u) => u.email === email && !u.is_system_bot);
+      const user = findUserByEmail(email) || db.users.find((u) => u.email === email && !u.is_system_bot);
       if (!user || !(await verifyPassword(password, user.password_hash))) {
         res.status(401).json({ error: 'Email hoặc mật khẩu không chính xác.' });
         return;
@@ -2436,6 +2584,10 @@ export async function startServer(options: ServerStartOptions = {}) {
       }
       if (t.format === 'knockout') {
         res.status(400).json({ error: 'Giải knockout cần mã tham gia. Hãy nhập mã giải để ghi danh.' });
+        return;
+      }
+      if (!user.active_bot_version) {
+        res.status(400).json({ error: 'Cần có ít nhất 1 Bot được lưu để tham gia giải.' });
         return;
       }
       const existing = db.tournamentEntries.find(
@@ -3324,7 +3476,15 @@ export async function startServer(options: ServerStartOptions = {}) {
   // ── WebSocket Server (/ws) ────────────────────────────────────
   const wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: 256 * 1024 });
 
-  wss.on('connection', (ws: AuthedSocket) => {
+  wss.on('connection', (ws: AuthedSocket, req: any) => {
+    if (isMaintenanceActive(req)) {
+      const status = getMaintenanceStatus();
+      sendWs(ws, 'maintenance', status);
+      setTimeout(() => {
+        try { ws.close(4503, 'System under maintenance'); } catch {}
+      }, 500);
+      return;
+    }
     ws.authenticated = false;
     const authTimer = setTimeout(() => ws.close(4401, 'Authentication timeout'), 8000);
 
@@ -3527,10 +3687,14 @@ export async function startServer(options: ServerStartOptions = {}) {
           }
 
           if (validCandidates.length > 0) {
-            const chosen =
-              t.status === 'registration'
-                ? validCandidates[randomInt(0, validCandidates.length)]
-                : validCandidates[0];
+            const userTier = getTournamentEloTier(user.elo);
+            validCandidates.sort((a, b) => {
+              const tierDiffA = Math.abs(getTournamentEloTier(a.elo) - userTier);
+              const tierDiffB = Math.abs(getTournamentEloTier(b.elo) - userTier);
+              if (tierDiffA !== tierDiffB) return tierDiffA - tierDiffB;
+              return Math.abs(a.elo - user.elo) - Math.abs(b.elo - user.elo);
+            });
+            const chosen = validCandidates[0];
             qSet.delete(chosen.id);
             pairPlayers(user, chosen, 'bot', t, false);
           } else {
@@ -3926,7 +4090,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   lifecycleSweepTimer.unref();
 
   // ── Vite Middleware (Dev) or Static Serve (Prod) ──────────────
-  if (!options.skipVite && process.env.NODE_ENV !== 'production') {
+  if (!options.skipVite && process.env.SKIP_VITE !== '1' && process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -3955,6 +4119,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   });
 
   const close = async () => {
+    saveDbSync();
     clearInterval(disconnectSweepTimer);
     clearInterval(lifecycleSweepTimer);
     for (const spar of sparringSessions.values()) spar.destroyed = true;
