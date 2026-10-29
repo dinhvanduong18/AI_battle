@@ -14,10 +14,16 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "OTTV2_SKIP_AUTOSTART=1 tsx --test server/test/*.test.js"
+    "test": "OTTV2_SKIP_AUTOSTART=1 tsx --test server/test/*.test.js",
+    "test:load": "node scripts/stress-test.mjs",
+    "test:load:ws": "node scripts/stress-test.mjs --ws-only",
+    "test:load:http": "node scripts/stress-test.mjs --http-only",
+    "test:load:matchmaking": "npx k6 run loadtest-matchmaking.js"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
+    "@rolldown/binding-linux-x64-gnu": "^1.2.15",
+    "@tailwindcss/oxide-linux-x64-gnu": "^4.3.3",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",

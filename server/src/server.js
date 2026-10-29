@@ -1,3 +1,4 @@
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { createHash, randomInt, randomUUID, randomBytes, generateKeyPairSync, sign as signCrypto } from 'node:crypto';
@@ -20,7 +21,13 @@ import {
 } from './tournament-ranks.js';
 import { areBothMatchPlayersOffline } from './match-disconnect.js';
 
-const pool = new Pool({ connectionString: config.databaseUrl });
+const pool = new Pool({
+  connectionString: config.databaseUrl,
+  max: config.dbPoolMax,
+  connectionTimeoutMillis: config.dbConnectionTimeoutMs,
+  idleTimeoutMillis: config.dbIdleTimeoutMs
+});
+pool.on('error', err => console.error('PostgreSQL idle client error:', err.message));
 const redis = createClient({ url: config.redisUrl });
 redis.on('error', err => console.error('Redis error:', err.message));
 const redisEvents = redis.duplicate();
@@ -1196,6 +1203,48 @@ async function adjudicateMatchForfeit(matchId, offenderId, reasonCode, winnerMes
 }
 
 async function submitResult(userId, body) {
+  const preResult = await pool.query('SELECT * FROM matches WHERE id=$1', [body.matchId]);
+  const initialMatch = preResult.rows[0];
+  if (!initialMatch || !canonicalMatchIds(initialMatch).includes(userId)) {
+    throw Object.assign(new Error('Match not found for this player'), { status: 404 });
+  }
+  if (initialMatch.status === 'completed') {
+    const prior = await pool.query('SELECT * FROM match_results WHERE match_id=$1', [body.matchId]);
+    const row = prior.rows[0];
+    sparringSessions.delete(initialMatch.id);
+    return {
+      alreadySubmitted: true,
+      matchId: initialMatch.id,
+      winnerId: initialMatch.winner_id,
+      finalStateHash: initialMatch.final_state_hash,
+      elo: row ? { player1: { before: row.player1_elo_before, after: row.player1_elo_after }, player2: { before: row.player2_elo_before, after: row.player2_elo_after } } : null,
+      eloUpdated: initialMatch.match_type === 'bot' && !initialMatch.is_sparring,
+      replaySha256: initialMatch.replay_sha256
+    };
+  }
+  if (initialMatch.status !== 'active') throw Object.assign(new Error('Match is not active'), { status: 409 });
+
+  const p1 = body.proofs?.player1;
+  const p2 = body.proofs?.player2;
+  if (!p1?.proof || !p1.signature || !p2?.proof || !p2.signature) throw Object.assign(new Error('Both signed player proofs are required'), { status: 400 });
+  if (!initialMatch.player1_key || !initialMatch.player2_key) throw Object.assign(new Error('Both session public keys must be registered over the authenticated WebSocket'), { status: 409 });
+  const proofShapeValid = proof => proof.matchId === initialMatch.id && proof.roomId === initialMatch.id &&
+    Number.isInteger(proof.stepCount) && proof.stepCount >= 1 && /^[0-9a-f]{64}$/i.test(proof.stateHash || '') &&
+    Number.isInteger(proof.winner) && [0, 1, 2].includes(proof.winner);
+  if (!proofShapeValid(p1.proof) || !proofShapeValid(p2.proof) ||
+      p1.proof.winner !== p2.proof.winner || p1.proof.stepCount !== p2.proof.stepCount || p1.proof.stateHash !== p2.proof.stateHash) {
+    throw Object.assign(new Error('Players submitted conflicting final proofs'), { status: 409 });
+  }
+  if (!verifySessionProof(initialMatch.player1_key, p1.proof, p1.signature) || !verifySessionProof(initialMatch.player2_key, p2.proof, p2.signature)) {
+    throw Object.assign(new Error('A final proof signature is invalid'), { status: 400 });
+  }
+  const replayResult = verifyReplay(body.replay, initialMatch.seed, initialMatch.id, initialMatch.tournament_rules || null);
+  if (replayResult.finalHash !== p1.proof.stateHash || replayResult.stepCount !== p1.proof.stepCount || replayResult.winner !== p1.proof.winner) {
+    throw Object.assign(new Error('Replay result does not match signed final proof'), { status: 400 });
+  }
+  // Upload replay outside DB transaction so storage network latency never blocks database pool
+  const storedReplay = await replayStorage.put(initialMatch.id, body.replay);
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -1250,24 +1299,6 @@ async function submitResult(userId, body) {
         };
       }
     }
-    const p1 = body.proofs?.player1;
-    const p2 = body.proofs?.player2;
-    if (!p1?.proof || !p1.signature || !p2?.proof || !p2.signature) throw Object.assign(new Error('Both signed player proofs are required'), { status: 400 });
-    if (!match.player1_key || !match.player2_key) throw Object.assign(new Error('Both session public keys must be registered over the authenticated WebSocket'), { status: 409 });
-    const proofShapeValid = proof => proof.matchId === match.id && proof.roomId === match.id &&
-      Number.isInteger(proof.stepCount) && proof.stepCount >= 1 && /^[0-9a-f]{64}$/i.test(proof.stateHash || '') &&
-      Number.isInteger(proof.winner) && [0, 1, 2].includes(proof.winner);
-    if (!proofShapeValid(p1.proof) || !proofShapeValid(p2.proof) ||
-        p1.proof.winner !== p2.proof.winner || p1.proof.stepCount !== p2.proof.stepCount || p1.proof.stateHash !== p2.proof.stateHash) {
-      throw Object.assign(new Error('Players submitted conflicting final proofs'), { status: 409 });
-    }
-    if (!verifySessionProof(match.player1_key, p1.proof, p1.signature) || !verifySessionProof(match.player2_key, p2.proof, p2.signature)) {
-      throw Object.assign(new Error('A final proof signature is invalid'), { status: 400 });
-    }
-    const replayResult = verifyReplay(body.replay, match.seed, match.id, match.tournament_rules || null);
-    if (replayResult.finalHash !== p1.proof.stateHash || replayResult.stepCount !== p1.proof.stepCount || replayResult.winner !== p1.proof.winner) {
-      throw Object.assign(new Error('Replay result does not match signed final proof'), { status: 400 });
-    }
     const usersResult = await client.query('SELECT id, elo FROM users WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE', [[match.player1_id, match.player2_id]]);
     const u1 = usersResult.rows.find(user => user.id === match.player1_id);
     const u2 = usersResult.rows.find(user => user.id === match.player2_id);
@@ -1275,7 +1306,6 @@ async function submitResult(userId, body) {
     const eloUpdated = match.match_type === 'bot' && !match.is_sparring;
     const elo1 = eloUpdated ? calculateElo(u1.elo, u2.elo, score1, config.fideK) : u1.elo;
     const elo2 = eloUpdated ? calculateElo(u2.elo, u1.elo, 1 - score1, config.fideK) : u2.elo;
-    const storedReplay = await replayStorage.put(match.id, body.replay);
     if (eloUpdated) {
       await client.query('UPDATE users SET elo=$1 WHERE id=$2', [elo1, u1.id]);
       await client.query('UPDATE users SET elo=$1 WHERE id=$2', [elo2, u2.id]);
@@ -2672,8 +2702,14 @@ const heartbeat = setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   }
-  for (const [userId, socket] of liveSockets) {
-    if (socket.readyState === WebSocket.OPEN) redis.set(`ottv2:presence:${userId}`, instanceId, { EX: 60 }).catch(() => {});
+  if (liveSockets.size > 0) {
+    const pipeline = redis.multi();
+    for (const [userId, socket] of liveSockets) {
+      if (socket.readyState === WebSocket.OPEN) {
+        pipeline.set(`ottv2:presence:${userId}`, instanceId, { EX: 60 });
+      }
+    }
+    pipeline.exec().catch(() => {});
   }
 }, 30000);
 wss.on('connection', ws => { ws.isAlive = true; ws.on('pong', () => { ws.isAlive = true; }); });

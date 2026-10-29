@@ -1,3 +1,4 @@
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -104,7 +105,7 @@ async function verifyPassword(password: string, encoded: string) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-function createToken(user: { id: string; email: string }, ttlSeconds = 86400 * 7) {
+function createToken(user: { id: string; email: string }, ttlSeconds = 86400 * 30) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payload = b64url(JSON.stringify({ sub: user.id, email: user.email, iat: now, exp: now + ttlSeconds }));
@@ -705,14 +706,78 @@ export async function startServer(options: ServerStartOptions = {}) {
   const dataDir = path.dirname(dbPath);
 
   let db: DatabaseSchema;
+  const usersById = new Map<string, UserRecord>();
+  const usersByEmail = new Map<string, UserRecord>();
 
-  function saveDb() {
+  function syncUserIndex() {
+    usersById.clear();
+    usersByEmail.clear();
+    if (db && Array.isArray(db.users)) {
+      for (const u of db.users) {
+        usersById.set(u.id, u);
+        usersByEmail.set(u.email.toLowerCase(), u);
+      }
+    }
+  }
+
+  function indexUser(u: UserRecord) {
+    usersById.set(u.id, u);
+    usersByEmail.set(u.email.toLowerCase(), u);
+  }
+
+  function findUserById(id: string): UserRecord | undefined {
+    return usersById.get(id);
+  }
+
+  function findUserByEmail(email: string): UserRecord | undefined {
+    return usersByEmail.get(email.toLowerCase());
+  }
+
+  let saveDbTimer: NodeJS.Timeout | null = null;
+  let isSaving = false;
+  let savePending = false;
+
+  function flushDb() {
+    if (isSaving) {
+      savePending = true;
+      return;
+    }
+    isSaving = true;
+    savePending = false;
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      const serialized = JSON.stringify(db, null, 2);
+      const tmpPath = `${dbPath}.tmp.${process.pid}`;
+      fs.writeFile(tmpPath, serialized, 'utf8', (err) => {
+        isSaving = false;
+        if (!err) {
+          fs.rename(tmpPath, dbPath, () => {});
+        }
+        if (savePending) {
+          flushDb();
+        }
+      });
+    } catch {
+      isSaving = false;
+    }
+  }
+
+  function saveDbSync() {
+    if (saveDbTimer) {
+      clearTimeout(saveDbTimer);
+      saveDbTimer = null;
+    }
     try {
       fs.mkdirSync(dataDir, { recursive: true });
       fs.writeFileSync(dbPath, JSON.stringify(db, null, 2), 'utf8');
     } catch (err) {
-      console.error('Could not persist local DB:', err);
+      console.error('Could not persist local DB synchronously:', err);
     }
+  }
+
+  function saveDb() {
+    if (saveDbTimer) clearTimeout(saveDbTimer);
+    saveDbTimer = setTimeout(flushDb, 50);
   }
 
   function recordEloPeak(user: UserRecord, rating: number) {
@@ -819,6 +884,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   }
 
   await initDb();
+  syncUserIndex();
 
   // ── Live Sockets & Queues ────────────────────────────────────
   interface AuthedSocket extends WebSocket {
@@ -1355,7 +1421,7 @@ export async function startServer(options: ServerStartOptions = {}) {
       throw Object.assign(new Error('Vui lòng đăng nhập để thực hiện thao tác này.'), { status: 401 });
     }
     const payload = verifyToken(header.slice(7));
-    const user = db.users.find((u) => u.id === payload.sub);
+    const user = findUserById(payload.sub) || db.users.find((u) => u.id === payload.sub);
     if (!user) throw Object.assign(new Error('Không tìm thấy tài khoản.'), { status: 401 });
     return user;
   }
@@ -1444,7 +1510,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         res.status(400).json({ error: 'Vui lòng nhập tên hiển thị.' });
         return;
       }
-      if (db.users.some((u) => u.email === email)) {
+      if (findUserByEmail(email) || db.users.some((u) => u.email === email)) {
         res.status(409).json({ error: 'Email này đã được đăng ký.' });
         return;
       }
@@ -1461,6 +1527,7 @@ export async function startServer(options: ServerStartOptions = {}) {
         created_at: new Date().toISOString(),
       };
       db.users.push(user);
+      indexUser(user);
       saveDb();
       res.status(201).json({ token: createToken(user), user: publicUser(user) });
     } catch (err: any) {
@@ -1472,7 +1539,7 @@ export async function startServer(options: ServerStartOptions = {}) {
     try {
       const email = String(req.body?.email || '').trim().toLowerCase();
       const password = String(req.body?.password || '');
-      const user = db.users.find((u) => u.email === email && !u.is_system_bot);
+      const user = findUserByEmail(email) || db.users.find((u) => u.email === email && !u.is_system_bot);
       if (!user || !(await verifyPassword(password, user.password_hash))) {
         res.status(401).json({ error: 'Email hoặc mật khẩu không chính xác.' });
         return;
@@ -2213,6 +2280,10 @@ export async function startServer(options: ServerStartOptions = {}) {
       }
       if (t.format === 'knockout') {
         res.status(400).json({ error: 'Giải knockout cần mã tham gia. Hãy nhập mã giải để ghi danh.' });
+        return;
+      }
+      if (!user.active_bot_version) {
+        res.status(400).json({ error: 'Cần có ít nhất 1 Bot được lưu để tham gia giải.' });
         return;
       }
       const existing = db.tournamentEntries.find(
@@ -3606,7 +3677,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   lifecycleSweepTimer.unref();
 
   // ── Vite Middleware (Dev) or Static Serve (Prod) ──────────────
-  if (!options.skipVite && process.env.NODE_ENV !== 'production') {
+  if (!options.skipVite && process.env.SKIP_VITE !== '1' && process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -3635,6 +3706,7 @@ export async function startServer(options: ServerStartOptions = {}) {
   });
 
   const close = async () => {
+    saveDbSync();
     clearInterval(disconnectSweepTimer);
     clearInterval(lifecycleSweepTimer);
     for (const spar of sparringSessions.values()) spar.destroyed = true;
