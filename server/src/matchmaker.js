@@ -28,19 +28,48 @@ export async function enqueueOrMatch(redis, user, config) {
   return { opponentId, queuedAt: Date.now() };
 }
 
+const LUA_CANCEL_BY_PREFIX = `
+local queue = KEYS[1]
+local prefix = ARGV[1]
+local items = redis.call('ZRANGE', queue, 0, -1)
+local removed = {}
+for _, item in ipairs(items) do
+  if string.find(item, prefix, 1, true) == 1 then
+    table.insert(removed, item)
+  end
+end
+if #removed > 0 then
+  redis.call('ZREM', queue, unpack(removed))
+  return #removed
+end
+return 0
+`;
+
+const LUA_FIND_BY_PREFIX = `
+local queue = KEYS[1]
+local prefix = ARGV[1]
+local items = redis.call('ZRANGE', queue, 0, -1)
+for _, item in ipairs(items) do
+  if string.find(item, prefix, 1, true) == 1 then
+    return item
+  end
+end
+return false
+`;
+
 export async function cancelQueue(redis, userId, queueName = null) {
   const queues = queueName ? [queueName] : [QUEUE, BOT_QUEUE];
+  const prefix = `${userId}|`;
   for (const queue of queues) {
-    const entries = await redis.zRange(queue, 0, -1);
-    const mine = entries.filter(item => item.startsWith(`${userId}|`));
-    if (mine.length) await redis.zRem(queue, mine);
+    await redis.eval(LUA_CANCEL_BY_PREFIX, { keys: [queue], arguments: [prefix] }).catch(() => {});
   }
 }
 
 export async function putBackInQueue(redis, userId) {
-  // Elo is embedded in the existing member; matchmaking invokes this only with a known member.
-  const entries = await redis.zRange(QUEUE, 0, -1);
-  return entries.find(item => item.startsWith(`${userId}|`)) || null;
+  // Elo is embedded in the existing member; find matching member directly in Redis
+  const prefix = `${userId}|`;
+  const found = await redis.eval(LUA_FIND_BY_PREFIX, { keys: [QUEUE], arguments: [prefix] }).catch(() => null);
+  return found || null;
 }
 
 const TOURNAMENT_MATCH_SCRIPT = `
@@ -118,8 +147,6 @@ export async function cancelTournamentQueue(redis, tournamentId, teamId, userId 
   const prefix = userId ? `${teamId}|${userId}|` : `${teamId}|`;
   for (const tier of ['Bronze', 'Silver', 'Gold', 'Master', 'Challenger', 'Practice']) {
     const queue = `${namespace}:${tournamentId}:${week}:${tier}`;
-    const entries = await redis.zRange(queue, 0, -1);
-    const mine = entries.filter(item => item.startsWith(prefix));
-    if (mine.length) await redis.zRem(queue, mine);
+    await redis.eval(LUA_CANCEL_BY_PREFIX, { keys: [queue], arguments: [prefix] }).catch(() => {});
   }
 }

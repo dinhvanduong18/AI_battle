@@ -1,3 +1,4 @@
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 import { createHmac, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 const scrypt = promisify(scryptCb);
@@ -15,7 +16,7 @@ export async function verifyPassword(password, encoded) {
   const actual = Buffer.from(await scrypt(password, Buffer.from(saltText, 'base64url'), expected.length));
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
-export function createToken(user, secret, ttlSeconds = 86400) {
+export function createToken(user, secret, ttlSeconds = 86400 * 30) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const payload = b64url(JSON.stringify({ sub: user.id, email: user.email, iat: now, exp: now + ttlSeconds }));

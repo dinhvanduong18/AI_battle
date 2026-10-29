@@ -40,3 +40,7 @@ services:
           property: connectionString
       - key: FIDE_K_FACTOR
         value: "20"
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=384"
+      - key: UV_THREADPOOL_SIZE
+        value: "8"
