@@ -35,7 +35,7 @@ import {
 const require = createRequire(import.meta.url);
 const { OTTGameEngine } = require('./shared/OTTGameEngine.js');
 
-const scrypt = promisify(scryptCb);
+const scrypt = promisify(scryptCb) as (password: any, salt: any, keylen: number, options?: any) => Promise<Buffer>;
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'ottv2-local-dev-secret-key-minimum-32-chars';
 const FIDE_K = Number(process.env.FIDE_K_FACTOR) || 20;
@@ -91,18 +91,27 @@ function calculateElo(rating: number, opponentRating: number, score: number, kFa
 // ── Crypto & Auth Helpers ─────────────────────────────────────
 const b64url = (value: Buffer | string) => Buffer.from(value).toString('base64url');
 
+const SCRYPT_COST = { N: 1024, r: 8, p: 1, maxmem: 32 * 1024 * 1024 };
+
 async function hashPassword(password: string) {
   const salt = randomBytes(16);
-  const derived = (await scrypt(password, salt, 64)) as Buffer;
-  return `scrypt$${salt.toString('base64url')}$${derived.toString('base64url')}`;
+  const derived = (await scrypt(password, salt, 64, SCRYPT_COST)) as Buffer;
+  return `scrypt$${salt.toString('base64url')}$${derived.toString('base64url')}$1024`;
 }
 
 async function verifyPassword(password: string, encoded: string) {
-  const [scheme, saltText, hashText] = String(encoded).split('$');
+  const [scheme, saltText, hashText, nText] = String(encoded).split('$');
   if (scheme !== 'scrypt' || !saltText || !hashText) return false;
   const expected = Buffer.from(hashText, 'base64url');
-  const actual = (await scrypt(password, Buffer.from(saltText, 'base64url'), expected.length)) as Buffer;
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
+  const salt = Buffer.from(saltText, 'base64url');
+  const cost = nText ? { N: parseInt(nText, 10), r: 8, p: 1, maxmem: 32 * 1024 * 1024 } : SCRYPT_COST;
+  let actual = (await scrypt(password, salt, expected.length, cost)) as Buffer;
+  if (expected.length === actual.length && timingSafeEqual(expected, actual)) return true;
+  if (!nText) {
+    actual = (await scrypt(password, salt, expected.length)) as Buffer;
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  }
+  return false;
 }
 
 function createToken(user: { id: string; email: string }, ttlSeconds = 86400 * 30) {

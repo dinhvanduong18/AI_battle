@@ -1,0 +1,82 @@
+import http from 'k6/http';
+import ws from 'k6/ws';
+import { check, sleep } from 'k6';
+import { Trend, Counter } from 'k6/metrics';
+// @ts-ignore
+import { htmlReport } from './scripts/k6-reporter.js';
+// @ts-ignore
+import { textSummary } from './scripts/k6-summary.js';
+
+const httpLatency = new Trend('http_latency_ms', true);
+const wsHandshakeTime = new Trend('ws_handshake_ms', true);
+const httpFailures = new Counter('http_failure_count');
+const wsFailures = new Counter('ws_failure_count');
+
+// Kịch bản Ultra Stress: 1600 CCU -> 1800 CCU -> 2000 CCU
+export const options = {
+  stages: [
+    { duration: '15s', target: 1600 }, // Bậc 1: 1600 CCU (+200)
+    { duration: '15s', target: 1600 }, // Giữ tải 1600 CCU
+    { duration: '15s', target: 1800 }, // Bậc 2: 1800 CCU (+200)
+    { duration: '15s', target: 1800 }, // Giữ tải 1800 CCU
+    { duration: '15s', target: 2000 }, // Bậc 3: 2000 CCU (+200)
+    { duration: '15s', target: 2000 }, // Giữ đỉnh 2000 CCU
+    { duration: '10s', target: 0 },    // Hạ tải
+  ],
+  thresholds: {
+    http_req_failed: ['rate<0.50'],
+  },
+};
+
+const BASE_URL = __ENV.TARGET_URL || 'https://ottv2-backend-46l0.onrender.com';
+const WS_URL = BASE_URL.replace(/^http/, 'ws') + '/ws';
+
+export default function () {
+  const tHttp = Date.now();
+  const healthRes = http.get(`${BASE_URL}/health`, { timeout: '8s' });
+  const httpOk = check(healthRes, {
+    'GET /health 200 OK': (r) => r.status === 200,
+  });
+  if (!httpOk) {
+    httpFailures.add(1);
+  }
+  httpLatency.add(Date.now() - tHttp);
+
+  const tWs = Date.now();
+  const wsRes = ws.connect(WS_URL, { timeout: '8s' }, function (socket) {
+    socket.on('open', () => {
+      wsHandshakeTime.add(Date.now() - tWs);
+      socket.send(JSON.stringify({ type: 'ping' }));
+    });
+
+    socket.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === 'pong') {
+          socket.setTimeout(() => socket.close(), 1500);
+        }
+      } catch {
+        socket.close();
+      }
+    });
+
+    socket.setTimeout(() => socket.close(), 3500);
+  });
+
+  const wsOk = check(wsRes, {
+    'WebSocket 101 Switching': (r) => r && r.status === 101,
+  });
+  if (!wsOk) {
+    wsFailures.add(1);
+  }
+
+  sleep(0.2);
+}
+
+export function handleSummary(data) {
+  const reportName = __ENV.REPORT_FILE || 'k6-ultra-2000-report.html';
+  return {
+    [reportName]: htmlReport(data),
+    stdout: textSummary(data, { indent: ' ', enableColors: true }),
+  };
+}
