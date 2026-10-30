@@ -145,7 +145,12 @@ export async function enqueueTournamentOrMatch(
 export async function cancelTournamentQueue(redis, tournamentId, teamId, userId = null, week = 1, namespace = 'ottv2:tournament') {
   if (!tournamentId || !teamId) return;
   const prefix = userId ? `${teamId}|${userId}|` : `${teamId}|`;
-  for (const tier of ['Bronze', 'Silver', 'Gold', 'Master', 'Challenger', 'Practice']) {
+  const tiers = [
+    'Bronze', 'Silver', 'Gold', 'Master', 'Challenger', 'Practice',
+    'Practice:EloTier1', 'Practice:EloTier2', 'Practice:EloTier3', 'Practice:EloTier4',
+    'Practice:EloTier5', 'Practice:EloTier6', 'Practice:EloTier7', 'Practice:EloTier8'
+  ];
+  for (const tier of tiers) {
     const queue = `${namespace}:${tournamentId}:${week}:${tier}`;
     await redis.eval(LUA_CANCEL_BY_PREFIX, { keys: [queue], arguments: [prefix] }).catch(() => {});
   }

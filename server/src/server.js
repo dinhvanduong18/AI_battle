@@ -108,6 +108,18 @@ function tournamentQueueNamespace(search) {
   return search.individual ? 'ottv2:tournament-player' : 'ottv2:tournament';
 }
 
+export function getTournamentEloTier(elo) {
+  const val = Number(elo) || 1200;
+  if (val >= 1800) return 1;
+  if (val >= 1700) return 2;
+  if (val >= 1600) return 3;
+  if (val >= 1500) return 4;
+  if (val >= 1400) return 5;
+  if (val >= 1300) return 6;
+  if (val >= 1200) return 7;
+  return 8;
+}
+
 function weeklyRules(week, schedule = DEFAULT_SPRINT_RULES) {
   const sprint = Math.max(1, Number(week) || 1);
   const configuredSchedule = Array.isArray(schedule) && schedule.length ? schedule : DEFAULT_SPRINT_RULES;
@@ -779,22 +791,50 @@ async function runIndividualTournamentSearch(userId) {
   const queueScore = phase === 'practice'
     ? row.elo
     : (row.tier === 'Challenger' ? row.season_points * 100 : row.rank_stars * 100);
-  // In Practice: random pairing across all waiting participants; in Ranked: pair any two waiting players in the same tier & week
-  const paired = await enqueueTournamentOrMatch(
+  // In Practice: partition into 8 Elo tiers with tight Elo gap; in Ranked: pair in the same tier & week
+  const eloTier = getTournamentEloTier(row.elo);
+  const queueTier = phase === 'practice' ? `Practice:EloTier${eloTier}` : row.tier;
+  const started = socket.searchStartedAt || Date.now();
+  const practiceGap = Math.min(300, 100 + Math.floor((Date.now() - started) / 5000) * 50);
+  const gap = phase === 'practice' ? practiceGap : 1000000;
+  let paired = await enqueueTournamentOrMatch(
     redis,
     {
       teamId: userId,
       userId,
       version: row.active_bot_version,
       elo: queueScore,
-      tier: phase === 'practice' ? 'Practice' : row.tier,
+      tier: queueTier,
       week: search.week
     },
     row.tournament_id,
-    1000000,
+    gap,
     namespace,
-    { randomPairing: phase === 'practice' }
+    { randomPairing: false }
   );
+
+  // If in practice and waited more than 4s without a match in this tier, check adjacent Elo tiers
+  if (!paired && phase === 'practice' && Date.now() - started > 4000) {
+    const adjacentTiers = [eloTier - 1, eloTier + 1].filter((t) => t >= 1 && t <= 8);
+    for (const adjTier of adjacentTiers) {
+      paired = await enqueueTournamentOrMatch(
+        redis,
+        {
+          teamId: userId,
+          userId,
+          version: row.active_bot_version,
+          elo: queueScore,
+          tier: `Practice:EloTier${adjTier}`,
+          week: search.week
+        },
+        row.tournament_id,
+        gap * 2,
+        namespace,
+        { randomPairing: false }
+      );
+      if (paired) break;
+    }
+  }
   if (paired) {
     socket.searchCancelled = true; socket.searching = false;
     const otherSocket = userSocket(paired.opponentUserId);

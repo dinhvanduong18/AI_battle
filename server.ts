@@ -601,6 +601,18 @@ async function createSeedDatabase(): Promise<DatabaseSchema> {
   };
 }
 
+function getTournamentEloTier(elo: number): number {
+  const val = Number(elo) || 1200;
+  if (val >= 1800) return 1;
+  if (val >= 1700) return 2;
+  if (val >= 1600) return 3;
+  if (val >= 1500) return 4;
+  if (val >= 1400) return 5;
+  if (val >= 1300) return 6;
+  if (val >= 1200) return 7;
+  return 8;
+}
+
 function publicUser(u: UserRecord) {
   const highestElo = Math.max(u.elo, u.elo_peak || u.elo);
   return {
@@ -3441,10 +3453,14 @@ export async function startServer(options: ServerStartOptions = {}) {
           }
 
           if (validCandidates.length > 0) {
-            const chosen =
-              t.status === 'registration'
-                ? validCandidates[randomInt(0, validCandidates.length)]
-                : validCandidates[0];
+            const userTier = getTournamentEloTier(user.elo);
+            validCandidates.sort((a, b) => {
+              const tierDiffA = Math.abs(getTournamentEloTier(a.elo) - userTier);
+              const tierDiffB = Math.abs(getTournamentEloTier(b.elo) - userTier);
+              if (tierDiffA !== tierDiffB) return tierDiffA - tierDiffB;
+              return Math.abs(a.elo - user.elo) - Math.abs(b.elo - user.elo);
+            });
+            const chosen = validCandidates[0];
             qSet.delete(chosen.id);
             pairPlayers(user, chosen, 'bot', t, false);
           } else {
