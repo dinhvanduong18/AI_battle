@@ -517,9 +517,16 @@ test('Bot-vs-Bot E2E: full signed consensus match + draw & win submission + Elo 
             return da - db;
           })[0];
       } else {
-        // Seat 2 makes a safe non-goal move so Seat 1 reaches its goal cleanly
-        chosen = legal
-          .filter((m) => !m.isAttack && m.to !== 8 && m.to !== 72)
+        // Seat 2 makes a safe non-goal move avoiding threefold repetition so Seat 1 reaches its goal cleanly
+        const safeCandidates = legal.filter((m) => !m.isAttack && m.to !== 8 && m.to !== 72);
+        const nonRep = safeCandidates.filter((m) => {
+          const next = OTTGameEngine.applyMove(winState, m);
+          const hash = OTTGameEngine.computeFastHash(next);
+          return (next.positionCounts?.[hash] || 0) < 2;
+        });
+        const pool = nonRep.length > 0 ? nonRep : safeCandidates;
+        chosen = pool
+          .slice()
           .sort((a, b) => {
             const da = Math.floor(a.to / 9) + Math.abs((a.to % 9) - 8);
             const db = Math.floor(b.to / 9) + Math.abs((b.to % 9) - 8);
