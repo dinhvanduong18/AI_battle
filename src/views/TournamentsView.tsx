@@ -1,25 +1,22 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Award,
   BookOpen,
   Calendar,
   CheckCircle2,
-  Clock,
   Code2,
-  Copy,
   FastForward,
   Film,
   Loader2,
-  Play,
   Plus,
   ShieldCheck,
-  Sparkles,
   Swords,
   Trophy,
-  Users,
   XCircle,
 } from 'lucide-react';
+import { TournamentCreationModal, type TournamentCreatePayload } from '../components/TournamentCreationModal';
+import { GroupKnockoutTournamentDetail } from '../components/GroupKnockoutTournamentDetail';
 import {
   OTTGameEngine,
   SPRINT_RULE_PRESETS,
@@ -40,9 +37,10 @@ interface TournamentsViewProps {
   tournaments: TournamentItem[];
   initialSelectedId?: string | null;
   onClearInitialSelectedId?: () => void;
+  onSelectionChange?: (id: string | null) => void;
   onRefreshTournaments: () => Promise<void>;
   onOpenAuth: (tab?: 'login' | 'register' | 'profile') => void;
-  onOpenBotLab: () => void;
+  onOpenBotLab: (tournamentId?: string) => void;
   onWatchReplayById: (matchId: string, p1: string, p2: string) => void;
 }
 
@@ -62,16 +60,17 @@ const TIER_COLORS: Record<string, string> = {
   Challenger: 'text-orange-400',
 };
 
-const DEFAULT_SPRINT_SCHEDULE = ['standard', 'center_blockers', 'clipped_corners', 'corridor'];
-
-function getKnockoutRoundName(round: number, totalRounds: number): string {
-  const remaining = totalRounds - round + 1;
-  if (remaining === 1) return 'Trận Chung Kết';
-  if (remaining === 2) return 'Vòng Bán Kết';
-  if (remaining === 3) return 'Vòng Tứ Kết';
-  if (remaining === 4) return 'Vòng 1/8 (Vòng 16)';
-  return `Vòng ${round}`;
-}
+const GROUP_TOURNAMENT_STATUS_LABELS: Partial<Record<TournamentItem['status'], string>> = {
+  scheduled: 'Sắp mở đăng ký',
+  registration: 'Đang mở đăng ký',
+  grouping: 'Chờ chia bảng',
+  group_stage: 'Đã chia bảng · Chờ khởi chạy',
+  group_running: 'Vòng bảng đang chạy',
+  group_complete: 'Vòng bảng đã xong · Chờ knock-out',
+  knockout: 'Đang thi đấu knock-out',
+  completed: 'Đã kết thúc · Công bố nhà vô địch',
+  cancelled: 'Đã hủy',
+};
 
 function RankCrestSvg({ tier }: { tier: string }) {
   const color =
@@ -106,6 +105,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   tournaments,
   initialSelectedId = null,
   onClearInitialSelectedId,
+  onSelectionChange,
   onRefreshTournaments,
   onOpenAuth,
   onOpenBotLab,
@@ -113,51 +113,46 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
 }) => {
   const { notify } = useToast();
   const [statusFilter, setStatusFilter] = useState<
-    'all' | 'qualifying' | 'registration' | 'completed'
-  >('all');
+    'upcoming' | 'registration' | 'in_progress' | 'completed'
+  >('in_progress');
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
+  const appliedInitialSelectedId = useRef<string | null>(null);
   const [detail, setDetail] = useState<any | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [submittingAction, setSubmittingAction] = useState(false);
   const [queuingTournament, setQueuingTournament] = useState(false);
   const [showTournamentRules, setShowTournamentRules] = useState(false);
   const [showRankDetails, setShowRankDetails] = useState(false);
-  const [joinCode, setJoinCode] = useState('');
-  const [knockoutRules, setKnockoutRules] = useState<string[]>([
-    'standard',
-    'center_blockers',
-    'clipped_corners',
-    'corridor',
-  ]);
+  const [rulesPreviewTournament, setRulesPreviewTournament] = useState<TournamentItem | null>(null);
+  const [showCancelTournamentConfirm, setShowCancelTournamentConfirm] = useState(false);
 
   // Create Tournament Form State (Admin / BTC)
   const [showCreateForm, setShowCreateForm] = useState(false);
-  const [newFormat, setNewFormat] = useState<'ranked_weekly' | 'knockout'>('knockout');
-  const [newName, setNewName] = useState('');
-  const [newDesc, setNewDesc] = useState('');
-  const [newMaxPlayers, setNewMaxPlayers] = useState(64);
-  const [regDays, setRegDays] = useState(3);
-  const [sprintCount, setSprintCount] = useState(4);
-  const [sprintSchedule, setSprintSchedule] = useState<string[]>(DEFAULT_SPRINT_SCHEDULE);
-  const [knockoutSize, setKnockoutSize] = useState<number>(8);
-
+  const selectTournament = (id: string | null) => {
+    setSelectedId(id);
+    onSelectionChange?.(id);
+  };
   useEffect(() => {
-    if (initialSelectedId) {
-      setSelectedId(initialSelectedId);
-      onClearInitialSelectedId?.();
+    if (!initialSelectedId) {
+      appliedInitialSelectedId.current = null;
+      return;
     }
+    if (appliedInitialSelectedId.current === initialSelectedId) return;
+    appliedInitialSelectedId.current = initialSelectedId;
+    selectTournament(initialSelectedId);
+    onClearInitialSelectedId?.();
   }, [initialSelectedId, onClearInitialSelectedId]);
 
   const loadTournamentDetail = useCallback(
-    async (id: string) => {
-      setLoadingDetail(true);
+    async (id: string, showLoading = true) => {
+      if (showLoading) setLoadingDetail(true);
       try {
         const res = await backendClient.getTournamentDetail(id);
         setDetail(res);
       } catch (err: any) {
         notify(err.message || 'Không thể tải thông tin giải đấu.', 'error');
       } finally {
-        setLoadingDetail(false);
+        if (showLoading) setLoadingDetail(false);
       }
     },
     [notify]
@@ -187,38 +182,15 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     };
   }, [notify]);
 
-  const handleCreateTournament = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCreateTournament = async (payload: TournamentCreatePayload) => {
     setSubmittingAction(true);
     try {
-      const numRounds =
-        newFormat === 'knockout' ? Math.max(1, Math.ceil(Math.log2(knockoutSize))) : sprintCount;
-      const rules =
-        newFormat === 'knockout'
-          ? knockoutRules.slice(0, numRounds)
-          : sprintSchedule.slice(0, sprintCount);
-
-      const created = await backendClient.createTournament({
-        name: newName,
-        format: newFormat,
-        description: newDesc,
-        registrationDays: regDays,
-        sprintCount: numRounds,
-        maxTeams: newFormat === 'knockout' ? knockoutSize : newMaxPlayers,
-        sprintRules: rules,
-      });
+      const created = await backendClient.createTournament(payload);
       await onRefreshTournaments();
       setShowCreateForm(false);
-      setNewName('');
-      setNewDesc('');
-      notify(
-        newFormat === 'knockout'
-          ? 'Đã tạo giải đấu Cúp Loại Trực Tiếp (Knockout BO5) thành công!'
-          : 'Đã tạo giải đấu cá nhân mới thành công!',
-        'success'
-      );
+      notify('Đã tạo giải đấu mới thành công.', 'success');
       if (created?.tournament?.id) {
-        setSelectedId(created.tournament.id);
+        selectTournament(created.tournament.id);
       }
     } catch (err: any) {
       notify(err.message || 'Tạo giải đấu thất bại.', 'error');
@@ -236,6 +208,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     try {
       await backendClient.registerTournament(tournamentId);
       await onRefreshTournaments();
+      selectTournament(tournamentId);
       await loadTournamentDetail(tournamentId);
       notify(
         savedBotVersion > 0
@@ -245,32 +218,6 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       );
     } catch (err: any) {
       notify(err.message || 'Không thể đăng ký giải đấu.', 'error');
-    } finally {
-      setSubmittingAction(false);
-    }
-  };
-
-  const handleJoinTournamentByCode = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!user) {
-      onOpenAuth('login');
-      return;
-    }
-    const code = joinCode.trim().toUpperCase().replace(/^OTT-/, '');
-    if (!code) {
-      notify('Nh\u1eadp m\u00e3 gi\u1ea3i Knockout \u0111\u1ec3 tham gia.', 'error');
-      return;
-    }
-    setSubmittingAction(true);
-    try {
-      const result = await backendClient.joinTournamentByCode(code);
-      await onRefreshTournaments();
-      setJoinCode('');
-      setSelectedId(result.tournamentId);
-      await loadTournamentDetail(result.tournamentId);
-      notify(result.alreadyRegistered ? 'B\u1ea1n \u0111\u00e3 tham gia gi\u1ea3i Knockout n\u00e0y.' : '?? tham gia gi?i Knockout th?nh c?ng!', 'success');
-    } catch (err: any) {
-      notify(err.message || 'Kh\u00f4ng th\u1ec3 tham gia gi\u1ea3i b\u1eb1ng m\u00e3 n\u00e0y.', 'error');
     } finally {
       setSubmittingAction(false);
     }
@@ -325,32 +272,21 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     }
   };
 
-  const handleSkipKnockoutBreak = async (tournamentId: string, matchupId?: string) => {
+  const handleCancelTournament = async (tournamentId: string) => {
     setSubmittingAction(true);
     try {
-      await backendClient.skipKnockoutBreak(tournamentId, matchupId);
-      await loadTournamentDetail(tournamentId);
-      notify('Đã bỏ qua thời gian nghỉ thành công!', 'success');
+      await backendClient.cancelTournament(tournamentId);
+      await onRefreshTournaments();
+      setShowCancelTournamentConfirm(false);
+      selectTournament(null);
+      setDetail(null);
+      notify('Đã hủy giải đấu và gỡ khỏi danh sách.', 'success');
     } catch (err: any) {
-      notify(err.message || 'Không thể bỏ qua thời gian nghỉ.', 'error');
+      notify(err.message || 'Không thể hủy giải đấu.', 'error');
     } finally {
       setSubmittingAction(false);
     }
   };
-
-  const handleLaunchKnockoutMatch = async (tournamentId: string, matchupId: string) => {
-    setSubmittingAction(true);
-    try {
-      await backendClient.launchKnockoutMatch(tournamentId, matchupId);
-      await loadTournamentDetail(tournamentId);
-      notify('Đã khởi động ván đấu Knockout!', 'success');
-    } catch (err: any) {
-      notify(err.message || 'Không thể khởi động ván đấu.', 'error');
-    } finally {
-      setSubmittingAction(false);
-    }
-  };
-
 
   const handleFindMatch = async (tournamentId: string) => {
     if (!user) {
@@ -362,21 +298,6 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       return;
     }
     try {
-      const currentTournament = detail?.tournament;
-      if (currentTournament?.id === tournamentId && currentTournament.format === 'knockout') {
-        const bracket = currentTournament.knockout_data;
-        const matchup = bracket?.matchups?.find((item: any) => item.round === bracket.current_round &&
-          (item.player1_id === user.id || item.player2_id === user.id) &&
-          ['ready', 'waiting_break'].includes(item.status));
-        if (!matchup) {
-          notify('Hiện chưa có cặp đấu sẵn sàng cho bạn. Hãy chờ BTC bắt đầu giải hoặc vòng tiếp theo.', 'error');
-          return;
-        }
-        await backendClient.launchKnockoutMatch(tournamentId, matchup.id);
-        await loadTournamentDetail(tournamentId);
-        notify('Đã bắt đầu ván Knockout của cặp đấu bạn.', 'success');
-        return;
-      }
       setQueuingTournament(true);
       await backendClient.findTournamentMatch(tournamentId);
     } catch (err: any) {
@@ -395,6 +316,29 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     const myMatches: any[] = detail?.matches || [];
     const ranks: any[] = detail?.ranks || [];
 
+    if (t?.format === 'group_knockout') {
+      return (
+        <GroupKnockoutTournamentDetail
+          tournament={t}
+          detail={detail}
+          user={user}
+            savedBotVersion={savedBotVersion}
+            themeMode={themeMode}
+            loading={loadingDetail}
+          onBack={() => {
+            backendClient.cancelMatch();
+            setQueuingTournament(false);
+            selectTournament(null);
+            setDetail(null);
+          }}
+          onRefresh={onRefreshTournaments}
+          onRefreshDetail={() => loadTournamentDetail(t.id, false)}
+          onOpenAuth={() => onOpenAuth('login')}
+          onOpenBotLab={() => onOpenBotLab(t.id)}
+        />
+      );
+    }
+
     const previewRules =
       t?.status !== 'registration' && t?.rules_json?.blockedCells
         ? t.rules_json
@@ -409,7 +353,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             onClick={() => {
               backendClient.cancelMatch();
               setQueuingTournament(false);
-              setSelectedId(null);
+              selectTournament(null);
               setDetail(null);
             }}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
@@ -420,6 +364,17 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
 
           {user?.isAdmin && t && (
             <div className="flex flex-wrap items-center gap-2">
+              {!['completed', 'cancelled'].includes(t.status) && (
+                <button
+                  type="button"
+                  disabled={submittingAction}
+                  onClick={() => setShowCancelTournamentConfirm(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/10 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <XCircle className="w-4 h-4" />
+                  Hủy giải đấu
+                </button>
+              )}
               {t.status === 'registration' && (
                 <button
                   type="button"
@@ -428,26 +383,13 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold border border-[var(--border-accent)] bg-[var(--bg-panel)] text-[var(--accent-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                 >
                   <ShieldCheck className="w-4 h-4" />
-                  {t.format === 'knockout'
-                    ? 'BTC: Bốc thăm & Bắt đầu Knockout'
-                    : 'BTC: Mở Vòng Thực Chiến (Sprint 1)'}
+                  BTC: Mở Vòng Thực Chiến (Sprint 1)
                 </button>
               )}
 
               {t.status === 'qualifying' && (
                 <>
-                  {t.format === 'knockout' && t.knockout_data?.round_break_until && (
-                    <button
-                      type="button"
-                      disabled={submittingAction}
-                      onClick={() => handleSkipKnockoutBreak(t.id)}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
-                    >
-                      <FastForward className="w-3.5 h-3.5" />
-                      BTC: Bỏ qua nghỉ 30p giữa vòng
-                    </button>
-                  )}
-                  {t.format === 'ranked_weekly' && t.current_week < t.total_sprints && (
+                  {t.current_week < t.total_sprints && (
                     <button
                       type="button"
                       disabled={submittingAction}
@@ -465,7 +407,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-[var(--border-accent)] bg-[var(--bg-panel)] text-[var(--accent-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    BTC: Kết thúc giải
+                    BTC: Kết thúc giải & Công bố BXH
                   </button>
                 </>
               )}
@@ -479,374 +421,50 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
           </div>
         ) : (
           <>
-            {t.format === 'knockout' ? (
-              <div className="space-y-6">
-                {/* Knockout Hero Banner & Map Preview */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 rounded-2xl border border-amber-500/30 bg-[var(--bg-elevated)] items-center">
-                  <div className="lg:col-span-8 space-y-4">
-                    <div className="space-y-1.5">
-                      <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
-                        <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                          🏆 Cúp Loại Trực Tiếp (Knockout BO5)
-                        </span>
-                        <span className="text-[var(--text-secondary)]">
-                          {t.status === 'qualifying'
-                            ? `Vòng ${t.knockout_data?.current_round || 1}/${t.knockout_data?.total_rounds || 3} · ${getKnockoutRoundName(t.knockout_data?.current_round || 1, t.knockout_data?.total_rounds || 3)}`
-                            : t.status === 'registration'
-                            ? 'Giai đoạn Mở Đăng Ký'
-                            : 'Giải đấu đã hoàn tất'}
-                          {' · '}
-                          {detail.participantCount}/{t.max_teams} kỳ thủ
-                        </span>
-                      </div>
-
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <h2 className="text-2xl font-bold text-[var(--text-primary)] text-balance">
-                          {t.name}
-                        </h2>
-                      </div>
-                      <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-                        {t.description ||
-                          'Giải đấu cúp loại trực tiếp 5 ván (Best of 5), người thắng 3 ván trước sẽ đi tiếp vào vòng trong.'}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => setShowTournamentRules(true)}
-                        className="inline-flex items-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2 text-xs font-semibold text-amber-300 transition-colors hover:bg-amber-500/20"
-                      >
-                        <BookOpen className="h-4 w-4" aria-hidden="true" />
-                        {'Xem th\u1ec3 l\u1ec7 gi\u1ea3i \u0111\u1ea5u'}
-                      </button>
-                    </div>
-
-                    {/* Quick tournament specs badge */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] text-[var(--text-secondary)]">
-                      <div className="p-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] flex items-center gap-2">
-                        <Swords className="w-4 h-4 text-amber-400 shrink-0" />
-                        <span><strong>Best of 5:</strong> Đấu tối đa 5 ván, chạm 3 thắng là đi tiếp</span>
-                      </div>
-                      <div className="p-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] flex items-center gap-2">
-                        <Clock className="w-4 h-4 text-amber-400 shrink-0" />
-                        <span><strong>Nghỉ 10p / ván:</strong> Kỳ thủ tinh chỉnh bot</span>
-                      </div>
-                      <div className="p-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] flex items-center gap-2">
-                        <FastForward className="w-4 h-4 text-amber-400 shrink-0" />
-                        <span><strong>Nghỉ 30p / vòng:</strong> Ban hành luật sprint mới</span>
-                      </div>
-                    </div>
-
-                    {/* Registration / Player Action Status */}
-                    <div className="pt-3 flex flex-wrap items-center justify-between gap-4 border-t border-[var(--border-subtle)]">
-                      {myEntry ? (
-                        <div className="text-xs text-amber-400 font-semibold flex items-center gap-1.5">
-                          <CheckCircle2 className="w-4 h-4" />
-                          Bạn đã ghi danh tham gia giải đấu này với Bot phiên bản v{myEntry.bot_version || 1}
-                        </div>
-                      ) : t.status === 'registration' ? (
-                        <div className="text-xs text-[var(--text-muted)]">
-                          Cổng đăng ký đang mở. Bạn có thể đăng ký ngay để giữ suất thi đấu.
-                        </div>
-                      ) : (
-                        <div className="text-xs text-[var(--text-muted)]">
-                          Cổng đăng ký đã đóng. Giải đấu đang diễn ra.
-                        </div>
-                      )}
-
-                      {t.status === 'registration' && !myEntry && (
-                        <form onSubmit={handleJoinTournamentByCode} className="flex flex-wrap items-center gap-2">
-                          <input value={joinCode} onChange={(event) => setJoinCode(event.target.value.toUpperCase())} placeholder="A7K9P2" maxLength={10} aria-label="Knockout code" className="w-32 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-canvas)] px-3 py-2 font-mono text-xs tracking-widest text-[var(--text-primary)] outline-none focus:border-amber-400" />
-                          <button type="submit" disabled={submittingAction} className="rounded-lg bg-amber-400 px-4 py-2 text-xs font-bold text-black hover:bg-amber-300 disabled:opacity-50">{'Nh\u1eadp m\u00e3 v\u00e0 tham gia'}</button>
-                        </form>
-                      )}
-
-                      {myEntry && savedBotVersion <= 0 && (
-                        <button
-                          type="button"
-                          onClick={onOpenBotLab}
-                          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap shrink-0"
-                        >
-                          <Code2 className="w-4 h-4" />
-                          Lưu Bot trong Phòng Lab
-                        </button>
-                      )}
-                    </div>
+            {showCancelTournamentConfirm && t && (
+              <div
+                className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                onClick={(event) => {
+                  if (event.target === event.currentTarget && !submittingAction) {
+                    setShowCancelTournamentConfirm(false);
+                  }
+                }}
+              >
+                <section
+                  role="alertdialog"
+                  aria-modal="true"
+                  aria-labelledby="cancel-selected-tournament-heading"
+                  className="w-full max-w-md rounded-2xl border border-red-500/40 bg-[var(--bg-elevated)] p-5 shadow-2xl"
+                >
+                  <h3 id="cancel-selected-tournament-heading" className="text-lg font-bold text-red-300">
+                    Xác nhận hủy giải đấu?
+                  </h3>
+                  <p className="mt-2 text-sm text-[var(--text-secondary)]">
+                    Giải “{t.name}” sẽ bị hủy, các trận đang chạy sẽ dừng và giải được gỡ khỏi danh sách.
+                  </p>
+                  <div className="mt-5 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      disabled={submittingAction}
+                      onClick={() => setShowCancelTournamentConfirm(false)}
+                      className="rounded-xl border border-[var(--border-subtle)] px-4 py-2 text-xs text-[var(--text-secondary)] disabled:opacity-50"
+                    >
+                      Không hủy
+                    </button>
+                    <button
+                      type="button"
+                      disabled={submittingAction}
+                      onClick={() => handleCancelTournament(t.id)}
+                      className="rounded-xl bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+                    >
+                      {submittingAction ? 'Đang hủy…' : 'Xác nhận hủy giải'}
+                    </button>
                   </div>
-
-                  {/* Current Round Rules Preview */}
-                  <div className="lg:col-span-4 p-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-center space-y-2.5">
-                    {t.join_code && (user?.isAdmin || detail?.isCreator) && (
-                      <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                        <div className="text-left">
-                          <div className="text-[10px] font-semibold text-[var(--text-muted)]">{'M\u00e3 tham gia gi\u1ea3i'}</div>
-                          <div className="font-mono text-lg font-bold tracking-[0.2em] text-amber-300">{t.join_code}</div>
-                        </div>
-                        <button type="button" onClick={() => { navigator.clipboard.writeText(t.join_code!); notify('\u0110\u00e3 sao ch\u00e9p m\u00e3 gi\u1ea3i.', 'success'); }} className="inline-flex items-center gap-1.5 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-black hover:bg-amber-300">
-                          <Copy className="h-3.5 w-3.5" /> {'Sao ch\u00e9p'}
-                        </button>
-                      </div>
-                    )}
-                    <div className="text-xs font-semibold text-[var(--text-primary)]">
-                      {t.status === 'qualifying'
-                        ? `Luật Vòng ${t.knockout_data?.current_round || 1}: ${previewRules?.title || 'Bàn chuẩn 9×9'}`
-                        : 'Bàn chuẩn 9×9'}
-                    </div>
-                    <Board9x9
-                      state={previewBoardState}
-                      size="mini"
-                      themeMode={themeMode}
-                      showCoordinates={false}
-                    />
-                    {t.rules_schedule?.length ? (
-                      <div className="space-y-1 pt-2 text-left">
-                        <div className="text-[10px] font-semibold text-[var(--text-secondary)]">Luật theo vòng</div>
-                        {t.rules_schedule.map((ruleId, index) => (
-                          <div key={`${ruleId}-${index}`} className="flex justify-between gap-3 text-[10px]">
-                            <span className={index + 1 === t.knockout_data?.current_round ? 'font-bold text-amber-400' : 'text-[var(--text-muted)]'}>
-                              Vòng {index + 1} ({getKnockoutRoundName(index + 1, t.rules_schedule!.length)})
-                            </span>
-                            <span className={index + 1 === t.knockout_data?.current_round ? 'font-semibold text-amber-300' : 'text-[var(--text-muted)]'}>
-                              {SPRINT_RULE_PRESETS[ruleId]?.title || ruleId}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-
-                {/* Champion Banner */}
-                {t.knockout_data?.champion_id && (
-                  <div className="p-6 rounded-2xl border-2 border-amber-400 bg-gradient-to-r from-amber-500/20 via-yellow-500/10 to-amber-500/20 shadow-lg text-center space-y-3">
-                    <div className="inline-flex p-3 rounded-full bg-amber-400/20 border border-amber-400/40 text-amber-300">
-                      <Trophy className="w-8 h-8" />
-                    </div>
-                    <h3 className="text-xl font-extrabold text-amber-300">
-                      CHÚC MỪNG NHÀ VÔ ĐỊCH GIẢI ĐẤU KNOCKOUT!
-                    </h3>
-                    <p className="text-sm text-[var(--text-primary)]">
-                      Kỳ thủ xuất sắc nhất đã vượt qua tất cả các cặp đấu BO5 để giành chiếc Cúp vô địch danh giá.
-                    </p>
-                  </div>
-                )}
-
-                {/* 30-Minute Round Break Banner */}
-                {t.knockout_data?.round_break_until && !t.knockout_data?.champion_id && (
-                  <div className="p-4 rounded-xl border border-amber-500/50 bg-amber-500/10 flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <Clock className="w-5 h-5 text-amber-400 animate-pulse shrink-0" />
-                      <div>
-                        <div className="text-xs font-bold text-amber-300">
-                          Vòng đấu vừa hoàn thành! Đang nghỉ 30 phút giữa các vòng
-                        </div>
-                        <div className="text-[11px] text-[var(--text-secondary)]">
-                          Vòng tiếp theo: <strong>{getKnockoutRoundName(t.knockout_data.current_round, t.knockout_data.total_rounds)}</strong>. Các kỳ thủ có thể tinh chỉnh bot trong Phòng Lab!
-                        </div>
-                      </div>
-                    </div>
-                    {user?.isAdmin && (
-                      <button
-                        type="button"
-                        disabled={submittingAction}
-                        onClick={() => handleSkipKnockoutBreak(t.id)}
-                        className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-black bg-amber-400 hover:bg-amber-300 cursor-pointer whitespace-nowrap shrink-0 transition-colors"
-                      >
-                        Bỏ qua nghỉ 30 phút (Admin)
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {/* Visual Knockout Bracket Tree */}
-                {t.knockout_data?.matchups && t.knockout_data.matchups.length > 0 && (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
-                        <Trophy className="w-4 h-4 text-amber-400" />
-                        Cây Phân Nhánh Thi Đấu Loại Trực Tiếp (Bracket)
-                      </h3>
-                      <span className="text-xs text-[var(--text-muted)]">
-                        Thể thức BO5 · Chạm 3 ván thắng đi tiếp
-                      </span>
-                    </div>
-
-                    <div className="overflow-x-auto pb-4">
-                      <div className="flex min-w-max gap-3">
-                        {Array.from({ length: t.knockout_data!.total_rounds }, (_, roundIndex) => {
-                          const round = roundIndex + 1;
-                          const roundMatches = t.knockout_data!.matchups.filter((item: any) => item.round === round);
-                          return (
-                            <section key={round} className="w-64 space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
-                              <h4 className="text-xs font-bold text-amber-300">{getKnockoutRoundName(round, t.knockout_data!.total_rounds)}</h4>
-                              {roundMatches.map((matchup: any) => {
-                                const canLaunch = round === t.knockout_data!.current_round && matchup.player1_id && matchup.player2_id &&
-                                  ['ready', 'waiting_break'].includes(matchup.status) &&
-                                  (user?.isAdmin || user?.id === matchup.player1_id || user?.id === matchup.player2_id);
-                                return (
-                                  <div key={matchup.id} className="space-y-2 rounded-lg border border-[var(--border-subtle)] p-2.5 text-[11px]">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="truncate">{matchup.player1_name || 'Chờ xác định'}</span>
-                                      <strong className="shrink-0 text-amber-300">{matchup.score1} : {matchup.score2}</strong>
-                                      <span className="truncate text-right">{matchup.player2_name || 'Chờ xác định'}</span>
-                                    </div>
-                                    <div className="flex items-center justify-between text-[var(--text-muted)]">
-                                      <span>{matchup.status === 'completed' ? (matchup.winner_id ? 'Đã hoàn tất' : 'Chờ xử lý') : matchup.status === 'in_progress' ? 'Đang thi đấu' : matchup.status === 'waiting_break' ? 'Đang nghỉ' : matchup.status === 'ready' ? 'Sẵn sàng' : 'Chờ cặp trước'}</span>
-                                      {canLaunch && (
-                                        <button type="button" disabled={submittingAction} onClick={() => handleLaunchKnockoutMatch(t.id, matchup.id)} className="rounded-md bg-amber-400 px-2 py-1 font-semibold text-black disabled:opacity-50">
-                                          Bắt đầu ván {matchup.current_game || 1}
-                                        </button>
-                                      )}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </section>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* If registration status: show registered participants */}
-                {t.status === 'registration' && (
-                  <div className="p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-4">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-2">
-                        <Users className="w-4 h-4 text-amber-400" />
-                        Danh sách kỳ thủ đã đăng ký ({detail.participantCount}/{t.max_teams})
-                      </h3>
-                      {user?.isAdmin && (
-                        <button
-                          type="button"
-                          disabled={submittingAction}
-                          onClick={() => handleStartTournamentNow(t.id)}
-                          className="px-4 py-1.5 rounded-xl text-xs font-semibold text-black bg-amber-400 hover:bg-amber-300 disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0 shadow-sm transition-colors"
-                        >
-                          Bốc thăm & Khởi tranh Knockout ngay (Admin)
-                        </button>
-                      )}
-                    </div>
-
-                    {detail.participantCount === 0 ? (
-                      <p className="text-xs text-[var(--text-muted)] py-4 text-center">
-                        Chưa có kỳ thủ nào đăng ký. Hãy là người đầu tiên ghi danh!
-                      </p>
-                    ) : (
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                        {Array.from({ length: t.max_teams }, (_, idx) => {
-                          const entry = myEntry && idx === 0 ? myEntry : null;
-                          const isOccupied = idx < detail.participantCount;
-                          return (
-                            <div
-                              key={idx}
-                              className={`p-3 rounded-xl border text-xs flex items-center gap-2.5 ${
-                                isOccupied
-                                  ? 'border-amber-500/30 bg-amber-500/5 text-[var(--text-primary)]'
-                                  : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)] opacity-40 text-[var(--text-muted)]'
-                              }`}
-                            >
-                              <div className="w-6 h-6 rounded-full bg-amber-500/20 text-amber-400 flex items-center justify-center font-bold text-[11px] shrink-0">
-                                {idx + 1}
-                              </div>
-                              <div className="truncate">
-                                <div className="font-semibold truncate">
-                                  {isOccupied ? (entry ? user?.displayName : `Kỳ thủ #${idx + 1}`) : 'Chỗ trống'}
-                                </div>
-                                <div className="text-[10px] text-[var(--text-muted)]">
-                                  {isOccupied ? 'Đã sẵn sàng' : 'Chờ đăng ký'}
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Match History & Replays */}
-                {myMatches.length > 0 && (
-                  <div className="p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] space-y-4">
-                    <h3 className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-2">
-                      <Film className="w-4 h-4 text-amber-400" />
-                      Lịch sử các ván đấu của bạn trong giải
-                    </h3>
-                    <div className="space-y-2">
-                      {myMatches.map((m: any) => (
-                        <div
-                          key={m.id}
-                          className="flex items-center justify-between p-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] text-xs"
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="font-semibold text-[var(--text-primary)]">
-                              {m.player1} vs {m.player2}
-                            </span>
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                m.winner_id === user?.id
-                                  ? 'bg-green-500/20 text-green-300'
-                                  : m.winner_id
-                                  ? 'bg-red-500/20 text-red-300'
-                                  : 'bg-zinc-500/20 text-zinc-300'
-                              }`}
-                            >
-                              {m.winner_id === user?.id ? 'Thắng' : m.winner_id ? 'Thua' : 'Hòa'}
-                            </span>
-                          </div>
-                          {m.replay_available && (
-                            <button
-                              type="button"
-                              onClick={() => onWatchReplayById(m.id, m.player1, m.player2)}
-                              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-amber-400/20 text-amber-300 hover:bg-amber-400/30 transition-colors cursor-pointer"
-                            >
-                              <Film className="w-3.5 h-3.5" />
-                              Xem Replay
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {showTournamentRules && (
-                  <div
-                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
-                    onClick={(event) => {
-                      if (event.target === event.currentTarget) setShowTournamentRules(false);
-                    }}
-                  >
-                    <section role="dialog" aria-modal="true" aria-labelledby="knockout-rules-heading" className="w-full max-w-3xl max-h-[85vh] overflow-y-auto rounded-2xl border border-amber-500/30 bg-[var(--bg-elevated)] p-5 shadow-2xl sm:p-7">
-                      <div className="flex items-center justify-between gap-4 border-b border-[var(--border-subtle)] pb-4">
-                        <div className="flex items-center gap-3">
-                          <BookOpen className="h-5 w-5 text-amber-400" aria-hidden="true" />
-                          <h3 id="knockout-rules-heading" className="text-lg font-bold text-[var(--text-primary)]">{'Th\u1ec3 l\u1ec7 gi\u1ea3i Knockout'}</h3>
-                        </div>
-                        <button type="button" autoFocus onClick={() => setShowTournamentRules(false)} className="rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]">{'\u0110\u00f3ng'}</button>
-                      </div>
-                      <div className="space-y-5 pt-5 text-sm leading-7 text-[var(--text-secondary)]">
-                        <section className="space-y-2">
-                          <h4 className="font-bold text-amber-300">{'Th\u1ec3 th\u1ee9c gi\u1ea3i \u0111\u1ea5u'}</h4>
-                          <p>{'\u0110\u00e2y l\u00e0 gi\u1ea3i lo\u1ea1i tr\u1ef1c ti\u1ebfp d\u00e0nh cho 4, 8 ho\u1eb7c 16 k\u1ef3 th\u1ee7. Khi BTC b\u1eaft \u0111\u1ea7u, h\u1ec7 th\u1ed1ng b\u1ed1c th\u0103m ng\u1eabu nhi\u00ean v\u00e0 chia nh\u00e1nh thi \u0111\u1ea5u.'}</p>
-                          <p>{'K\u1ef3 th\u1ee7 th\u1eafng c\u1eb7p \u0111\u1ea5u s\u1ebd v\u00e0o v\u00f2ng ti\u1ebfp theo; ng\u01b0\u1eddi thua b\u1ecb lo\u1ea1i. Ng\u01b0\u1eddi th\u1eafng tr\u1eadn chung k\u1ebft l\u00e0 nh\u00e0 v\u00f4 \u0111\u1ecbch.'}</p>
-                          <p>{'M\u1ed7i c\u1eb7p \u0111\u1ea5u g\u1ed3m t\u1ed1i \u0111a 5 v\u00e1n. Ai th\u1eafng 3 v\u00e1n tr\u01b0\u1edbc s\u1ebd th\u1eafng c\u1eb7p v\u00e0 \u0111i ti\u1ebfp.'}</p>
-                        </section>
-                        <section className="space-y-2">
-                          <h4 className="font-bold text-[var(--text-primary)]">{'M\u00e3 tham gia v\u00e0 bot'}</h4>
-                          <p>{'M\u1ed7i gi\u1ea3i c\u00f3 m\u00e3 ri\u00eang. Nh\u1eadp m\u00e3 trong trang gi\u1ea3i \u0111\u1ec3 ghi danh. B\u1ea1n c\u00f3 th\u1ec3 l\u01b0u bot sau khi tham gia, nh\u01b0ng c\u1ea7n c\u00f3 bot \u0111\u00e3 l\u01b0u \u0111\u1ec3 t\u00ecm tr\u1eadn.'}</p>
-                        </section>
-                        <section className="space-y-2">
-                          <h4 className="font-bold text-[var(--text-primary)]">{'Th\u1eddi gian gi\u1eefa c\u00e1c v\u00e1n v\u00e0 v\u00f2ng'}</h4>
-                          <p>{'C\u00e1c v\u00e1n trong c\u00f9ng m\u1ed9t c\u1eb7p c\u00e1ch nhau 10 ph\u00fat \u0111\u1ec3 k\u1ef3 th\u1ee7 tinh ch\u1ec9nh bot. Sau khi ho\u00e0n t\u1ea5t m\u1ed9t v\u00f2ng, gi\u1ea3i ngh\u1ec9 30 ph\u00fat tr\u01b0\u1edbc khi b\u1eaft \u0111\u1ea7u v\u00f2ng ti\u1ebfp theo; BTC c\u00f3 th\u1ec3 b\u1ecf qua th\u1eddi gian ngh\u1ec9.'}</p>
-                        </section>
-                      </div>
-                    </section>
-                  </div>
-                )}
+                </section>
               </div>
-            ) : (
-              <>
-                {/* Tournament Hero & Map Preview */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] items-center">
+            )}
+            {/* Tournament Hero & Map Preview */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] items-center">
               <div className="lg:col-span-8 space-y-4">
                 <div className="space-y-1.5">
                   <div className="text-xs font-medium text-[var(--accent-primary)] tabular-nums">
@@ -856,7 +474,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       ? 'Giai đoạn A · Mở đăng ký & Chạy đà luyện tập'
                       : 'Giải đấu đã khép lại · Đã mở BXH Thách Đấu'}
                     {' · '}
-                    {detail.participantCount}/{t.max_teams} kỳ thủ cá nhân
+                    {detail.participantCount} kỳ thủ cá nhân
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <h2 className="text-2xl font-bold text-[var(--text-primary)] text-balance">
@@ -974,7 +592,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       ) : savedBotVersion <= 0 ? (
                         <button
                           type="button"
-                          onClick={onOpenBotLab}
+                          onClick={() => onOpenBotLab()}
                           className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap shrink-0"
                         >
                           <Code2 className="w-4 h-4" />
@@ -1286,28 +904,6 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   </div>
 
                   <div className="pt-5 space-y-5 text-sm text-[var(--text-secondary)] leading-7">
-                    {t.format === 'knockout' ? (
-                      <div className="space-y-5">
-                        <section className="space-y-2">
-                          <h4 className="text-base font-bold text-amber-300">{'Th\u1ec3 th\u1ee9c Knockout BO5'}</h4>
-                          <p>{'Gi\u1ea3i \u0111\u1ea5u lo\u1ea1i tr\u1ef1c ti\u1ebfp. H\u1ec7 th\u1ed1ng b\u1ed1c th\u0103m ng\u1eabu nhi\u00ean c\u00e1c c\u1eb7p \u0111\u1ea5u khi BTC b\u1eaft \u0111\u1ea7u gi\u1ea3i.'}</p>
-                          <p>{'M\u1ed7i c\u1eb7p \u0111\u1ea5u t\u1ed1i \u0111a 5 v\u00e1n. K\u1ef3 th\u1ee7 th\u1eafng 3 v\u00e1n tr\u01b0\u1edbc s\u1ebd gi\u00e0nh chi\u1ebfn th\u1eafng c\u1eb7p v\u00e0 \u0111i ti\u1ebfp.'}</p>
-                        </section>
-                        <section className="space-y-2">
-                          <h4 className="font-bold text-[var(--text-primary)]">{'Tham gia gi\u1ea3i'}</h4>
-                          <p>{'Nh\u1eadp m\u00e3 ri\u00eang c\u1ee7a gi\u1ea3i trong trang chi ti\u1ebft \u0111\u1ec3 ghi danh. Kh\u00f4ng c\u1ea7n l\u01b0u bot khi tham gia; b\u1ea1n c\u1ea7n l\u01b0u bot tr\u01b0\u1edbc khi t\u00ecm tr\u1eadn.'}</p>
-                        </section>
-                        <section className="space-y-2">
-                          <h4 className="font-bold text-[var(--text-primary)]">{'Lu\u1eadt thi \u0111\u1ea5u'}</h4>
-                          <ul className="list-disc space-y-1 pl-5 marker:text-amber-400">
-                            <li>{'M\u1ed7i v\u00f2ng c\u00f3 th\u1ec3 d\u00f9ng lu\u1eadt b\u00e0n ri\u00eang; l\u1ecbch lu\u1eadt hi\u1ec3n trong chi ti\u1ebft gi\u1ea3i.'}</li>
-                            <li>{'Ngh\u1ec9 10 ph\u00fat gi\u1eefa c\u00e1c v\u00e1n trong c\u00f9ng c\u1eb7p \u0111\u1ea5u.'}</li>
-                            <li>{'Ngh\u1ec9 30 ph\u00fat gi\u1eefa c\u00e1c v\u00f2ng; BTC c\u00f3 th\u1ec3 b\u1ecf qua th\u1eddi gian ngh\u1ec9.'}</li>
-                          </ul>
-                        </section>
-                      </div>
-                    ) : (
-                      <div className="space-y-5">
                     <div className="space-y-2">
                       <h4 className="text-base font-bold text-[var(--accent-primary)]">ĐẤU TRƯỜNG RANK</h4>
                       <p>Một Bot, một hành trình leo hạng. Từ những trận chạy đà đầu tiên đến các cuộc đối đầu quyết liệt qua từng Sprint, mỗi ván đấu là dịp để thử chiến thuật, tìm điểm yếu và chứng minh Bot của bạn có thể tiến xa đến đâu.</p>
@@ -1347,12 +943,8 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
 
                     <p className="border-t border-[var(--border-subtle)] pt-4">Không có trận thua nào loại bạn khỏi cuộc đua. Hãy học từ từng ván đấu, thích nghi với luật mới và tiếp tục nâng cấp Bot — Sprint tiếp theo có thể là lúc bạn tạo nên cú bứt tốc của mùa giải.</p>
                   </div>
-                    )}
-                  </div>
                 </section>
               </div>
-            )}
-              </>
             )}
           </>
         )}
@@ -1361,9 +953,17 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   }
 
   // ── TOURNAMENT DIRECTORY LIST VIEW (1-Click Event Frame) ──────
-  const filteredList = tournaments.filter((t) =>
-    statusFilter === 'all' ? true : t.status === statusFilter
-  );
+  const filteredList = tournaments.filter((tournament) => {
+    if (tournament.format !== 'group_knockout' || tournament.status === 'cancelled') return false;
+    if (statusFilter === 'upcoming') {
+      return ['scheduled', 'grouping', 'group_stage'].includes(tournament.status);
+    }
+    if (statusFilter === 'registration') return tournament.status === 'registration';
+    if (statusFilter === 'in_progress') {
+      return ['group_running', 'group_complete', 'knockout'].includes(tournament.status);
+    }
+    return tournament.status === 'completed';
+  });
 
   return (
     <div className="space-y-6">
@@ -1372,15 +972,16 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
         <div className="flex items-center gap-1 p-1 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border-subtle)]">
           {(
             [
-              { id: 'all', label: 'Tất cả giải' },
-              { id: 'qualifying', label: 'Đang thực chiến' },
-              { id: 'registration', label: 'Mở đăng ký · Chạy đà' },
-              { id: 'completed', label: 'Đã kết thúc' },
+              { id: 'upcoming', label: 'Sắp diễn ra' },
+              { id: 'registration', label: 'Đang mở đăng ký' },
+              { id: 'in_progress', label: 'Đang diễn ra' },
+              { id: 'completed', label: 'Đã Kết Thúc' },
             ] as const
           ).map((tab) => (
             <button
               key={tab.id}
               type="button"
+              aria-pressed={statusFilter === tab.id}
               onClick={() => setStatusFilter(tab.id)}
               className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 statusFilter === tab.id
@@ -1393,307 +994,26 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
           ))}
         </div>
 
-        {user?.isAdmin && !showCreateForm && (
-          <button
-            type="button"
-            onClick={() => setShowCreateForm(true)}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            Tạo giải đấu mới (BTC)
-          </button>
+        {user?.isAdmin && (
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setShowCreateForm(true)}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] transition-colors cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              Tạo giải đấu mới (BTC)
+            </button>
+          </div>
         )}
       </div>
 
-
-
-      {/* Collapsible Admin Create Tournament Panel */}
       {showCreateForm && user?.isAdmin && (
-        <form
+        <TournamentCreationModal
+          submitting={submittingAction}
+          onClose={() => setShowCreateForm(false)}
           onSubmit={handleCreateTournament}
-          className="p-6 rounded-2xl border border-[var(--border-accent)] bg-[var(--bg-elevated)] space-y-5"
-        >
-          <div className="flex items-center justify-between">
-            <h3 className="text-base font-bold text-[var(--text-primary)] flex items-center gap-2">
-              <Plus className="w-5 h-5 text-[var(--accent-primary)]" />
-              Khởi tạo Giải đấu Mới (Dành cho Ban Tổ Chức)
-            </h3>
-            <span className="text-xs text-[var(--text-muted)]">
-              Quyền quản trị viên BTC
-            </span>
-          </div>
-
-          {/* Chọn Loại Thể Thức Giải Đấu */}
-          <div>
-            <label className="block text-xs font-semibold text-[var(--text-primary)] mb-2">
-              Lựa chọn thể thức thi đấu
-            </label>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={() => setNewFormat('knockout')}
-                className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-                  newFormat === 'knockout'
-                    ? 'border-amber-500 bg-amber-500/10 shadow-md ring-1 ring-amber-500/30'
-                    : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:border-[var(--border-accent)]'
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-1.5">
-                  <Trophy className="w-4 h-4 text-amber-400" />
-                  <span className="text-sm font-bold text-[var(--text-primary)]">
-                    Đấu Cúp Loại Trực Tiếp (Knockout Cup)
-                  </span>
-                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">
-                    Khuyên dùng
-                  </span>
-                </div>
-                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-                  Bốc thăm chia nhánh ngẫu nhiên (4, 8 hoặc 16 người) · Đấu chuỗi 5 ván (BO5) phân thắng bại · Nghỉ 10p giữa các ván để sửa bot · Nghỉ 30p giữa các vòng để nghỉ và tinh chỉnh bot.
-                </p>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setNewFormat('ranked_weekly')}
-                className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
-                  newFormat === 'ranked_weekly'
-                    ? 'border-[var(--accent-primary)] bg-[var(--bg-panel)] shadow-md ring-1 ring-[var(--accent-primary)]/30'
-                    : 'border-[var(--border-subtle)] bg-[var(--bg-canvas)] hover:border-[var(--border-accent)]'
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-1.5">
-                  <Award className="w-4 h-4 text-[var(--accent-primary)]" />
-                  <span className="text-sm font-bold text-[var(--text-primary)]">
-                    Đấu Trường Thăng Hạng Rank (Ranked Sprint)
-                  </span>
-                </div>
-                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-                  Đấu xếp hạng phân tầng (Đồng → Bạc → Vàng → Cao Thủ → Thách Đấu) · Reset hạng theo chu kỳ 4 Sprint tuần.
-                </p>
-              </button>
-            </div>
-          </div>
-
-          {/* Tên & Mô tả giải đấu */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="md:col-span-2">
-              <label className="block text-xs text-[var(--text-secondary)] mb-1">Tên giải đấu</label>
-              <input
-                type="text"
-                required
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder={
-                  newFormat === 'knockout'
-                    ? 'Ví dụ: Cúp Vô Địch AI Đột Phá Mùa 1'
-                    : 'Ví dụ: Đấu Trường Trăng Máu Mùa 2'
-                }
-                className="w-full px-3.5 py-2 text-sm rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-[var(--text-secondary)] mb-1">
-                Thời gian mở đăng ký (ngày)
-              </label>
-              <input
-                type="number"
-                min={1}
-                max={30}
-                value={regDays}
-                onChange={(e) => setRegDays(Number(e.target.value))}
-                className="w-full px-3.5 py-2 text-sm font-mono rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs text-[var(--text-secondary)] mb-1">
-              Thể lệ & mô tả giải đấu
-            </label>
-            <textarea
-              rows={2}
-              value={newDesc}
-              onChange={(e) => setNewDesc(e.target.value)}
-              placeholder="Mô tả ngắn gọn điều kiện tham dự, phần thưởng và lưu ý…"
-              className="w-full px-3.5 py-2 text-sm rounded-xl bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-            />
-          </div>
-
-          {/* Phần Cấu hình Riêng theo Thể Thức */}
-          {newFormat === 'knockout' ? (
-            <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-[var(--text-primary)] mb-0.5">
-                    Quy mô số kỳ thủ tham gia (Loại trực tiếp)
-                  </label>
-                  <p className="text-[11px] text-[var(--text-muted)]">
-                    Hệ thống sẽ tự động bốc thăm ngẫu nhiên các cặp đấu khi BTC bấm bắt đầu
-                  </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  {([8, 16, 4] as const).map((sz) => (
-                    <button
-                      key={sz}
-                      type="button"
-                      onClick={() => setKnockoutSize(sz)}
-                      className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
-                        knockoutSize === sz
-                          ? 'bg-amber-500 text-black border-amber-400 font-bold'
-                          : 'bg-[var(--bg-canvas)] text-[var(--text-secondary)] border-[var(--border-subtle)] hover:text-[var(--text-primary)]'
-                      }`}
-                    >
-                      {sz} Kỳ thủ ({Math.log2(sz)} vòng)
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Thông số quy chuẩn Knockout */}
-              <div className="space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
-                <div className="flex items-center gap-1.5 text-xs font-bold text-[var(--text-primary)]">
-                  <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                  Chọn luật cho từng vòng đấu
-                </div>
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  {Array.from({ length: Math.log2(knockoutSize) }, (_, roundIndex) => (
-                    <label key={roundIndex} className="space-y-1 text-[11px]">
-                      <span className="block font-semibold text-amber-400">
-                        Vòng {roundIndex + 1}: {getKnockoutRoundName(roundIndex + 1, Math.log2(knockoutSize))}
-                      </span>
-                      <select
-                        value={knockoutRules[roundIndex] || 'standard'}
-                        onChange={(event) => {
-                          const next = [...knockoutRules];
-                          next[roundIndex] = event.target.value;
-                          setKnockoutRules(next);
-                        }}
-                        className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-[var(--text-primary)]"
-                      >
-                        {Object.values(SPRINT_RULE_PRESETS).map((preset) => (
-                          <option key={preset.id} value={preset.id}>{preset.title}</option>
-                        ))}
-                      </select>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-[11px] text-[var(--text-secondary)]">
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)]">
-                  <Swords className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span><strong>Best of 5:</strong> Đấu tối đa 5 ván, chạm 3 ván thắng là thắng cặp</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)]">
-                  <Clock className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span><strong>Nghỉ 10 phút/ván:</strong> Kỳ thủ cải tiến bot sau mỗi ván đấu</span>
-                </div>
-                <div className="flex items-center gap-2 p-2 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)]">
-                  <FastForward className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span><strong>Nghỉ 30 phút/vòng:</strong> Thời gian nghỉ giữa các vòng</span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            /* Ranked Weekly Settings */
-            <div className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                    Số kỳ thủ tối đa
-                  </label>
-                  <input
-                    type="number"
-                    min={2}
-                    max={256}
-                    value={newMaxPlayers}
-                    onChange={(e) => setNewMaxPlayers(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 font-mono rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                    Số Sprint Thực chiến (7 ngày/Sprint)
-                  </label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={52}
-                    value={sprintCount}
-                    onChange={(e) => {
-                      const nextCount = Math.min(
-                        52,
-                        Math.max(1, Math.floor(Number(e.target.value) || 1))
-                      );
-                      setSprintCount(nextCount);
-                      setSprintSchedule((current) =>
-                        Array.from(
-                          { length: nextCount },
-                          (_, index) =>
-                            current[index] ||
-                            DEFAULT_SPRINT_SCHEDULE[index % DEFAULT_SPRINT_SCHEDULE.length]
-                        )
-                      );
-                    }}
-                    className="w-full px-3 py-1.5 font-mono rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <div className="text-xs font-semibold text-[var(--text-primary)] mb-2">
-                  Chọn thể lệ riêng cho từng Sprint (7 ngày/Sprint)
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {Array.from({ length: sprintCount }, (_, sprintIdx) => (
-                    <div key={sprintIdx}>
-                      <label className="block text-[11px] text-[var(--text-muted)] mb-1">
-                        Thể lệ Sprint {sprintIdx + 1}
-                      </label>
-                      <select
-                        value={sprintSchedule[sprintIdx]}
-                        onChange={(e) => {
-                          const copy = [...sprintSchedule];
-                          copy[sprintIdx] = e.target.value;
-                          setSprintSchedule(copy);
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
-                      >
-                        {Object.values(SPRINT_RULE_PRESETS).map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.title}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2.5 pt-2 border-t border-[var(--border-subtle)]">
-            <button
-              type="button"
-              onClick={() => setShowCreateForm(false)}
-              className="px-4 py-2 rounded-xl text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer whitespace-nowrap"
-            >
-              Hủy
-            </button>
-            <button
-              type="submit"
-              disabled={submittingAction}
-              className="px-5 py-2 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap"
-            >
-              {submittingAction
-                ? 'Đang khởi tạo…'
-                : newFormat === 'knockout'
-                ? 'Công bố Giải Đấu Cúp Knockout'
-                : 'Công bố Giải đấu Rank'}
-            </button>
-          </div>
-        </form>
+        />
       )}
 
       {/* Tournament cards open details; registration happens inside the detail view. */}
@@ -1704,44 +1024,34 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
           {filteredList.map((t) => {
-            const endDate = new Date(t.ends_at).toLocaleDateString('vi-VN');
+            const eventDate = new Date(
+              t.format === 'group_knockout'
+                ? t.tournament_starts_at || t.registration_closes_at
+                : t.ends_at
+            ).toLocaleString('vi-VN', { dateStyle: 'medium', timeStyle: 'short' });
+            const statusLabel = t.status === 'group_stage'
+              ? `${t.group_count || 0} bảng · Chờ khởi chạy`
+              : GROUP_TOURNAMENT_STATUS_LABELS[t.status] || t.status;
             return (
               <div
                 key={t.id}
                 role="button"
                 tabIndex={0}
-                onClick={() => setSelectedId(t.id)}
+                onClick={() => selectTournament(t.id)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
-                    setSelectedId(t.id);
+                    selectTournament(t.id);
                   }
                 }}
                 aria-label={`Mở sự kiện ${t.name}`}
                 className="group p-6 rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-col justify-between space-y-5 hover:border-[var(--border-accent)] hover:bg-[var(--bg-panel)]/55 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-primary)] transition-colors cursor-pointer text-left"
               >
                 <div className="space-y-2.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                        t.format === 'knockout'
-                          ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                          : 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                      }`}
-                    >
-                      {t.format === 'knockout' ? '🏆 Cúp Knockout BO5' : 'Đấu Trường Rank'}
-                    </span>
-                    <span className="text-xs font-medium text-[var(--text-secondary)] tabular-nums">
-                      {t.status === 'qualifying'
-                        ? t.format === 'knockout'
-                          ? `Vòng ${t.knockout_data?.current_round || 1}/${t.knockout_data?.total_rounds || 3}`
-                          : `Thực Chiến · Sprint ${t.current_week || 1}/${t.total_sprints}`
-                        : t.status === 'registration'
-                        ? 'Mở Đăng Ký'
-                        : 'Đã Kết Thúc'}
-                      {' · '}
-                      {t.participant_count || 0}/{t.max_teams} kỳ thủ
-                    </span>
+                  <div className="text-xs font-medium text-[var(--accent-primary)] tabular-nums">
+                    {statusLabel}
+                    {' · '}
+                    {t.participant_count || 0} đã đăng ký
                   </div>
 
                   <h3 className="text-xl font-bold text-[var(--text-primary)] group-hover:text-[var(--accent-primary)] transition-colors">
@@ -1750,31 +1060,12 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   <p className="text-sm text-[var(--text-secondary)] leading-relaxed line-clamp-3">
                     {t.description}
                   </p>
-                  {user?.isAdmin && t.format === 'knockout' && t.join_code && (
-                    <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                      <div>
-                        <div className="text-[10px] font-semibold text-[var(--text-muted)]">Mã tham gia giải này</div>
-                        <div className="font-mono text-base font-bold tracking-[0.2em] text-amber-300">{t.join_code}</div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          navigator.clipboard.writeText(t.join_code!);
-                          notify('Đã sao chép mã giải.', 'success');
-                        }}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-amber-400 px-3 py-2 text-xs font-semibold text-black hover:bg-amber-300"
-                      >
-                        <Copy className="h-3.5 w-3.5" /> Sao chép
-                      </button>
-                    </div>
-                  )}
                 </div>
 
                 <div className="pt-4 border-t border-[var(--border-subtle)] flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--text-muted)] tabular-nums">
                   <div className="flex items-center gap-1.5">
                     <Calendar className="w-3.5 h-3.5" />
-                    <span>Kết thúc: {endDate}</span>
+                    <span>{t.format === 'group_knockout' ? 'Bắt đầu: ' : 'Kết thúc: '}{eventDate}</span>
                     {t.rules_json?.title && (
                       <>
                         <span aria-hidden="true">·</span>
@@ -1782,13 +1073,144 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       </>
                     )}
                   </div>
-                  <span className="text-[var(--text-secondary)] group-hover:text-[var(--text-primary)] transition-colors">
-                    Nhấn vào khung sự kiện để xem chi tiết
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {t.status === 'registration' && (
+                      <button
+                        type="button"
+                        disabled={submittingAction}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleRegister(t.id);
+                        }}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent-primary)] px-3 py-1.5 font-semibold text-white hover:bg-[var(--accent-primary-hover)] disabled:opacity-50"
+                      >
+                        Đăng ký tham gia
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setRulesPreviewTournament(t);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-accent)] px-3 py-1.5 text-[var(--accent-primary)] hover:bg-[var(--bg-hover)]"
+                    >
+                      <BookOpen className="h-3.5 w-3.5" aria-hidden="true" />
+                      Xem thể lệ thi đấu
+                    </button>
+                  </div>
                 </div>
               </div>
             );
           })}
+        </div>
+      )}
+
+      {rulesPreviewTournament && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setRulesPreviewTournament(null);
+          }}
+        >
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="card-tournament-rules-heading"
+            className="w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-5 sm:p-7 shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[var(--border-subtle)] pb-4">
+              <div>
+                <h3 id="card-tournament-rules-heading" className="text-lg font-bold text-[var(--text-primary)]">
+                  Thể lệ giải: {rulesPreviewTournament.name}
+                </h3>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">Các mốc thời gian và luật thi đấu đã công bố</p>
+              </div>
+              <button
+                type="button"
+                autoFocus
+                onClick={() => setRulesPreviewTournament(null)}
+                className="rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-hover)]"
+              >
+                Đóng
+              </button>
+            </div>
+            <div className="mt-5 space-y-4 text-sm text-[var(--text-secondary)]">
+              {rulesPreviewTournament.description && <p className="whitespace-pre-wrap">{rulesPreviewTournament.description}</p>}
+              <dl className="grid gap-3 sm:grid-cols-3">
+                {[
+                  ['Mở đăng ký', rulesPreviewTournament.registration_opens_at],
+                  ['Đóng đăng ký', rulesPreviewTournament.registration_closes_at],
+                  [rulesPreviewTournament.format === 'group_knockout' ? 'Bắt đầu giải' : 'Kết thúc giải',
+                    rulesPreviewTournament.tournament_starts_at || rulesPreviewTournament.ends_at],
+                ].filter((entry) => Boolean(entry[1])).map(([label, value]) => (
+                  <div key={label} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                    <dt className="text-xs text-[var(--text-muted)]">{label}</dt>
+                    <dd className="mt-1 font-semibold text-[var(--text-primary)]">
+                      {new Date(value as string).toLocaleString('vi-VN', { dateStyle: 'medium', timeStyle: 'short' })}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              {rulesPreviewTournament.format === 'group_knockout' ? (
+                <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(250px,0.8fr)]">
+                  <div className="space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
+                    <p>Bàn đấu 9 × 9, có {rulesPreviewTournament.rules_json?.blockedCells?.length || 0} ô chướng ngại đối xứng.</p>
+                    <p>
+                      Luật xử lý: {rulesPreviewTournament.rules_json?.moveLimitRule === 'standard'
+                        ? 'cơ bản, tiếp tục đến khi có bên thắng hoặc hòa'
+                        : rulesPreviewTournament.rules_json?.moveLimitRule === 'goal-distance'
+                        ? 'sau 25 nước, tính điểm theo khoảng cách đến ô đích'
+                        : rulesPreviewTournament.rules_json?.moveLimitRule === 'captured-points'
+                        ? 'sau 25 nước, tính điểm quân đã ăn'
+                        : 'sau 25 nước, đếm số quân còn lại'}
+                      {rulesPreviewTournament.rules_json?.moveLimitRule === 'captured-points' && (
+                        <> (Đấm {rulesPreviewTournament.rules_json?.capturedPieceValues?.rock || 1}, Lá {rulesPreviewTournament.rules_json?.capturedPieceValues?.paper || 2}, Kéo {rulesPreviewTournament.rules_json?.capturedPieceValues?.scissors || 3} điểm)</>
+                      )}
+                    </p>
+                    {rulesPreviewTournament.rules_json?.moveLimitRule === 'standard' && (
+                      <>
+                        <p>Thắng: phe Cam chiếm ô i9, phe Tím chiếm ô a1 hoặc diệt sạch 1 trong 3 hệ linh vật của đối phương.</p>
+                        <p>Hòa: lặp thế cờ 3 lần, 50 nước không ăn quân hoặc bên tới lượt hết nước đi hợp lệ.</p>
+                        <p>Thoát trận, treo máy, ngâm gói xác nhận ACK hoặc gửi sai mã băm SHA-256 sẽ bị xử thua kỹ thuật ngay lập tức.</p>
+                      </>
+                    )}
+                    <p>Chia bảng ngẫu nhiên và cân bằng; vòng bảng đấu hai lượt. Thắng 3 điểm, hòa 1 điểm, thua 0 điểm; hai đấu thủ đầu bảng vào vòng knock-out.</p>
+                    <p>Knock-out theo nhánh nhất bảng gặp nhì bảng; trận hòa sẽ được đấu lại.</p>
+                  </div>
+                  <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-3">
+                    <h4 className="mb-3 text-center text-xs font-semibold text-[var(--text-primary)]">
+                      Bản đồ áp dụng · Bàn 9×9
+                    </h4>
+                    <Board9x9
+                      state={OTTGameEngine.createGame(
+                        20261031,
+                        9,
+                        rulesPreviewTournament.rules_json
+                      )}
+                      themeMode={themeMode}
+                      size="mini"
+                      showCoordinates={false}
+                      showLegend={false}
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-canvas)] p-4">
+                  <p className="font-semibold text-[var(--text-primary)]">{rulesPreviewTournament.rules_json?.title || 'Thể lệ giải Sprint'}</p>
+                  <p className="mt-2">
+                    Luật các Sprint: {(rulesPreviewTournament.rules_schedule || [])
+                      .map((ruleId, index) => {
+                        const preset = SPRINT_RULE_PRESETS[ruleId];
+                        return `${index + 1}. ${preset?.title || ruleId}${preset?.subtitle ? ` — ${preset.subtitle}` : ''}`;
+                      })
+                      .join(' · ') || 'theo cấu hình của Ban Tổ Chức'}.
+                  </p>
+                  <p className="mt-2">Đăng ký tài khoản tham gia; kết quả và thứ hạng được tính theo thể thức giải Sprint.</p>
+                </div>
+              )}
+            </div>
+          </section>
         </div>
       )}
     </div>

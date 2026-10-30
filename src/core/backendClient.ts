@@ -157,13 +157,16 @@ export interface KnockoutDataSummary {
 export interface TournamentItem {
   id: string;
   name: string;
-  format: 'ranked_weekly' | 'knockout' | string;
+  format: 'ranked_weekly' | 'knockout' | 'group_knockout' | string;
   join_code?: string | null;
   description: string;
-  status: 'registration' | 'qualifying' | 'completed';
+  status: 'scheduled' | 'registration' | 'grouping' | 'group_stage' | 'group_running' | 'group_complete' | 'knockout' | 'qualifying' | 'completed' | 'cancelled';
+  registration_opens_at?: string;
   registration_closes_at: string;
+  tournament_starts_at?: string;
   ends_at: string;
   max_teams: number;
+  group_count?: number | null;
   current_week: number;
   total_sprints: number;
   week_started_at: string | null;
@@ -392,17 +395,10 @@ export class BackendClient {
     return this.request(`/api/tournaments/${encodeURIComponent(id)}`, 'GET', undefined, Boolean(this.token));
   }
 
-  async createTournament(payload: {
-    name: string;
-    format: string;
-    description: string;
-    registrationDays: number;
-    sprintCount: number;
-    maxTeams: number;
-    sprintRules: string[];
-    registrationClosesAt?: string;
-    endsAt?: string;
-  }) {
+  async createTournament(payload: any) {
+    if (payload.format === 'group_knockout' || payload.moveLimitRule !== undefined || payload.registrationOpensAt !== undefined) {
+      return this.request('/api/tournaments', 'POST', payload, true);
+    }
     const now = Date.now();
     const regDays = Math.max(1, Number(payload.registrationDays) || 3);
     const regClose =
@@ -419,6 +415,30 @@ export class BackendClient {
       endsAt: ends,
     };
     return this.request('/api/tournaments', 'POST', body, true);
+  }
+
+  async createTournamentGroups(id: string, groupCount: number) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/groups`, 'POST', { groupCount }, true);
+  }
+
+  async startTournamentGroups(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/start-groups`, 'POST', {}, true);
+  }
+
+  async startTournamentKnockout(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/start-knockout`, 'POST', {}, true);
+  }
+
+  async cancelTournament(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/cancel`, 'POST', {}, true);
+  }
+
+  async cancelAllTournaments() {
+    return this.request('/api/tournaments/cancel-all', 'POST', {}, true);
+  }
+
+  async runAutoTournamentFixtures(id: string) {
+    return this.request(`/api/tournaments/${encodeURIComponent(id)}/run-auto`, 'POST', {}, true);
   }
 
   async startTournament(id: string) {
