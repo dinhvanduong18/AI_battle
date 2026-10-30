@@ -1619,39 +1619,6 @@ export async function startServer(options: ServerStartOptions = {}) {
     }
   });
 
-  app.post('/api/auth/bot-token', async (req: Request, res: Response) => {
-    try {
-      if (req.headers['x-bypass-maintenance'] !== 'ott-admin-2026') {
-        res.status(403).json({ error: 'Forbidden' });
-        return;
-      }
-      const botIndex = Math.max(1, Math.min(5000, Number(req.body?.botIndex) || 1));
-      const email = `bot.v${botIndex}@ottv2.local`;
-      const displayName = `AI_Bot_${botIndex}`;
-      let user = findUserByEmail(email);
-      if (!user) {
-        user = {
-          id: randomUUID(),
-          email,
-          password_hash: 'scrypt$dummy_salt$dummy_hash$1024',
-          display_name: displayName,
-          avatar_id: 'pumpkin',
-          elo: 1200,
-          is_admin: false,
-          active_bot_version: 1,
-          elo_peak: 1200,
-          created_at: new Date().toISOString(),
-        };
-        db.users.push(user);
-        indexUser(user);
-        saveDb();
-      }
-      res.json({ token: createToken(user), user: publicUser(user) });
-    } catch (err: any) {
-      res.status(err.status || 500).json({ error: err.message || 'Lỗi cấp token bot.' });
-    }
-  });
-
   app.get('/api/me', (req: Request, res: Response) => {
     try {
       const user = getAuthUser(req);
