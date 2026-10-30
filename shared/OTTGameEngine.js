@@ -122,7 +122,16 @@
 
         if (state.rules) {
             const rules = state.rules;
-            const ruleKey = `${rules.id || ''}|${rules.week || 0}|${(rules.blockedCells || []).join(',')}`;
+            const ruleKey = `${rules.id || ''}|${rules.week || 0}|${(rules.blockedCells || []).join(',')}` +
+                (rules.moveLimit
+                    ? `|${rules.moveLimit}|${rules.moveLimitRule || ''}` +
+                        (rules.moveLimitRule === 'captured-points'
+                            ? `|${rules.capturedPieceValues?.rock || 0},${rules.capturedPieceValues?.paper || 0},${rules.capturedPieceValues?.scissors || 0}`
+                            : '')
+                    : '') +
+                (state.rules?.moveLimitRule === 'captured-points'
+                    ? `|${state.capturedPiecePoints?.[1] || 0},${state.capturedPiecePoints?.[2] || 0}`
+                    : '');
             for (let i = 0; i < ruleKey.length; i++) {
                 hash ^= ruleKey.charCodeAt(i);
                 hash = Math.imul(hash, 0x01000193);
@@ -172,7 +181,16 @@
                 week: Number(rules.week) || 1,
                 rows: Number(rules.rows) || ROWS,
                 cols: Number(rules.cols) || 9,
-                blockedCells: [...new Set((rules.blockedCells || []).filter(index => Number.isInteger(index) && index >= 0 && index < TOTAL_CELLS))].sort((a, b) => a - b)
+                blockedCells: [...new Set((rules.blockedCells || []).filter(index => Number.isInteger(index) && index >= 0 && index < TOTAL_CELLS))].sort((a, b) => a - b),
+                ...(Number.isInteger(rules.moveLimit) && rules.moveLimit > 0 ? { moveLimit: rules.moveLimit } : {}),
+                ...(['standard', 'remaining-pieces', 'goal-distance', 'captured-points'].includes(rules.moveLimitRule) ? { moveLimitRule: rules.moveLimitRule } : {}),
+                ...(rules.moveLimitRule === 'captured-points' ? {
+                    capturedPieceValues: {
+                        rock: Number(rules.capturedPieceValues?.rock) || 1,
+                        paper: Number(rules.capturedPieceValues?.paper) || 2,
+                        scissors: Number(rules.capturedPieceValues?.scissors) || 3
+                    }
+                } : {})
             } : null;
             const blocked = new Set(normalizedRules?.blockedCells || []);
             if (blocked.has(SPECIAL_A1_INDEX) || blocked.has(SPECIAL_I9_INDEX)) throw new Error('Luật tuần không được chặn hai ô mục tiêu chiến thắng.');
@@ -220,6 +238,7 @@
                 winner: null,
                 drawReason: null,
                 noCapturePlies: 0,
+                capturedPiecePoints: { 1: 0, 2: 0 },
                 positionCounts: { [initialPosKey]: 1 },
                 lastMove: null, // { from, to, isAttack, piece, captured }
                 rules: normalizedRules,
@@ -372,6 +391,14 @@
             let drawReason = null;
             const nextTurn = winner ? state.turn : (state.turn === 1 ? 2 : 1);
             const nextNoCapturePlies = isAttack ? 0 : ((state.noCapturePlies || 0) + 1);
+            const nextCapturedPiecePoints = {
+                1: state.capturedPiecePoints?.[1] || 0,
+                2: state.capturedPiecePoints?.[2] || 0
+            };
+            if (isAttack && state.rules?.moveLimitRule === 'captured-points') {
+                nextCapturedPiecePoints[state.turn] +=
+                    state.rules.capturedPieceValues?.[PIECE_TYPE_NAMES[captured]] || 0;
+            }
             const nextPositionCounts = { ...(state.positionCounts || {}) };
 
             if (winner === null) {
@@ -396,6 +423,28 @@
                     drawReason = 'fifty-move-rule';
                 }
             }
+            if (winner === null && state.rules?.moveLimit && nextStepCount >= state.rules.moveLimit) {
+                const score = [0, 0, 0];
+                if (state.rules.moveLimitRule === 'goal-distance') {
+                    for (let index = 0; index < TOTAL_CELLS; index++) {
+                        const pieceOwner = nextBoard[index] ? (nextBoard[index] <= 3 ? 1 : 2) : 0;
+                        if (!pieceOwner) continue;
+                        const target = pieceOwner === 1 ? SPECIAL_I9_INDEX : SPECIAL_A1_INDEX;
+                        const distance = Math.abs(Math.floor(index / 9) - Math.floor(target / 9)) +
+                            Math.abs((index % 9) - (target % 9));
+                        score[pieceOwner] -= distance;
+                    }
+                } else if (state.rules.moveLimitRule === 'captured-points') {
+                    score[1] = nextCapturedPiecePoints[1];
+                    score[2] = nextCapturedPiecePoints[2];
+                } else {
+                    const counts = this.countPieces(nextBoard);
+                    score[1] = counts[1].total;
+                    score[2] = counts[2].total;
+                }
+                winner = score[1] === score[2] ? 0 : (score[1] > score[2] ? 1 : 2);
+                if (winner === 0) drawReason = 'tournament-score-tie';
+            }
 
             return {
                 seed: state.seed,
@@ -406,6 +455,7 @@
                 winner: winner,
                 drawReason: drawReason,
                 noCapturePlies: nextNoCapturePlies,
+                capturedPiecePoints: nextCapturedPiecePoints,
                 positionCounts: nextPositionCounts,
                 lastMove: lastMoveInfo,
                 rules: state.rules || null,
@@ -503,6 +553,10 @@
                 winner: state.winner === 0 ? 0 : (state.winner || null),
                 drawReason: state.drawReason || null,
                 noCapturePlies: state.noCapturePlies || 0,
+                capturedPiecePoints: {
+                    1: state.capturedPiecePoints?.[1] || 0,
+                    2: state.capturedPiecePoints?.[2] || 0
+                },
                 positionCounts: state.positionCounts ? { ...state.positionCounts } : undefined,
                 lastMove: state.lastMove,
                 rules: state.rules || null,
@@ -632,6 +686,10 @@
                 winner: obj.winner === 0 ? 0 : (obj.winner || null),
                 drawReason: obj.drawReason || null,
                 noCapturePlies: Number(obj.noCapturePlies) || 0,
+                capturedPiecePoints: {
+                    1: Number(obj.capturedPiecePoints?.[1]) || 0,
+                    2: Number(obj.capturedPiecePoints?.[2]) || 0
+                },
                 positionCounts: obj.positionCounts ? { ...obj.positionCounts } : { [initialPosKey]: 1 },
                 lastMove: obj.lastMove || null,
                 rules: obj.rules || null,
