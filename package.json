@@ -14,7 +14,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "OTTV2_SKIP_AUTOSTART=1 tsx --test --test-concurrency=1 server/test/*.test.js",
+    "test": "OTTV2_SKIP_AUTOSTART=1 tsx --test server/test/*.test.js",
     "test:load": "node scripts/stress-test.mjs",
     "test:load:ws": "node scripts/stress-test.mjs --ws-only",
     "test:load:http": "node scripts/stress-test.mjs --http-only",
