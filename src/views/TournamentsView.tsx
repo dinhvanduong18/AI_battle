@@ -19,6 +19,10 @@ import {
   Trophy,
   Users,
   XCircle,
+  Skull,
+  Flame,
+  AlertTriangle,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   OTTGameEngine,
@@ -32,6 +36,8 @@ import {
 } from '../core/backendClient';
 import { Board9x9 } from '../components/Board9x9';
 import { useToast } from '../components/ToastProvider';
+import { RANK_BOSS_CONFIG, type RankBossInfo } from '../core/tournamentBosses';
+import type { SavedBotVersionItem } from '../core/backendClient';
 
 interface TournamentsViewProps {
   user: BackendUser | null;
@@ -122,6 +128,13 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   const [queuingTournament, setQueuingTournament] = useState(false);
   const [showTournamentRules, setShowTournamentRules] = useState(false);
   const [showRankDetails, setShowRankDetails] = useState(false);
+  const [challengingBoss, setChallengingBoss] = useState(false);
+  const [showBossModal, setShowBossModal] = useState(false);
+  const [botVersionsList, setBotVersionsList] = useState<SavedBotVersionItem[]>([]);
+  const [currentActiveVersion, setCurrentActiveVersion] = useState<number>(savedBotVersion || 0);
+  const [previewBot, setPreviewBot] = useState<SavedBotVersionItem | null>(null);
+  const [selectingBotVersion, setSelectingBotVersion] = useState(false);
+  const [showBotVersionManager, setShowBotVersionManager] = useState(false);
   const [joinCode, setJoinCode] = useState('');
   const [knockoutRules, setKnockoutRules] = useState<string[]>([
     'standard',
@@ -147,6 +160,21 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       onClearInitialSelectedId?.();
     }
   }, [initialSelectedId, onClearInitialSelectedId]);
+
+  const loadUserBotVersions = useCallback(async () => {
+    if (!user) return;
+    try {
+      const data = await backendClient.getMyBotVersions();
+      setBotVersionsList(data.versions);
+      setCurrentActiveVersion(data.activeVersion || savedBotVersion || 0);
+    } catch {
+      // ignore
+    }
+  }, [user, savedBotVersion]);
+
+  useEffect(() => {
+    loadUserBotVersions();
+  }, [loadUserBotVersions]);
 
   const loadTournamentDetail = useCallback(
     async (id: string) => {
@@ -268,7 +296,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       setJoinCode('');
       setSelectedId(result.tournamentId);
       await loadTournamentDetail(result.tournamentId);
-      notify(result.alreadyRegistered ? 'B\u1ea1n \u0111\u00e3 tham gia gi\u1ea3i Knockout n\u00e0y.' : '?? tham gia gi?i Knockout th?nh c?ng!', 'success');
+      notify(result.alreadyRegistered ? 'B\u1ea1n \u0111\u00e3 tham gia gi\u1ea3i Knockout n\u00e0y.' : 'Tham gia gi\u1ea3i Knockout th\u00e0nh c\u00f4ng!', 'success');
     } catch (err: any) {
       notify(err.message || 'Kh\u00f4ng th\u1ec3 tham gia gi\u1ea3i b\u1eb1ng m\u00e3 n\u00e0y.', 'error');
     } finally {
@@ -301,7 +329,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       await loadTournamentDetail(tournamentId);
       const nextW = res?.tournament?.current_week || '';
       notify(
-        `Đã chuyển sang Sprint ${nextW}, đổi bản đồ mới và xét lại hạng theo tỷ lệ ×2/3!`,
+        `Đã chuyển sang Sprint ${nextW}, đổi bản đồ mới và áp dụng công thức rerank thứ hạng!`,
         'success'
       );
     } catch (err: any) {
@@ -351,6 +379,31 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     }
   };
 
+
+  const handleSelectBotVersion = async (version: number) => {
+    setSelectingBotVersion(true);
+    try {
+      const res = await backendClient.selectBotVersion(version);
+      setCurrentActiveVersion(res.activeVersion);
+      await loadUserBotVersions();
+      notify(`Đã chọn phiên bản v${version} làm Bot thi đấu chính thức!`, 'success');
+    } catch (err: any) {
+      notify(err.message || 'Không thể chọn phiên bản bot.', 'error');
+    } finally {
+      setSelectingBotVersion(false);
+    }
+  };
+
+  const handleChallengeBoss = async (tournamentId: string) => {
+    try {
+      setChallengingBoss(true);
+      await backendClient.findBossMatch(tournamentId);
+      setShowBossModal(false);
+    } catch (err: any) {
+      setChallengingBoss(false);
+      notify(err.message || 'Không thể bắt đầu trận đấu Boss.', 'error');
+    }
+  };
 
   const handleFindMatch = async (tournamentId: string) => {
     if (!user) {
@@ -455,7 +508,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-primary)] hover:border-[var(--accent-primary)] disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                     >
                       <FastForward className="w-3.5 h-3.5 text-[var(--accent-primary)]" />
-                      BTC: Sang Sprint tiếp theo (×2/3)
+                      BTC: Sang Sprint tiếp theo (Rerank)
                     </button>
                   )}
                   <button
@@ -894,6 +947,11 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                                 ? 'Hạng bí ẩn'
                                 : `${rk.starsToPromote} Sao`}
                             </div>
+                            {RANK_BOSS_CONFIG[rk.tier] && (
+                              <div className="text-[10px] text-purple-400 font-medium truncate flex items-center gap-0.5">
+                                <Skull className="w-2.5 h-2.5 inline" /> {RANK_BOSS_CONFIG[rk.tier].difficultyLabel}
+                              </div>
+                            )}
                           </div>
                         </>
                       );
@@ -915,6 +973,102 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   })}
                 </div>
 
+                {/* Bot Versions Selection Strip */}
+                {user && (
+                  <div className="p-3.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-panel)] space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Code2 className="w-4 h-4 text-[var(--accent-primary)]" />
+                        <span className="text-xs font-bold text-[var(--text-primary)]">
+                          Phiên bản Bot thi đấu:
+                        </span>
+                        {currentActiveVersion > 0 ? (
+                          <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> v{currentActiveVersion} (Đang chọn)
+                          </span>
+                        ) : (
+                          <span className="text-xs text-amber-400 font-medium">Chưa lưu bot</span>
+                        )}
+                        <span className="text-[11px] text-[var(--text-muted)] hidden sm:inline">
+                          (Bot lưu gần nhất sẽ mặc định được lấy đi đấu)
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {botVersionsList.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setShowBotVersionManager(!showBotVersionManager)}
+                            className="px-2.5 py-1 rounded-lg text-xs font-medium border border-[var(--border-accent)] bg-[var(--bg-canvas)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+                          >
+                            {showBotVersionManager ? 'Thu gọn' : `Xem ${botVersionsList.length} phiên bản đã lưu`}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={onOpenBotLab}
+                          className="px-2.5 py-1 rounded-lg text-xs font-medium text-[var(--accent-primary)] hover:underline cursor-pointer"
+                        >
+                          Mở Phòng Lab để viết/lưu bot mới →
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Danh sách phiên bản chi tiết */}
+                    {showBotVersionManager && botVersionsList.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-[var(--border-subtle)] space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                        {botVersionsList.map((bv, idx) => {
+                          const isCurrent = bv.version === currentActiveVersion;
+                          const isLatest = idx === 0;
+                          return (
+                            <div
+                              key={bv.version}
+                              className={`flex items-center justify-between p-2 rounded-lg text-xs transition-colors ${
+                                isCurrent
+                                  ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-200'
+                                  : 'bg-[var(--bg-canvas)] border border-[var(--border-subtle)] text-[var(--text-secondary)]'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-[var(--text-primary)] font-mono">v{bv.version}</span>
+                                {isLatest && (
+                                  <span className="px-1.5 py-0.2 rounded text-[10px] bg-blue-500/20 text-blue-300 font-medium">
+                                    Lưu gần nhất
+                                  </span>
+                                )}
+                                <span className="text-[11px] text-[var(--text-muted)]">
+                                  {new Date(bv.createdAt).toLocaleString('vi-VN')}
+                                </span>
+                                <span className="text-[10px] font-mono text-[var(--text-muted)] hidden md:inline">
+                                  SHA: {bv.sha256?.slice(0, 8)}...
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setPreviewBot(bv)}
+                                  className="px-2 py-0.5 rounded text-[11px] border border-[var(--border-subtle)] hover:bg-[var(--bg-hover)] cursor-pointer"
+                                >
+                                  Kiểm tra mã
+                                </button>
+                                {!isCurrent && (
+                                  <button
+                                    type="button"
+                                    disabled={selectingBotVersion}
+                                    onClick={() => handleSelectBotVersion(bv.version)}
+                                    className="px-2.5 py-0.5 rounded text-[11px] font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer disabled:opacity-50"
+                                  >
+                                    Chọn bản này đi đấu
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Stage Rules Summary */}
                 <div className="text-xs text-[var(--text-secondary)] pt-1 leading-relaxed">
                   {t.status === 'registration' ? (
@@ -923,10 +1077,56 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     </span>
                   ) : (
                     <span>
-                      Quy tắc Thực Chiến: Ghép cùng bậc hạng trong Sprint hiện tại · Thắng +1 Sao, Hòa 0 Sao, Thua -1 Sao · Đầu mỗi Sprint tuần mới xét lại hạng.
+                      Quy tắc Thực Chiến (Sprint): Khóa đăng ký · Không tính Elo cá nhân khi thi đấu Sprint (chỉ tính điểm leo Sao/BXH) · Giới hạn 1s/nước đi · Thắng +1 Sao, Hòa 0 Sao, Thua -1 Sao · Đầu mỗi Sprint tuần mới xét lại hạng.
                     </span>
                   )}
                 </div>
+
+                {/* Boss Challenge Notification Banner */}
+                {myEntry && t.status === 'qualifying' && myEntry.tier !== 'Challenger' && (
+                  (() => {
+                    const boss = RANK_BOSS_CONFIG[myEntry.tier];
+                    const isEligible = boss && myEntry.rank_stars >= boss.starsRequired;
+                    if (!isEligible) return null;
+                    const failStars = Math.floor(myEntry.rank_stars * 2 / 3);
+                    return (
+                      <div className="p-4 rounded-xl border border-purple-500/40 bg-gradient-to-r from-purple-950/40 via-red-950/30 to-purple-950/40 space-y-2.5 shadow-lg">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="p-1.5 rounded-lg bg-purple-500/20 text-purple-300 ring-1 ring-purple-500/40 animate-pulse">
+                              <Flame className="w-4 h-4 text-amber-400" />
+                            </span>
+                            <div>
+                              <h4 className="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                                Cửa ải thăng hạng: {boss.name}
+                                <span className="px-2 py-0.5 text-[10px] rounded-full bg-red-500/20 text-red-300 border border-red-500/30">
+                                  Độ khó: {boss.difficultyLabel}
+                                </span>
+                              </h4>
+                              <p className="text-[11px] text-slate-300">
+                                Bạn đã tích lũy đủ <strong>{myEntry.rank_stars}/{boss.starsRequired} Sao</strong>. Vượt qua Boss để thăng lên bậc <strong>{TIER_VIET[boss.promoteTo]}</strong>!
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowBossModal(true)}
+                            className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-purple-600 via-pink-600 to-amber-600 hover:brightness-110 shadow-md flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Skull className="w-4 h-4" />
+                            Khiêu Chiến Boss Ngay
+                          </button>
+                        </div>
+                        <div className="text-[11px] text-amber-200/80 bg-black/20 p-2 rounded-lg border border-amber-500/20 flex items-start gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                          <span>
+                            <strong>Luật Cửa Ải:</strong> Thắng (Pass) ➔ Lên hạng ngay. Thua hoặc Hòa (K-Pass) ➔ Giảm <strong>2/3</strong> số sao hiện tại (từ <strong>{myEntry.rank_stars}</strong> Sao còn <strong>{failStars}</strong> Sao).
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()
+                )}
 
                 {/* My Entry Status + Action Controls */}
                 <div className="pt-3 flex flex-wrap items-center justify-between gap-4 border-t border-[var(--border-subtle)]">
@@ -993,14 +1193,26 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                           Đang tìm đối thủ cùng hạng… (Hủy)
                         </button>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleFindMatch(t.id)}
-                          className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap shrink-0"
-                        >
-                          <Swords className="w-4 h-4" />
-                          {t.status === 'qualifying' ? 'Tìm đối thủ Thực Chiến' : 'Tìm trận Chạy Đà'}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          {myEntry && t.status === 'qualifying' && myEntry.tier !== 'Challenger' && myEntry.rank_stars >= ((RANK_BOSS_CONFIG as any)[myEntry.tier]?.starsRequired ?? 999) && (
+                            <button
+                              type="button"
+                              onClick={() => setShowBossModal(true)}
+                              className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-purple-600 to-amber-600 hover:brightness-110 shadow-lg cursor-pointer whitespace-nowrap shrink-0 animate-bounce"
+                            >
+                              <Skull className="w-4 h-4" />
+                              Khiêu Chiến Boss Thăng Hạng
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleFindMatch(t.id)}
+                            className="inline-flex items-center gap-1.5 px-5 py-2.5 rounded-xl text-xs font-semibold text-white bg-[var(--accent-primary)] hover:bg-[var(--accent-primary-hover)] cursor-pointer whitespace-nowrap shrink-0"
+                          >
+                            <Swords className="w-4 h-4" />
+                            {t.status === 'qualifying' ? 'Tìm đối thủ Thực Chiến' : 'Tìm trận Chạy Đà'}
+                          </button>
+                        </div>
                       )}
                     </div>
                   )}

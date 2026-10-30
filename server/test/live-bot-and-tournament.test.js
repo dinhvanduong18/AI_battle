@@ -1120,23 +1120,23 @@ test('2-Stage Individual Tournament E2E: Stage A practice (0 Star/0 Elo), Stage 
     assert.equal(t1Before.data.tournament.current_week, 2);
     assert.equal(t1Before.data.leaderboardHidden, true);
     assert.deepEqual(t1Before.data.standings, []);
-    // Seeded Linh Đan is Gold with 7 stars in t1 -> verify nextSprintPreview in motivationBanner is Silver 14 Sao!
+    // Seeded Linh Đan is Gold with 7 stars in t1 (x = 37, x_max = 112, k = 224) -> verify nextSprintPreview in motivationBanner is Gold 1 Sao!
     assert.equal(t1Before.data.myEntry.tier, 'Gold');
     assert.equal(t1Before.data.myEntry.rank_stars, 7);
     assert.equal(t1Before.data.motivationBanner.currentTotal, 37);
-    assert.equal(t1Before.data.motivationBanner.nextSprintTotal, 24);
-    assert.equal(t1Before.data.motivationBanner.nextSprintTier, 'Silver');
-    assert.equal(t1Before.data.motivationBanner.nextSprintStars, 14);
+    assert.equal(t1Before.data.motivationBanner.nextSprintTotal, 31);
+    assert.equal(t1Before.data.motivationBanner.nextSprintTier, 'Gold');
+    assert.equal(t1Before.data.motivationBanner.nextSprintStars, 1);
 
-    // Advance Sprint 2 -> Sprint 3 (`clipped_corners`) and verify Linh Đan resets to Silver 14 Sao & Admin (Challenger 12 pts -> 112 * 2/3 = 74) resets to Master 14 Sao!
+    // Advance Sprint 2 -> Sprint 3 (`clipped_corners`) and verify Linh Đan resets to Gold 1 Sao & Admin (Challenger 12 pts -> 112 * 2/3 = 74) resets to Master 14 Sao!
     const advRes = await h.api('POST', `/api/tournaments/${seededTourId}/advance-sprint`, admin.token);
     assert.equal(advRes.status, 200);
     assert.equal(advRes.data.tournament.current_week, 3);
     assert.equal(advRes.data.tournament.rules_json.title, 'Bàn vát góc');
 
     const t1LinhDanAfter = await h.api('GET', `/api/tournaments/${seededTourId}`, linhDan.token);
-    assert.equal(t1LinhDanAfter.data.myEntry.tier, 'Silver');
-    assert.equal(t1LinhDanAfter.data.myEntry.rank_stars, 14);
+    assert.equal(t1LinhDanAfter.data.myEntry.tier, 'Gold');
+    assert.equal(t1LinhDanAfter.data.myEntry.rank_stars, 1);
 
     const t1AdminAfter = await h.api('GET', `/api/tournaments/${seededTourId}`, admin.token);
     assert.equal(t1AdminAfter.data.myEntry.tier, 'Master');
